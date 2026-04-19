@@ -1,0 +1,40 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  04 — TÜRKÇE / İNGİLİZCE DİL GEÇİŞLERİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T04-01] Türkçe soru → Türkçe cevap
+──────────────────────────────────────
+GİRDİ   : Yapay zeka nedir?
+BEKLENEN: Tamamen Türkçe cevap. İngilizce kelime karışmamalı
+          (teknik terimler hariç: "model", "AI" kabul edilebilir).
+KRITER  : Cevap dili = Türkçe.
+SONUÇ   : [ ]
+
+[T04-02] İngilizce soru → İngilizce cevap
+───────────────────────────────────────────
+GİRDİ   : What is machine learning?
+BEKLENEN: Fully English response. No Turkish mixed in.
+KRITER  : Response language = English.
+SONUÇ   : [ ]
+
+[T04-03] Dil geçişi — aynı sohbette
+──────────────────────────────────────
+GİRDİ   : (T04-01 sonrası) Now explain it in English.
+BEKLENEN: İngilizceye geçmeli. Önceki konuyu İngilizce açıklamalı.
+KRITER  : Dil geçişi yapıldı.
+SONUÇ   : [ ]
+
+[T04-04] Karışık dil girişi
+────────────────────────────
+GİRDİ   : Machine learning'de overfitting nedir?
+BEKLENEN: Soru Türkçe ağırlıklı → Türkçe cevap verilmeli.
+KRITER  : Türkçe yanıt.
+SONUÇ   : [ ]
+
+[T04-05] Teknik Türkçe
+───────────────────────
+GİRDİ   : REST API ile GraphQL arasındaki fark nedir?
+BEKLENEN: Türkçe açıklama, teknik terimler (endpoint, query, schema)
+          İngilizce kalabilir.
+KRITER  : Anlaşılır Türkçe, teknik doğruluk var.
+SONUÇ   : [ ]

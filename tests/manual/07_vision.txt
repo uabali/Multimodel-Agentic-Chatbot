@@ -1,0 +1,60 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  07 — VİZYON ANALİZİ  (Gemma 4 Multimodal)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HAZIRLIK: Her test için belirtilen görsel türünü hazırla.
+  Sistem PNG/JPG/JPEG/WEBP kabul ediyor.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T07-01] Genel görsel açıklama
+───────────────────────────────
+HAZIRLIK: Herhangi bir fotoğraf (manzara, nesne, insan)
+GİRDİ   : [Görseli yükle, hiç soru yazma]
+BEKLENEN: "Image(s) received. Ask me about it using text or voice!"
+          mesajı gelir. Analiz henüz başlamaz.
+KRITER  : Pending mekanizması çalışıyor.
+SONUÇ   : [ ]
+
+[T07-02] Görseli analiz ettirme
+────────────────────────────────
+HAZIRLIK: T07-01 devamı
+GİRDİ   : Bu görselde ne var?
+BEKLENEN: Gemma 4 Vision devreye girer. Görseli açıklar.
+          Routing "vision" olmalı.
+KRITER  : Görsel içeriğini doğru tanımlıyor.
+SONUÇ   : [ ]
+
+[T07-03] Tablo görseli → Markdown tablo
+────────────────────────────────────────
+HAZIRLIK: Ekran görüntüsü al — herhangi bir tablo içeren sayfa
+          (Excel, web tablosu, vb.)
+GİRDİ   : [Görseli yükle] Bu tabloyu çıkar
+BEKLENEN: Tabloyu Markdown formatında yeniden oluşturur.
+          | Başlık1 | Başlık2 | formatında.
+KRITER  : Tablo yapısı korunuyor.
+SONUÇ   : [ ]
+
+[T07-04] Fatura / fiş görseli
+──────────────────────────────
+HAZIRLIK: Herhangi bir fatura veya fiş fotoğrafı
+GİRDİ   : [Görseli yükle] Bu faturadan bilgileri çıkar
+BEKLENEN: Miktar, tarih, kalemler gibi bilgileri JSON veya liste olarak verir.
+          Invoice prompt otomatik seçilmeli.
+KRITER  : Yapılandırılmış çıktı. Sayılar doğru.
+SONUÇ   : [ ]
+
+[T07-05] Görsel + Belge kombinasyonu (vision_rag)
+───────────────────────────────────────────────────
+HAZIRLIK: Önce bir PDF yükle, sonra ilgili bir görsel yükle
+GİRDİ   : Bu görseldeki kavram belgede nasıl açıklanıyor?
+BEKLENEN: Vision analizi + RAG birleşimi. Her ikisinden bilgi sentezi.
+          Routing "vision_rag" olmalı.
+KRITER  : Hem görsel hem belge içeriği kullanıldı.
+SONUÇ   : [ ]
+
+[T07-06] Kod ekran görüntüsü
+─────────────────────────────
+HAZIRLIK: Bir kod snippet'in ekran görüntüsü (IDE veya web)
+GİRDİ   : [Görseli yükle] Bu kodun ne yaptığını açıkla
+BEKLENEN: Kodu okuyup açıklar. Dil tespiti yapar.
+KRITER  : Kod içeriği doğru yorumlanıyor.
+SONUÇ   : [ ]

@@ -101,6 +101,9 @@ def load_mcp_connections() -> dict[str, Any]:
     for name, cfg in servers.items():
         if not isinstance(cfg, dict):
             continue
+        if cfg.get("disabled"):
+            logger.debug("MCP server %r skipped (disabled in config)", name)
+            continue
         entry = dict(cfg)
         if entry.get("transport") is None and entry.get("command"):
             entry["transport"] = "stdio"

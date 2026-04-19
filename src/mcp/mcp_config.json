@@ -1,13 +1,5 @@
 {
   "mcpServers": {
-    "brave-search": {
-      "transport": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
-      "env": {
-        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
-      }
-    },
     "filesystem": {
       "transport": "stdio",
       "command": "npx",
@@ -17,7 +9,17 @@
         "__FILESYSTEM_ROOT__"
       ]
     },
+    "brave-search": {
+      "disabled": true,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      }
+    },
     "google-calendar": {
+      "disabled": true,
       "transport": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-google-calendar"],
@@ -27,12 +29,22 @@
       }
     },
     "gmail": {
+      "disabled": true,
       "transport": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-gmail"],
       "env": {
         "GOOGLE_CLIENT_ID": "${GOOGLE_CLIENT_ID}",
         "GOOGLE_CLIENT_SECRET": "${GOOGLE_CLIENT_SECRET}"
+      }
+    },
+    "github": {
+      "disabled": true,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
       }
     }
   }

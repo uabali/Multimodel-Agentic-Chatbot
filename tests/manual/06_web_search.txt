@@ -1,0 +1,50 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  06 — WEB ARAMA TESTLERİ  (Tavily / DuckDuckGo)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  NOT: TAVILY_API_KEY yoksa bazı testler DuckDuckGo'ya fallback yapar.
+  Bu durumda ⏭️ ATLA yerine ⚠️ KISMI olarak işaretle.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T06-01] Hava durumu — bugün
+─────────────────────────────
+GİRDİ   : İstanbul hava durumu bugün nasıl?
+BEKLENEN: Gerçek zamanlı hava bilgisi. Sıcaklık, durum.
+          Yanıtta web search step'i görünmeli (CoT).
+KRITER  : Bugünün tarihi ve sıcaklık var. Eski bilgi değil.
+SONUÇ   : [ ]
+
+[T06-02] Hava durumu — çok günlük
+───────────────────────────────────
+GİRDİ   : Ankara'da bu hafta hava nasıl olacak? 5 günlük tahmin
+BEKLENEN: Birden fazla gün için tahmin. Tablo formatı tercih edilmeli.
+KRITER  : En az 3 gün bilgisi. Makul sıcaklıklar.
+SONUÇ   : [ ]
+
+[T06-03] Güncel haber / teknoloji
+──────────────────────────────────
+GİRDİ   : Son hafta yapay zeka alanında ne gibi gelişmeler oldu?
+BEKLENEN: Web'den güncel haber getirmeli. Tarihleri belirtmeli.
+          Web search step görünmeli.
+KRITER  : Gerçek, doğrulanabilir haber başlıkları.
+SONUÇ   : [ ]
+
+[T06-04] Döviz kuru
+────────────────────
+GİRDİ   : Bugün dolar kaç TL?
+BEKLENEN: Güncel kur. Web araması yapmalı.
+KRITER  : Gerçekçi güncel değer (hafıza cevabı değil).
+SONUÇ   : [ ]
+
+[T06-05] Web araması GEREKMEZ — bilgi sorusu
+─────────────────────────────────────────────
+GİRDİ   : Python ne zaman icat edildi?
+BEKLENEN: Web araması YAPMADAN, bilgiden cevap vermeli (1991, Guido van Rossum).
+KRITER  : Web search step görünmüyor. Doğru cevap.
+SONUÇ   : [ ]
+
+[T06-06] Kaynak alıntısı
+─────────────────────────
+GİRDİ   : (T06-01 sonrası) Bu bilgiyi nereden aldın?
+BEKLENEN: Arama sonucu kaynaklarını paylaşmalı (URL veya site adı).
+KRITER  : Kaynak bilgisi var.
+SONUÇ   : [ ]

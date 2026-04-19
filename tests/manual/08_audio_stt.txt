@@ -1,0 +1,50 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  08 — SES GİRİŞİ VE STT (Whisper)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HAZIRLIK: STT_MODEL .env'de ayarlı olmalı.
+            Whisper: /whisper download ile indirebilirsin.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T08-01] Mikrofon — basit Türkçe soru
+───────────────────────────────────────
+GİRDİ   : [Mikrofon ikonuna bas] "Merhaba, nasılsın?" de
+BEKLENEN: Whisper transkribe eder → cevap gelir.
+          Transkripsiyon doğru görünmeli.
+KRITER  : Ses algılandı + yanıt geldi.
+SONUÇ   : [ ]
+
+[T08-02] Mikrofon — İngilizce soru
+────────────────────────────────────
+GİRDİ   : [Mikrofon] "What is the capital of France?" de
+BEKLENEN: İngilizce transkripsiyon + İngilizce cevap.
+KRITER  : Dil tespiti doğru.
+SONUÇ   : [ ]
+
+[T08-03] Mikrofon + Görsel kombinasyonu
+────────────────────────────────────────
+HAZIRLIK: Önce bir görsel yükle (hiç soru yazma).
+          "Image(s) received" mesajını bekle.
+GİRDİ   : [Mikrofon] "Bu görselde ne var?" de
+BEKLENEN: Pending görsel + sesli soru → Vision analizi.
+          Ses soru + görsel birleşimi çalışıyor.
+KRITER  : Vision yanıtı geldi.
+SONUÇ   : [ ]
+
+[T08-04] MP3 dosyası yükleme
+─────────────────────────────
+HAZIRLIK: Kısa bir ses kaydı MP3 olarak hazırla (telefon kaydı).
+GİRDİ   : [MP3 dosyayı attach ederek yükle]
+BEKLENEN: "Otomatik transcribe + indekslendi" mesajı.
+          Transkript RAG'a eklenmeli.
+GİRDİ 2 : Bu ses kaydında ne konuşuldu?
+BEKLENEN: Transcripti kullanarak cevap verir.
+KRITER  : STT başarılı + RAG'dan sorgulanabilir.
+SONUÇ   : [ ]
+
+[T08-05] Boş ses kaydı
+───────────────────────
+GİRDİ   : [Mikrofon aç, hiç konuşmadan kapat]
+BEKLENEN: "No audio data received" veya sessizlik uyarısı.
+          Hata vermemeli, uygulamayı çökertmemeli.
+KRITER  : Graceful hata yönetimi.
+SONUÇ   : [ ]

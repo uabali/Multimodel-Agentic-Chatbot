@@ -78,21 +78,21 @@ Access the UI at: `http://localhost:7860`
 - `src/mcp/`: MCP client loading and `mcp_config.json` specifications.
 - `src/tools/`: Custom Python tools (search, file readers, calculator).
 
-## Adding MCP Servers
+## MCP Servers
 
-To attach standard MCP servers (like GitHub or Google Calendar) to the LangGraph node, edit `src/mcp/mcp_config.json`:
+MCP (Model Context Protocol) extends the agent with external capabilities. Servers are configured in `src/mcp/mcp_config.json`. Set `"disabled": false` (or remove the field) to activate a server, then add the required env vars to `.env`.
 
-```json
-{
-  "mcpServers": {
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}" }
-    }
-  }
-}
-```
+| Server | Use Case | Required Env Vars |
+|---|---|---|
+| `filesystem` | Browse local files outside `uploads/` | `MCP_FILESYSTEM_ROOT` (optional, defaults to `uploads/`) |
+| `brave-search` | Web search fallback when Tavily/DDG are unavailable | `BRAVE_API_KEY` |
+| `google-calendar` | Summarize upcoming meetings, schedule awareness | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
+| `gmail` | Search/summarize emails combined with RAG | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
+| `github` | Query repos, issues, PRs via natural language | `GITHUB_PERSONAL_ACCESS_TOKEN` |
+
+**Default:** only `filesystem` is active (no API key required). All others have `"disabled": true` — enable them individually as needed.
+
+**Not suitable for MCP:** vector search, embeddings, PDF/image processing, or math — the pipeline already handles these natively.
 
 ## Useful Commands
 

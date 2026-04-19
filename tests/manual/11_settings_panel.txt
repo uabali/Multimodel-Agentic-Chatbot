@@ -1,0 +1,68 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  11 — AYAR PANELİ (Sol Sidebar)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HAZIRLIK: Sol sidebar açık olmalı (artık default açık).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T11-01] Sidebar görünürlüğü
+─────────────────────────────
+EYLEM   : Sayfayı yenile, sol sidebar'a bak.
+BEKLENEN: Ayarlar paneli default açık.
+          "Sesli Yanıt", "TTS Sesi", "Sıcaklık", "Max Token",
+          "Retrieval Stratejisi", "Reranker" görünüyor.
+KRITER  : 6 ayar mevcut.
+SONUÇ   : [ ]
+
+[T11-02] TTS toggle — bildirim
+────────────────────────────────
+EYLEM   : Sidebar'da "Sesli Yanıt" toggle'ını aç.
+BEKLENEN: Chat'te "🔊 Sesli yanıt **aktif**" bildirimi gelir.
+KRITER  : Bildirim mesajı görünüyor.
+SONUÇ   : [ ]
+
+[T11-03] TTS toggle — kapama
+─────────────────────────────
+EYLEM   : T11-02 sonrası toggle'ı kapat.
+BEKLENEN: "🔇 Sesli yanıt **kapalı**" bildirimi.
+KRITER  : Bildirim mesajı görünüyor.
+SONUÇ   : [ ]
+
+[T11-04] TTS + yanıt — ses çalıyor mu?
+────────────────────────────────────────
+EYLEM   : TTS aç → "Merhaba" yaz → cevabı bekle.
+BEKLENEN: Cevap gelir + otomatik MP3 oynatılır.
+          Action buton (🔊) görünmemeli (TTS zaten açık).
+KRITER  : Ses çalındı. Buton yok.
+SONUÇ   : [ ]
+
+[T11-05] Action butonu (TTS kapalıyken)
+────────────────────────────────────────
+EYLEM   : TTS kapalıyken bir soru sor, cevap al.
+BEKLENEN: Cevabın altında 🔊 butonu görünür.
+          Butona basınca ses çalar.
+KRITER  : Buton var + ses çalıştı.
+SONUÇ   : [ ]
+
+[T11-06] Temperature — yaratıcılık testi
+──────────────────────────────────────────
+EYLEM   : Temperature'ı 0.0'a çek.
+GİRDİ   : "Bir şiir yaz"
+NOT 1   : Düşük temp = deterministic = daha az yaratıcı.
+
+EYLEM   : Temperature'ı 1.2'ye çek.
+GİRDİ   : "Bir şiir yaz"
+NOT 2   : Yüksek temp = daha yaratıcı / beklenmedik.
+
+BEKLENEN: İki cevap farklı tonda olmalı.
+KRITER  : Değişiklik gözlemlendi.
+SONUÇ   : [ ]
+
+[T11-07] Reranker açık/kapalı
+──────────────────────────────
+HAZIRLIK: Bir belge yükle.
+EYLEM 1 : Reranker KAPALI → soru sor → cevap al.
+EYLEM 2 : Reranker AÇIK → aynı soruyu sor → cevap al.
+BEKLENEN: Reranker açıkken kaynak alıntılar daha alakalı olabilir.
+          En azından iki yanıt da geliyor (çökmüyor).
+KRITER  : Her iki modda da cevap geliyor.
+SONUÇ   : [ ]

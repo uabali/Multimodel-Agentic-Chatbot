@@ -1,0 +1,76 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  05 — BELGE YÜKLEME + RAG SORGULARI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ÖNERİLEN TEST BELGESİ:
+  Herhangi bir PDF/DOCX/TXT hazırla veya şu örneği kullan:
+  - README.md dosyasını yükle (proje kök dizininde)
+  - ya da kendi bir CV/makale/rapor PDF'i
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── HAZIRLIK ────────────────────────────────────────────────────────────
+ADIM 1: Chat'e bir PDF veya TXT yükle (drag & drop veya /upload).
+        "X chunk indekslendi" mesajını bekle.
+ADIM 2: Aşağıdaki testleri sırayla uygula.
+
+[T05-01] Belge varlığını doğrulama
+────────────────────────────────────
+GİRDİ   : Bu belgede ne anlatılıyor?
+BEKLENEN: Belgenin içeriğinden özet verir.
+          "Bu bilgi yüklenen belgelerde yer almamaktadır" dememeli.
+          Cevabın altında RAG kaynakları görünmeli (yan panel).
+KRITER  : Kaynak paneli açılıyor + içerik doğru.
+SONUÇ   : [ ]
+
+[T05-02] Belge içinden spesifik bilgi
+───────────────────────────────────────
+GİRDİ   : (Belgendeki spesifik bir bilgiyi sor — örn. "LLM Engine nedir?"
+           eğer README yüklediysen)
+BEKLENEN: Yüklediğin belgeden bilgiyi çekip cevap vermeli.
+          "Belgeye göre:" ifadesiyle atıf yapmalı.
+KRITER  : Kaynak atıfı var. Halüsinasyon yok.
+SONUÇ   : [ ]
+
+[T05-03] Belgede olmayan bilgi
+───────────────────────────────
+GİRDİ   : Bu belgede React.js kurulumu nasıl yapılır?
+           (Belgede bu bilgi yoksa)
+BEKLENEN: "Bu bilgi yüklenen belgelerde yer almamaktadır" veya
+          web aramasına geçmeli (CRAG fallback).
+KRITER  : Hallüsinasyon YOK. Dürüst "bilmiyorum" veya web search.
+SONUÇ   : [ ]
+
+[T05-04] Follow-up soru (bağlam korunuyor mu?)
+────────────────────────────────────────────────
+GİRDİ   : (T05-02 sonrası) Bunu daha basit anlat
+BEKLENEN: Önceki cevabı baz alarak sadeleştirmeli.
+          Belgeye tekrar gitmeden önceki bilgiyle cevap verebilir.
+KRITER  : Bağlam korunuyor.
+SONUÇ   : [ ]
+
+[T05-05] Hybrid retrieval — ilgisiz soru + belge
+──────────────────────────────────────────────────
+GİRDİ   : (Belge yüklüyken) İstanbul hava durumu nedir?
+BEKLENEN: RAG'a gitmemeli. Web aramasına yönlenmeli.
+          "Bu sorunun cevabı belgede yok" demeden direkt web araması.
+KRITER  : Routing doğru → web search tetikleniyor.
+SONUÇ   : [ ]
+
+[T05-06] Dense gate — alakasız soru filtresi
+─────────────────────────────────────────────
+GİRDİ   : (Belge yüklüyken) 2+2 kaç eder?
+BEKLENEN: RAG'a gitmiyor, direkt cevap: "4"
+KRITER  : Calculator veya direct cevap. Kaynak paneli yok.
+SONUÇ   : [ ]
+
+[T05-07] CSV / XLSX yükleme
+────────────────────────────
+HAZIRLIK: Basit bir CSV dosyası oluştur:
+          isim,yas,sehir
+          Ahmet,25,İstanbul
+          Mehmet,30,Ankara
+          Ayşe,22,İzmir
+
+GİRDİ   : Bu tabloda kaç kişi var ve hangi şehirlerden?
+BEKLENEN: 3 kişi. İstanbul, Ankara, İzmir.
+KRITER  : Tablo verisi doğru çözümlendi.
+SONUÇ   : [ ]

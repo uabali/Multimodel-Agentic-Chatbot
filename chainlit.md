@@ -1,45 +1,37 @@
-# RAG Agent — Unified Pipeline
+# Frappe — Multimodal RAG Agent
 
-Agentic RAG Pipeline with MCP, hybrid retrieval, reranking, and multimodal support.
+Belgeler, görseller, sesli sorular ve web araması — hepsi tek arayüzde.
 
-## Komutlar
+## Hızlı Başlangıç
 
-| Komut | Açıklama |
+| Komut | Ne Yapar |
 |---|---|
-| `/upload` | Dosya yükle (PDF, DOCX, TXT, MD, XLSX, CSV, ses) |
-| `/url <adres>` | Web sayfasını scrape edip RAG'a ekle |
-| `/tts <ses>` | TTS sesini değiştir (AhmetNeural, EmelNeural, auto...) |
-| `/models` | Aktif modelleri listele |
-| `/whisper download` | Whisper modelini indir |
+| `/upload` | PDF, DOCX, TXT, XLSX, CSV veya ses dosyası yükle |
+| `/url <adres>` | Web sayfasını scrape edip bilgi tabanına ekle |
+| `/tts <ses>` | Sesli yanıtı aç / ses değiştir (`AhmetNeural`, `EmelNeural`, `auto`…) |
+| `/models` | Aktif model isimlerini listele |
+| `/whisper download` | Whisper STT modelini indir |
 
 ## Desteklenen Girdiler
 
-- **Metin**: Doğrudan chat mesajı
-- **Görsel**: PNG, JPG, JPEG, WEBP (drag & drop veya attach)
-- **Ses (mikrofon)**: Chainlit mic butonu → Whisper STT
-- **Ses dosyası**: MP3, WAV, OGG (yükle → otomatik transcribe → RAG'a ingest)
-- **Belgeler**: PDF, DOCX, TXT, MD → chunk → Qdrant
-- **Tablo**: XLSX, CSV → Qdrant
-- **URL**: `/url` komutuyla web sayfası içeriği
+- **Metin** — doğrudan yaz
+- **Görsel** — PNG / JPG / WEBP ekle, Gemma 4 Vision analiz eder
+- **Mikrofon** — mikrofon ikonuna bas, Whisper transkribe eder
+- **Ses dosyası** — MP3 / WAV / OGG yükle → otomatik transkribe + indeksle
+- **Belge** — PDF / DOCX / TXT / MD / XLSX / CSV → Qdrant'a ingest
+- **URL** — `/url` komutuyla web içeriği
 
-## Desteklenen Çıktılar
+## Ayarlar (Sol Panel)
 
-- **Metin (streaming)**: Gerçek zamanlı token akışı
-- **Ses (TTS)**: edge-TTS ile MP3 çıktı (ayarlardan açılabilir)
-- **RAG kaynakları**: Cevabın altında kaynak alıntıları
-- **Web arama sonuçları**: Inline step gösterimi
-- **Action butonları**: 🔊 Sesli dinle (TTS açık değilse her yanıtta görünür)
+Sohbet boyunca istediğin zaman değiştirebilirsin:
 
-## Özellikler
-
-- **Hybrid Retrieval**: Dense + BM25 ile RRF birleştirme
-- **Reranking**: Cross-encoder ile hassasiyet artırma
-- **Dense Gate**: İlgisiz sorularda yanlış alıntı engeli
-- **Web Search**: Brave MCP → Tavily → DuckDuckGo zinciri
-- **Vision**: Gemma 4 multimodal görsel analiz
-- **MCP**: GitHub, filesystem entegrasyonu
-- **Ayar Paneli**: Temperature, max_tokens, strateji, TTS
+- **Sesli Yanıt (TTS)** — edge-TTS ile MP3 çıktı
+- **TTS Sesi** — Türkçe / İngilizce ses seçenekleri
+- **Temperature** — düşük = tutarlı, yüksek = yaratıcı
+- **Max Token** — yanıt uzunluğu
+- **Retrieval Stratejisi** — hybrid / similarity / mmr / threshold
+- **Reranker** — cross-encoder ile hassasiyet artırma
 
 ---
 
-**Stack**: LangGraph + llama.cpp + Qdrant + Chainlit + edge-TTS + faster-whisper + MCP
+**Stack:** LangGraph · llama.cpp · Qdrant · Chainlit · edge-TTS · faster-whisper · MCP

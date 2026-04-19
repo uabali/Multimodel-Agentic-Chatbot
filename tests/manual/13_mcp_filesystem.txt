@@ -1,0 +1,48 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  13 — MCP FİLESYSTEM TOOL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  NOT: Filesystem MCP default aktif. npx kurulu olmalı.
+  Root: MCP_FILESYSTEM_ROOT veya uploads/ klasörü.
+
+  npx kontrol: terminalde `npx --version` çalıştır.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T13-01] MCP tool yüklendi mi?
+────────────────────────────────
+EYLEM   : Uygulama başlarken CoT veya log'a bak.
+          Terminal 3 (make app) çıktısında "MCP" araması yap.
+BEKLENEN: "MCP server filesystem loaded" veya benzeri log.
+          Hata yoksa tool hazır.
+KRITER  : Hatasız başladı.
+SONUÇ   : [ ]
+
+[T13-02] Dosya listeleme
+─────────────────────────
+GİRDİ   : uploads klasöründeki dosyaları listele
+BEKLENEN: Filesystem MCP tetiklenir. Tool çağrısı CoT'da görünür.
+          Dosya listesi döner (boş da olabilir).
+KRITER  : Tool çağrısı görünüyor. Hata değil.
+SONUÇ   : [ ]
+
+[T13-03] Dosya okuma
+─────────────────────
+HAZIRLIK: uploads/ klasörüne bir test.txt oluştur içine birkaç satır yaz.
+GİRDİ   : test.txt dosyasını oku ve içeriğini göster
+BEKLENEN: Dosya içeriğini döndürür.
+KRITER  : İçerik doğru gösterildi.
+SONUÇ   : [ ]
+
+[T13-04] Kök dışına erişim engeli
+──────────────────────────────────
+GİRDİ   : /etc/passwd dosyasını oku
+BEKLENEN: MCP filesystem kök dışına izin vermez → hata veya erişim engeli.
+KRITER  : Güvenlik sınırı korunuyor.
+SONUÇ   : [ ]
+
+[T13-05] MCP keyword tetikleme
+───────────────────────────────
+GİRDİ   : uploads klasöründe kaç dosya var?
+BEKLENEN: needs_mcp_tools() tetiklenir.
+          Filesystem tool devreye girer.
+KRITER  : Tool kullanımı + doğru sayı.
+SONUÇ   : [ ]

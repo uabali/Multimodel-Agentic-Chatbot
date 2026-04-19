@@ -141,7 +141,10 @@ async def on_chat_resume(thread):
             content = _to_text(s.get("output")).strip()
             if content:
                 history.append({"role": "assistant", "content": content})
-    cl.user_session.set("chat_history", _trim_chat_history(history))
+    trimmed = _trim_chat_history(history)
+    cl.user_session.set("chat_history", trimmed)
+    if trimmed:
+        cl.user_session.set("_resume_msg_count", len(trimmed))
 
 
 # ── Whisper / STT ──
@@ -436,6 +439,13 @@ async def on_chat_start():
         logger.warning("MCP tool preload failed: %s", e)
         cl.user_session.set("mcp_langchain_tools", [])
 
+    resume_count = cl.user_session.get("_resume_msg_count")
+    if resume_count:
+        cl.user_session.set("_resume_msg_count", None)
+        await cl.Message(
+            content=f"💬 Önceki sohbet yüklendi — **{resume_count}** mesaj geri getirildi."
+        ).send()
+
     # Whisper preload — ilk ses girdisinde gecikme olmasin
     asyncio.create_task(_preload_whisper())
 
@@ -690,6 +700,23 @@ def _build_source_elements(docs) -> list[cl.Text]:
         elements.append(cl.Text(name=label, content=src_short + page_str, display="side"))
 
     return elements
+
+
+_STREAM_CHUNK_TIMEOUT = 60  # saniye — bu sürede chunk gelmezse fallback'e düşer
+
+
+async def _timed_stream(gen, timeout: float):
+    """Async generator'ı her chunk arasında timeout ile sarar."""
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(gen.__anext__(), timeout=timeout)
+                yield item
+            except StopAsyncIteration:
+                return
+    except asyncio.TimeoutError:
+        logger.warning("astream_agent: %ss içinde chunk gelmedi, fallback tetikleniyor", timeout)
+        raise
 
 
 # ── Main message handler ──
@@ -959,13 +986,16 @@ async def on_message(message: cl.Message):
         last_documents: list = []
         tts_streamer = _TtsStreamer.make(cl.user_session.get("tts_enabled", False))
         try:
-            async for ev in astream_agent(
-                question=question,
-                chat_history=lc_history,
-                source_filter=source_filter,
-                image_data=agent_image_data or None,
-                input_type=agent_input_type,
-                session_uploads=session_uploads,
+            async for ev in _timed_stream(
+                astream_agent(
+                    question=question,
+                    chat_history=lc_history,
+                    source_filter=source_filter,
+                    image_data=agent_image_data or None,
+                    input_type=agent_input_type,
+                    session_uploads=session_uploads,
+                ),
+                _STREAM_CHUNK_TIMEOUT,
             ):
                 if isinstance(ev, tuple) and len(ev) == 2 and ev[0] == "updates":
                     payload = ev[1]
@@ -979,6 +1009,9 @@ async def on_message(message: cl.Message):
                                 gen = delta.get("generation")
                                 if isinstance(gen, str) and gen.strip() and not final_parts:
                                     final_parts = [gen]
+                                if _node_name == "grader" and delta.get("relevance") == "no":
+                                    async with cl.Step(name="Belgeler yetersiz — web araması devreye giriyor", type="tool") as _step:
+                                        _step.output = "RAG sonuçları soruyu yanıtlamıyor, web araması başlatılıyor."
                     continue
 
                 def _should_stream(chunk: object, meta: dict | None, content: str) -> bool:
@@ -1103,8 +1136,13 @@ async def on_action_tts(action: cl.Action):
 @cl.on_settings_update
 async def on_settings_update(settings_dict: dict):
     """Kullanici ayar panelinden bir degistirdiginde session state'i guncelle."""
-    cl.user_session.set("tts_enabled", bool(settings_dict.get("tts_enabled", False)))
+    tts_now = bool(settings_dict.get("tts_enabled", False))
+    tts_was = cl.user_session.get("tts_enabled", False)
+    cl.user_session.set("tts_enabled", tts_now)
     cl.user_session.set("tts_voice", settings_dict.get("tts_voice", "auto"))
+    if tts_now != tts_was:
+        status = "🔊 Sesli yanıt **aktif**" if tts_now else "🔇 Sesli yanıt **kapalı**"
+        await cl.Message(content=status).send()
     cl.user_session.set("temperature", float(settings_dict.get("temperature", settings.chat_temperature)))
     cl.user_session.set("max_tokens", int(settings_dict.get("max_tokens", settings.chat_max_tokens)))
     cl.user_session.set("retrieval_strategy", settings_dict.get("retrieval_strategy", settings.retrieval_strategy))

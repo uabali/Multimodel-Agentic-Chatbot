@@ -1,0 +1,55 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  01 — DOĞRUDAN BASIT SORULAR  (routing: direct)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Yeni bir sohbet başlat. Hiçbir dosya yükleme.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T01-01] Selamlama
+──────────────────
+GİRDİ   : Merhaba
+BEKLENEN: Kısa, dostane selamlama.
+          Madde madde format, başlık veya araç çağrısı OLMAMALI.
+KRITER  : 1-3 cümle. Türkçe.
+SONUÇ   : [ ]
+
+[T01-02] Basit tanım
+─────────────────────
+GİRDİ   : Transformer mimarisi nedir?
+BEKLENEN: Kısa ve öz açıklama. Encoder-decoder, attention mekanizması
+          ana hatlarıyla geçmeli. 5-8 cümleyi geçmemeli.
+          CNN öğretmeye çalışmamalı, konu dışına çıkmamalı.
+KRITER  : Kompakt. Madde kullanabilir ama 3'ten fazla olmamalı.
+SONUÇ   : [ ]
+
+[T01-03] Tek örnek isteği
+──────────────────────────
+GİRDİ   : 3x3 matris örneği ver
+BEKLENEN: Sadece bir matris gösterilmeli.
+          CNN, convolution, kernel açıklaması OLMAMALI.
+          LaTeX ile düzgün render edilmeli.
+KRITER  : Matris + en fazla 1 satır açıklama.
+SONUÇ   : [ ]
+
+[T01-04] Python kodu
+─────────────────────
+GİRDİ   : Python'da fibonacci dizisini yazan fonksiyon yaz
+BEKLENEN: Çalışan Python kodu. Açıklama kısa (isteğe bağlı).
+          Fonksiyon dışında başka kod verilmemeli.
+KRITER  : Kod bloğu içinde, fazladan başlık yok.
+SONUÇ   : [ ]
+
+[T01-05] Kısa bilgi sorusu
+───────────────────────────
+GİRDİ   : Türkiye'nin başkenti neresi?
+BEKLENEN: "Ankara" veya tek cümlelik cevap.
+          Ankara hakkında paragraf dolusu bilgi verilmemeli.
+KRITER  : 1 cümle.
+SONUÇ   : [ ]
+
+[T01-06] Sohbet devamı
+───────────────────────
+GİRDİ   : (T01-04 sonrası) Recursive versiyonunu da yazar mısın?
+BEKLENEN: Önceki sohbet bağlamını hatırlayarak recursive fibonacci verir.
+          "Önceki soruyu tekrar etmeden" direkt kodu verir.
+KRITER  : Bağlam korunuyor mu?
+SONUÇ   : [ ]

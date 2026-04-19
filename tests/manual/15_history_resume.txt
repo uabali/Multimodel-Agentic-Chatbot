@@ -1,0 +1,61 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  15 — SOHBET GEÇMİŞİ VE RESUME
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T15-01] Kısa vadeli bağlam
+────────────────────────────
+GİRDİ 1 : Benim adım Ahmet.
+GİRDİ 2 : Benim adım ne?
+BEKLENEN: "Ahmet" der. 2 mesaj arası bağlam korunuyor.
+KRITER  : Doğru isim döndü.
+SONUÇ   : [ ]
+
+[T15-02] Çok mesajlı bağlam
+────────────────────────────
+EYLEM   : 5-6 farklı soru sor (farklı konular).
+GİRDİ   : "İlk sorduğum soru neydi?"
+BEKLENED: İlk soruyu hatırlamalı (20 mesaj limitine kadar).
+KRITER  : Bağlam korunuyor.
+SONUÇ   : [ ]
+
+[T15-03] Sohbet kaydedildi mi? (SQLite)
+────────────────────────────────────────
+EYLEM 1 : Birkaç mesaj yaz.
+EYLEM 2 : Sayfayı tamamen kapat (tarayıcı sekmesi).
+EYLEM 3 : http://localhost:7860'ı tekrar aç.
+BEKLENED: Sol sidebar'da önceki sohbet thread'i görünür.
+KRITER  : Thread listesi dolu.
+SONUÇ   : [ ]
+
+[T15-04] Sohbet resume — bildirim
+──────────────────────────────────
+EYLEM   : T15-03'teki eski sohbete tıkla (resume).
+BEKLENED: "💬 Önceki sohbet yüklendi — X mesaj geri getirildi." bildirimi.
+KRITER  : Bildirim mesajı görünüyor.
+SONUÇ   : [ ]
+
+[T15-05] Resume sonrası bağlam
+────────────────────────────────
+EYLEM   : Resume edilen sohbette yeni soru sor (önceki konuya referans).
+GİRDİ   : "Önceki konuşmamızı özetle"
+BEKLEDED: Önceki mesajları baz alarak özet yapar.
+KRITER  : Bağlam resume edildi.
+SONUÇ   : [ ]
+
+[T15-06] Yeni sohbet başlatma
+──────────────────────────────
+EYLEM   : "New Chat" butonuna bas. Onay sorarsa onayla.
+GİRDİ   : "Benim adım ne?"
+BEKLEDED: Önceki sohbetten bilgi taşımamalı.
+          "Adınızı bilmiyorum" veya benzeri.
+KRITER  : Bağlam sıfırlandı.
+SONUÇ   : [ ]
+
+[T15-07] Session temizleme — upload klasörü
+────────────────────────────────────────────
+EYLEM 1 : Bir dosya yükle.
+EYLEM 2 : Sohbeti kapat (New Chat veya oturumu sonlandır).
+EYLEM 3 : Terminalde `ls uploads/session_*` çalıştır.
+BEKLENED: Session klasörü silinmiş olmalı (on_chat_end temizler).
+KRITER  : uploads/session_<id> dizini yok.
+SONUÇ   : [ ]

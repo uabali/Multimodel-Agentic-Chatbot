@@ -1,0 +1,46 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  03 — MATEMATİK VE HESAP MAKİNESİ TOOL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Calculator tool'un (src/tools/calculator.py) doğru tetiklenip
+  tetiklenmediğini ve sonucun doğruluğunu test eder.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T03-01] Temel aritmetik
+─────────────────────────
+GİRDİ   : 347 * 819 kaçtır?
+BEKLENEN: Calculator tool çağrılmalı (CoT'da görünmeli).
+          Cevap: 284,193
+KRITER  : Tool çağrısı görünüyor + doğru sonuç.
+SONUÇ   : [ ]
+
+[T03-02] Üs alma
+─────────────────
+GİRDİ   : 2'nin 32. kuvveti nedir?
+BEKLENEN: Calculator çağrılmalı. Sonuç: 4,294,967,296
+KRITER  : Tool kullanıldı + doğru.
+SONUÇ   : [ ]
+
+[T03-03] Virgüllü sayı
+───────────────────────
+GİRDİ   : 1234.56 * 9.87 = ?
+BEKLENEN: Sonuç: 12,185.1072
+KRITER  : Hassas ondalık hesap.
+SONUÇ   : [ ]
+
+[T03-04] Zincirleme hesap
+──────────────────────────
+GİRDİ   : 100 metrekarelik bir dairenin fiyatı metrekaresi 45.000 TL ise
+          toplam fiyat nedir? KDV %20 eklenirse?
+BEKLENEN: Adım 1: 100 * 45000 = 4,500,000 TL
+          Adım 2: 4,500,000 * 1.20 = 5,400,000 TL
+          Her adımda calculator kullanmalı.
+KRITER  : 2 tool çağrısı + doğru sonuçlar.
+SONUÇ   : [ ]
+
+[T03-05] Saf bilgi sorusu — tool kullanmamalı
+──────────────────────────────────────────────
+GİRDİ   : Pi sayısı nedir?
+BEKLENEN: Calculator kullanmadan, bilgiden cevap vermeli.
+          "Pi ≈ 3.14159..." gibi kısa cevap.
+KRITER  : Gereksiz tool çağrısı yok.
+SONUÇ   : [ ]

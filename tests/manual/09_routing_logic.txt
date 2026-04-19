@@ -1,0 +1,76 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  09 — ROUTER DOĞRULUĞU TESTLERİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CoT (Chain of Thought) açık olduğu için routing kararı görünür.
+  Her testte CoT panelinden hangi route seçildiğini kontrol et.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── Hiçbir Belge Yokken ──────────────────────────────────────────────
+
+[T09-01] "direct" route — genel bilgi
+───────────────────────────────────────
+GİRDİ   : Docker nedir?
+BEKLENEN: Route = direct. RAG çalışmaz, web araması da yok.
+          Bilgiden kısa cevap.
+KRITER  : CoT'da "direct" görünüyor.
+SONUÇ   : [ ]
+
+[T09-02] "direct" route — matematik
+─────────────────────────────────────
+GİRDİ   : 15 factorial hesapla
+BEKLENEN: Route = direct. Calculator tool kullanılır.
+KRITER  : CoT "direct" + calculator çağrısı.
+SONUÇ   : [ ]
+
+[T09-03] Web arama tetikleyici — hava durumu
+─────────────────────────────────────────────
+GİRDİ   : Ankara hava durumu
+BEKLENEN: Route = direct → web_search tetiklenir.
+          Gerçek zamanlı veri.
+KRITER  : Web search step görünüyor.
+SONUÇ   : [ ]
+
+── Belge Yüklendikten Sonra ─────────────────────────────────────────
+
+[T09-04] "rag" route — belge sorusu
+─────────────────────────────────────
+HAZIRLIK: Bir PDF yükle
+GİRDİ   : Bu belgede ne anlatılıyor?
+BEKLENEN: Route = rag. Retriever → Grader → Generator çalışır.
+          Yan panelde kaynak görünür.
+KRITER  : CoT "rag" + kaynak paneli açık.
+SONUÇ   : [ ]
+
+[T09-05] "direct" route — belge yüklüyken genel soru
+──────────────────────────────────────────────────────
+HAZIRLIK: Belge yüklü
+GİRDİ   : Python'da liste nasıl oluşturulur?
+BEKLENEN: Route = direct. Belge içeriğine gitmez.
+          Genel Python cevabı.
+KRITER  : CoT "direct". Kaynak paneli YOK.
+SONUÇ   : [ ]
+
+[T09-06] Grader "no" → web search fallback
+───────────────────────────────────────────
+HAZIRLIK: Alakasız bir belge yükle (örn. Python kodu içeren TXT)
+GİRDİ   : Bu belgede İklim değişikliği hakkında ne yazıyor?
+BEKLENEN: Grader: belgeler yetersiz → web aramasına geçiyor.
+          "Belgeler yetersiz" step görünmeli (yeni eklediğimiz).
+KRITER  : Step bildirimi + web search sonuçları.
+SONUÇ   : [ ]
+
+[T09-07] "vision" route — görsel
+──────────────────────────────────
+GİRDİ   : [Görsel yükle + "Bu ne?" sorusu]
+BEKLENEN: Route = vision.
+KRITER  : CoT "vision" görünüyor.
+SONUÇ   : [ ]
+
+[T09-08] Rewriter node — kısa soru
+────────────────────────────────────
+HAZIRLIK: Belge yüklü
+GİRDİ   : bunu açıkla
+BEKLENEN: Rewriter, önceki bağlamı kullanarak soruyu genişletir.
+          CoT'da rewriter adımı görünmeli.
+KRITER  : Soru genişledi (ya da "kısa/net sorgular atlandı").
+SONUÇ   : [ ]

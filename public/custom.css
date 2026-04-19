@@ -1,0 +1,50 @@
+/* ── Frappe — Custom Dark Theme ─────────────────────────────── */
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #4a3728; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #c87941; }
+
+/* Message bubbles — slight warm tint on assistant */
+[data-testid="assistant-message"] .message-content {
+  border-left: 2px solid #c87941;
+  padding-left: 10px;
+}
+
+/* Code blocks */
+pre, code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace !important;
+  font-size: 0.85em !important;
+}
+
+/* Step / tool call blocks */
+[data-testid="step"] {
+  border-left: 2px solid #7a4f2a !important;
+  opacity: 0.9;
+}
+
+/* Settings sidebar header */
+.sidebar-header {
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+/* Input area — subtle glow on focus */
+[contenteditable="true"]:focus,
+textarea:focus {
+  box-shadow: 0 0 0 1px #c87941 !important;
+  outline: none !important;
+}
+
+/* Avatar size bump */
+.avatar img { width: 28px !important; height: 28px !important; }
+
+/* Starter buttons */
+[data-testid="starter"] {
+  border: 1px solid #4a3728 !important;
+  transition: border-color 0.2s;
+}
+[data-testid="starter"]:hover {
+  border-color: #c87941 !important;
+}

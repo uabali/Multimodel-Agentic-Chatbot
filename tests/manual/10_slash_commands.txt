@@ -1,0 +1,64 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  10 — SLASH KOMUTLARI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T10-01] /models
+──────────────────
+GİRDİ   : /models
+BEKLENEN: LLM, Embedding, STT, Reranker model isimlerini listeler.
+          Format: bold başlıklar + model adları.
+KRITER  : En az LLM ve Embedding görünüyor.
+SONUÇ   : [ ]
+
+[T10-02] /upload — interaktif dialog
+──────────────────────────────────────
+GİRDİ   : /upload
+BEKLENEN: "Dosya yükle..." dialog açılır. Dosya seçince ingest eder.
+          "X chunk indekslendi" mesajı.
+KRITER  : Dialog açıldı + dosya yüklendi.
+SONUÇ   : [ ]
+
+[T10-03] /tts — ses değiştirme
+────────────────────────────────
+GİRDİ   : /tts AhmetNeural
+BEKLENEN: "TTS sesi ayarlandı: tr-TR-AhmetNeural (TTS aktif)"
+KRITER  : Ses adı doğru + TTS açıldı.
+SONUÇ   : [ ]
+
+[T10-04] /tts — bilgi gösterme
+────────────────────────────────
+GİRDİ   : /tts
+BEKLENEN: Mevcut ses adı + kullanılabilir ses listesi gösterilir.
+KRITER  : Liste eksiksiz.
+SONUÇ   : [ ]
+
+[T10-05] /tts — kısaltma
+──────────────────────────
+GİRDİ   : /tts emel
+BEKLENEN: "tr-TR-EmelNeural" olarak ayarlanmalı (kısaltma çözümlendi).
+KRITER  : Tam ad genişletildi.
+SONUÇ   : [ ]
+
+[T10-06] /url — URL ingest
+───────────────────────────
+GİRDİ   : /url https://tr.wikipedia.org/wiki/Yapay_zeka
+BEKLENEN: "İndiriliyor..." → "X chunk indekslendi."
+          Sonrasında Wikipedia içeriği sorgulanabilir.
+NOT     : İnternet bağlantısı gerekli.
+KRITER  : Chunk sayısı > 0. Sonra "Yapay zeka nedir?" sorusu RAG'dan cevap alır.
+SONUÇ   : [ ]
+
+[T10-07] /url — geçersiz URL
+─────────────────────────────
+GİRDİ   : /url bu_gecersiz_bir_url
+BEKLENEN: "Geçersiz URL" hata mesajı. Uygulama çökmez.
+KRITER  : Graceful hata.
+SONUÇ   : [ ]
+
+[T10-08] /whisper download
+────────────────────────────
+GİRDİ   : /whisper download
+BEKLENEN: "Downloading Whisper..." → "Whisper ready: <model_adı>"
+          Zaten yüklüyse hızlı döner.
+KRITER  : Hata yok.
+SONUÇ   : [ ]

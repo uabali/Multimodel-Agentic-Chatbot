@@ -1,0 +1,58 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  12 — STREAMING VE TTS KALİTESİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T12-01] Token streaming
+──────────────────────────
+GİRDİ   : Makine öğrenmesinin tarihini anlat
+BEKLENEN: Cevap kelime kelime / chunk chunk gelir (streaming).
+          Tek seferde patlama gibi gelmez.
+KRITER  : Görsel olarak token akışı gözlemleniyor.
+SONUÇ   : [ ]
+
+[T12-02] Streaming timeout — yavaş model
+──────────────────────────────────────────
+GİRDİ   : Çok uzun ve detaylı bir soru: "Dünya tarihini başından
+          sonuna kadar mümkün olduğunca detaylı anlat"
+BEKLENEN: 60 saniye içinde chunk gelmezse fallback devreye girer.
+          Ya yanıt üretilir ya da "lütfen tekrar deneyin" mesajı.
+KRITER  : Uygulama takılı kalmıyor.
+SONUÇ   : [ ]
+
+[T12-03] Üretim durdurma
+─────────────────────────
+EYLEM   : Uzun bir soru sor, üretim başlarken "Stop" butonuna bas.
+BEKLENEN: Üretim durur. Kısmi cevap görünür.
+          Uygulama donmaz.
+KRITER  : Stop çalışıyor.
+SONUÇ   : [ ]
+
+[T12-04] TTS paralel sentez
+────────────────────────────
+EYLEM   : TTS açık, uzun bir soru sor.
+BEKLENEN: LLM streame başlarken TTS paralelde başlıyor.
+          İlk chunk MP3'ü LLM bitmeden çalabilir.
+KRITER  : Ses üretimi gecikmiyor (LLM bitmeden ses başlıyor olabilir).
+SONUÇ   : [ ]
+
+[T12-05] TTS — Türkçe ses kalitesi
+────────────────────────────────────
+EYLEM   : /tts AhmetNeural → Türkçe bir paragraf sor
+BEKLENEN: Ahmet sesi ile Türkçe konuşma. Telaffuz makul.
+KRITER  : Ses çıktı + Türkçe telaffuz anlaşılır.
+SONUÇ   : [ ]
+
+[T12-06] TTS — İngilizce ses kalitesi
+───────────────────────────────────────
+EYLEM   : /tts AriaNeural → İngilizce bir soru sor
+BEKLENEN: Aria sesi ile İngilizce konuşma.
+KRITER  : Ses çıktı + İngilizce.
+SONUÇ   : [ ]
+
+[T12-07] TTS auto — dil tespiti
+─────────────────────────────────
+EYLEM   : /tts auto
+GİRDİ   : Türkçe bir soru sor → TTS hangi sesi seçiyor?
+BEKLENEN: Türkçe içerik → Türkçe ses seçmeli.
+KRITER  : Dil eşleşiyor.
+SONUÇ   : [ ]

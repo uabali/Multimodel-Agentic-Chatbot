@@ -1,0 +1,54 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  02 — FORMAT VE KISALIK TESTLERİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Modelin prompt kurallarına uyup uymadığını test eder.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[T02-01] Soru tekrarı yasağı
+──────────────────────────────
+GİRDİ   : Fotosentez nasıl gerçekleşir?
+BEKLENEN: Cevap "Fotosentez nasıl gerçekleşir..." diye başlamamalı.
+          Soruyu tekrar etmeden direkt cevap vermeli.
+KRITER  : İlk cümle soruyu parafraz etmiyor.
+SONUÇ   : [ ]
+
+[T02-02] Kısa soru → kısa cevap
+─────────────────────────────────
+GİRDİ   : 2+2 kaçtır?
+BEKLENEN: "4" veya "4." veya "4 eder." — tek satır.
+          "Matematiksel olarak..." başlıklı paragraf OLMAMALI.
+KRITER  : 1 satır.
+SONUÇ   : [ ]
+
+[T02-03] Detaylı açıklama istenince uzun cevap
+───────────────────────────────────────────────
+GİRDİ   : Makine öğrenmesinde overfitting nedir, detaylı açıkla ve
+          önleme yöntemlerini madde madde listele
+BEKLENEN: Bu sefer uzun, yapılandırılmış cevap vermeli.
+          Başlıklar ve maddeler uygun.
+KRITER  : Detaylı ama soruya odaklı.
+SONUÇ   : [ ]
+
+[T02-04] LaTeX render testi
+────────────────────────────
+GİRDİ   : Euler formülünü yaz
+BEKLENEN: e^(iπ) + 1 = 0 formülü LaTeX ile render edilmeli.
+          Tarayıcıda matematiksel semboller düzgün görünmeli.
+KRITER  : Formül bozuk karakter değil, gerçek matematik sembolü.
+SONUÇ   : [ ]
+
+[T02-05] Kod bloğu formatı
+───────────────────────────
+GİRDİ   : SQL'de JOIN türlerini örnek sorgu ile göster
+BEKLENEN: Kod bloğu içinde SQL, syntax highlighting aktif.
+          Her JOIN için ayrı örnek.
+KRITER  : ``` ile işaretlenmiş kod bloğu.
+SONUÇ   : [ ]
+
+[T02-06] Emoji kullanımı
+─────────────────────────
+GİRDİ   : Merhaba nasılsın?
+BEKLENEN: Emoji kullanabilir ama aşırıya kaçmamalı.
+          Her cümleye emoji koymak saçmalık.
+KRITER  : Sıfır veya 1-2 emoji makul.
+SONUÇ   : [ ]
