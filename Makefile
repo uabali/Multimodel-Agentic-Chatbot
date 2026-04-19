@@ -74,7 +74,7 @@ check: ## Health-check all services + verify model ids
 	@. .venv/bin/activate && python3 scripts/verify_llm_runtime.py
 
 # ─────────────────────────────────────────────────────────────────────────────
-tunnel: ## Share Chainlit via Cloudflare Tunnel (auto-installs cloudflared)
+tunnel: ## Share Chainlit via ngrok (NGROK_AUTHTOKEN required in .env)
 	@./start-tunnel.sh $(APP_PORT)
 
 # ─────────────────────────────────────────────────────────────────────────────

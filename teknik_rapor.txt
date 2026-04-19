@@ -593,7 +593,51 @@ VRAM Bütçesi (12GB GPU):
 
 
 ────────────────────────────────────────────────────────────────────────────────
-20. GENEL DEĞERLENDİRME
+20. UZAKTAN ERİŞİM — ngrok Tunnel Kurulumu
+────────────────────────────────────────────────────────────────────────────────
+
+Proje, tek komutla internet üzerinden paylaşılabilir şekilde yapılandırılmıştır.
+
+Komut:
+  make tunnel
+
+Nasıl çalışır:
+  start-tunnel.sh → ngrok http 7860 → public HTTPS URL
+
+Desteklenen Sağlayıcılar:
+  ngrok (varsayılan)   → NGROK_AUTHTOKEN .env'de tanımlı; WebSocket + HTTPS
+  localtunnel (fallback) → TUNNEL_PROVIDER=localtunnel make tunnel
+                           SSH tabanlı, hesap gerektirmez, daha yavaş
+
+ngrok v3 Kurulum Detayları:
+  Binary   : /snap/bin/ngrok  (v3.37.6)
+  Config   : ~/.config/ngrok/ngrok.yml  (authtoken kayıtlı)
+  Inspector: http://localhost:4040  (canlı istek/yanıt izleme)
+
+URL Davranışı:
+  Free plan  → her çalıştırmada yeni URL (https://xxxx.ngrok-free.app)
+  Paid plan  → sabit subdomain tanımlanabilir
+
+Chainlit Tarafı Ayarları:
+  allow_origins = ["*"]          → .chainlit/config.toml (CORS açık)
+  WebSocket                      → ngrok tarafından natively desteklenir
+  Password auth (PBKDF2-HMAC-SHA256) → dışarıdan erişimde kimlik doğrulama zorunlu
+
+Auth Güvenlik Güncellemesi (19 Nisan 2026):
+  Dışa açmadan önce varsayılan admin/admin kimlik bilgileri güçlendirildi:
+  APP_ADMIN_PASSWORD  → rastgele token_urlsafe(12)
+  APP_PASSWORD_SALT   → token_hex(16)
+  CHAINLIT_AUTH_SECRET → token_hex(32)  (JWT imzalama anahtarı)
+
+Güvenlik Notu:
+  - ngrok free URL değiştiği için kullanıcıya her oturumda yeni URL iletilmeli.
+  - Rate limiter (30 req/60s/IP) public erişimi de kapsamaktadır.
+  - TLS, ngrok tarafından sağlanır — uygulama kendi TLS yönetmez.
+  - TAVILY ve GITHUB token'ları .env'de; ngrok şifrelemesi bunları korur.
+
+
+────────────────────────────────────────────────────────────────────────────────
+21. GENEL DEĞERLENDİRME
 ────────────────────────────────────────────────────────────────────────────────
 
 Proje; tamamen yerel çalışan, production kalitesinde bir multimodal agentic RAG
