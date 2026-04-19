@@ -1,0 +1,27 @@
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+.venv
+.env
+
+data/
+uploads/
+.rag_cache/
+.files/
+*.db
+*.sqlite
+
+.DS_Store
+.idea/
+.vscode/
+
+# llama.cpp downloaded models
+*.gguf
+*.mmproj
+
+# Claude Code local settings
+.claude/

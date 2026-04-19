@@ -1,0 +1,62 @@
+# Python virtual environments (Docker builds its own)
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data (mounted as volumes, not baked into image)
+data/
+uploads/
+.rag_cache/
+*.db
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Cache directories
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files (no need to copy into context)
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Documentation (not needed in runtime)
+*.md
+LICENSE
+
+# Test files
+tests/
+test_*.py
+*_test.py

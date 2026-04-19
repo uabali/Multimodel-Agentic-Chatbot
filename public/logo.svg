@@ -1,0 +1,42 @@
+<svg width="512" height="512" viewBox="0 0 512 512" role="img" xmlns="http://www.w3.org/2000/svg">
+  <title>Frappe</title>
+  <desc>A frappe cup with whipped cream and a straw</desc>
+  <style>
+    .cup-body { fill: #c87941; stroke: #7a1a10; stroke-width: 8; stroke-linejoin: round; }
+    .cup-bottom { fill: #b86a32; stroke: #7a1a10; stroke-width: 8; }
+    .dome { fill: #f5ead6; stroke: #7a1a10; stroke-width: 8; stroke-linejoin: round; }
+    .cream { fill: #fff8f0; stroke: #7a1a10; stroke-width: 5; }
+    .collar { fill: #f5ead6; stroke: #7a1a10; stroke-width: 7; }
+    .wave { fill: #f5ead6; stroke: #7a1a10; stroke-width: 6; }
+    .straw { fill: none; stroke: #7a1a10; stroke-width: 8; stroke-linecap: round; }
+    .shine { fill: #d0874e; }
+  </style>
+
+  <!-- Cup body (trapezoid) -->
+  <path class="cup-body" d="M120 240 L95 420 L415 420 L390 240 Z"/>
+
+  <!-- Bottom flat -->
+  <rect class="cup-bottom" x="96" y="415" width="320" height="20" rx="6"/>
+
+  <!-- Collar / lid rim -->
+  <rect class="collar" x="103" y="228" width="306" height="24" rx="5"/>
+
+  <!-- Dome lid -->
+  <path class="dome" d="M108 252 Q113 148 256 125 Q399 148 404 252 Z"/>
+
+  <!-- Whipped cream puffs -->
+  <ellipse class="cream" cx="256" cy="188" rx="55" ry="34"/>
+  <ellipse class="cream" cx="205" cy="205" rx="40" ry="25"/>
+  <ellipse class="cream" cx="307" cy="205" rx="40" ry="25"/>
+  <ellipse class="cream" cx="232" cy="220" rx="32" ry="20"/>
+  <ellipse class="cream" cx="280" cy="220" rx="32" ry="20"/>
+
+  <!-- Wave / liquid separator -->
+  <path class="wave" d="M110 268 Q148 285 186 268 Q224 251 262 268 Q300 285 338 268 Q368 256 398 268 L390 240 L120 240 Z"/>
+
+  <!-- Shine reflection -->
+  <rect class="shine" x="112" y="395" width="286" height="14" rx="5" opacity="0.5"/>
+
+  <!-- Straw -->
+  <line class="straw" x1="295" y1="112" x2="272" y2="188"/>
+</svg>
