@@ -57,3 +57,9 @@ class AgentState(TypedDict):
     # vision_rag_node tarafından doldurulur: görselden çıkarılan metin/yapı
     # Generator, bunu belge bağlamına [Görsel Analizi] kaynağı olarak ekler
     vision_context: str
+
+    # Kullanıcı ayar panelinden gelen per-session geçersiz kılmalar
+    temperature: float
+    max_tokens: int
+    retrieval_strategy: str
+    use_rerank: bool

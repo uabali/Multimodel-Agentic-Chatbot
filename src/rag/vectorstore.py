@@ -340,6 +340,32 @@ class HybridVectorStore:
         kw = search_kwargs or {"k": settings.top_k}
         return self.store.as_retriever(search_type=search_type, search_kwargs=kw)
 
+    def delete_by_source(self, source_files: list[str]) -> int:
+        """Verilen dosya adlarına ait tüm chunk'ları Qdrant'tan siler.
+
+        Returns:
+            Silinen dosya sayısı (işlem başarısız olsa 0).
+        """
+        if not source_files:
+            return 0
+        try:
+            self.client.delete(
+                collection_name=settings.qdrant_collection,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[models.FieldCondition(
+                            key="metadata.source_file",
+                            match=models.MatchAny(any=source_files),
+                        )]
+                    )
+                ),
+            )
+            logger.info("Qdrant: silindi — kaynak(lar): %s", source_files)
+            return len(source_files)
+        except Exception as exc:
+            logger.warning("delete_by_source başarısız: %s", exc)
+            return 0
+
     def get_point_count(self) -> int:
         try:
             info = self.client.get_collection(settings.qdrant_collection)

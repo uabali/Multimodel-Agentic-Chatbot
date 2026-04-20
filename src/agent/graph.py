@@ -59,15 +59,19 @@ def _route_decision(state: AgentState) -> str:
     """Router node çıkışından rota alır.
 
     Öncelik sırası (vision rotası için):
-      1. vision + session_uploads → vision_rag  (görsel + indeksli belge karşılaştırması)
+      1. vision + source_filter   → vision_rag    (görsel + BU TURDA yüklenen belge)
       2. vision + is_web_query    → vision_search (görsel + gerçek zamanlı web verisi)
       3. vision                   → vision        (saf görsel analiz)
+
+    NOT: session_uploads (önceki turlardan kalan belgeler) vision_rag'ı TETİKLEMEZ.
+    Önceki tur belgeleri alakasız içerik getirebilir — sadece aynı turda yüklenen
+    belge (source_filter) görsel analiziyle birleştirilmeli.
     """
     from src.agent.routing import is_web_query
 
     route = state.get("route", "direct")
     if route == "vision":
-        if state.get("session_uploads"):
+        if state.get("source_filter"):
             return "vision_rag"
         if is_web_query(state.get("question", "")):
             return "vision_search"
@@ -79,8 +83,17 @@ def _grader_decision(state: AgentState) -> str:
 
     "insufficient" → web_search → generator (doğrudan edge, grader'a geri dönmez).
     Döngü koruması graph yapısı tarafından sağlanır, retry_count burada gereksiz.
+
+    Dosya-bağlı sorgularda (source_filter veya session_uploads aktifken) web
+    aramasına düşmek tehlikeli: kullanıcı belgede olmayan bir alan sorduğunda
+    (ör. CV'de olmayan LinkedIn URL'si) web'den konu-genelinde alakasız
+    sonuçlar getirilmesin. Generator dürüstçe "bu bilgi belgede yok" der.
     """
-    return "sufficient" if state.get("relevance") == "yes" else "insufficient"
+    if state.get("relevance") == "yes":
+        return "sufficient"
+    if state.get("source_filter") or state.get("session_uploads"):
+        return "sufficient"
+    return "insufficient"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -176,7 +189,12 @@ def _init_state(
     image_data: list[dict] | None = None,
     input_type: str = "text",
     session_uploads: list[str] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    retrieval_strategy: str | None = None,
+    use_rerank: bool | None = None,
 ) -> AgentState:
+    from src.config import settings as _s
     return {
         "messages": chat_history or [],
         "documents": [],
@@ -190,6 +208,10 @@ def _init_state(
         "image_data": image_data or [],
         "input_type": input_type,
         "vision_context": "",
+        "temperature": temperature if temperature is not None else _s.chat_temperature,
+        "max_tokens": max_tokens if max_tokens is not None else _s.chat_max_tokens,
+        "retrieval_strategy": retrieval_strategy or _s.retrieval_strategy,
+        "use_rerank": use_rerank if use_rerank is not None else _s.use_rerank,
     }
 
 
@@ -205,10 +227,15 @@ def run_agent(
     image_data: list[dict] | None = None,
     input_type: str = "text",
     session_uploads: list[str] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    retrieval_strategy: str | None = None,
+    use_rerank: bool | None = None,
 ) -> str:
     """Senkron agent çalıştırıcı (test veya CLI için)."""
     result = get_graph().invoke(
-        _init_state(question, chat_history, source_filter, image_data, input_type, session_uploads)
+        _init_state(question, chat_history, source_filter, image_data, input_type,
+                    session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank)
     )
     return result.get("generation", "Bir hata oluştu, lütfen tekrar deneyin.")
 
@@ -220,10 +247,15 @@ async def arun_agent(
     image_data: list[dict] | None = None,
     input_type: str = "text",
     session_uploads: list[str] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    retrieval_strategy: str | None = None,
+    use_rerank: bool | None = None,
 ) -> str:
     """Asenkron agent çalıştırıcı."""
     result = await get_graph().ainvoke(
-        _init_state(question, chat_history, source_filter, image_data, input_type, session_uploads)
+        _init_state(question, chat_history, source_filter, image_data, input_type,
+                    session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank)
     )
     return result.get("generation", "Bir hata oluştu, lütfen tekrar deneyin.")
 
@@ -235,10 +267,15 @@ async def astream_agent(
     image_data: list[dict] | None = None,
     input_type: str = "text",
     session_uploads: list[str] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    retrieval_strategy: str | None = None,
+    use_rerank: bool | None = None,
 ):
     """Agent çalıştırıcı: mesaj ve güncelleme olaylarını stream eder."""
     async for event in get_graph().astream(
-        _init_state(question, chat_history, source_filter, image_data, input_type, session_uploads),
+        _init_state(question, chat_history, source_filter, image_data, input_type,
+                    session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank),
         stream_mode=["messages", "updates"],
     ):
         yield event

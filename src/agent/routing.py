@@ -73,7 +73,7 @@ _DIRECT_PATTERNS: list[str] = [
     r"(haz[ıi]r m[ıi]s[ıi]n|haz[ıi]r[ıi]m|haz[ıi]r|ba[şs]layal[ıi]m|ready|let.s start|let.s go)",
     r"(verece[ğg]im|g[öo]nderece[ğg]im|y[üu]kleyece[ğg]im|atacak|payla[şs]aca[ğg][ıi]m)",
     r"(sana bir|sana [şs]imdi|birazdan|[şs]imdi sana)",
-    r"(te[şs]ekk[üu]r|sa[ğg]ol|tamamd[ıi]r|tamam|ok\b|anlad[ıi]m|eyvallah|g[üu]zel|harika)",
+    r"(te[şs]ekk[üu]r|sa[ğg]ol|\btamamd[ıi]r\b|\btamam\b|ok\b|anlad[ıi]m|eyvallah|\bg[üu]zel\b|\bharika\b)",
     r"(evet|hay[ıi]r|yes|no)\s*$",
     # Matematik / kod
     r"^[\d\s\+\-\*\/\(\)\^\.]+$",

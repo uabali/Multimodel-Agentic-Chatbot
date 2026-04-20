@@ -458,11 +458,10 @@ async def on_chat_start():
 async def set_chat_profiles():
     return [
         cl.ChatProfile(
-            name=settings.llm_model_name,
+            name=f"Frappe  ·  {settings.llm_model_name}",
             markdown_description=(
-                f"**{settings.llm_model_name}**\n\n"
-                "Belge (RAG), gorsel analiz, web arama, sesli giris/cikis — "
-                "tum ozellikler tek arayuzde."
+                f"**{settings.llm_model_name}** — Multimodal RAG Agent\n\n"
+                "📄 Belge (RAG) · 🖼️ Görsel analiz · 🌐 Web arama · 🎤 Sesli giriş/çıkış"
             ),
             icon="/public/logo.svg",
         ),
@@ -472,10 +471,10 @@ async def set_chat_profiles():
 @cl.set_starters
 async def set_starters():
     return [
-        cl.Starter(label="Dosya yukle (PDF/DOCX/XLSX/ses/gorsel...)", message="/upload"),
-        cl.Starter(label="URL'den belge ingest et", message="/url https://"),
-        cl.Starter(label="Aktif modelleri goster", message="/models"),
-        cl.Starter(label="Hava durumu", message="Istanbul hava durumu bugun nasil?"),
+        cl.Starter(label="📎 Dosya yükle (PDF/DOCX/XLSX/ses/görsel...)", message="/upload"),
+        cl.Starter(label="🌐 URL'den belge ingest et", message="/url https://"),
+        cl.Starter(label="🤖 Aktif modelleri göster", message="/models"),
+        cl.Starter(label="☀️ Hava durumu", message="Istanbul hava durumu bugun nasil?"),
     ]
 
 
@@ -554,6 +553,10 @@ async def on_audio_end():
         audio_session_uploads: list[str] = list(cl.user_session.get("session_uploads") or [])
         # Ses modunda TTS her zaman aktif — streamer oluştur
         audio_tts_streamer = _TtsStreamer.make(enabled=True)
+        _a_temp = float(cl.user_session.get("temperature", settings.chat_temperature))
+        _a_max_tok = int(cl.user_session.get("max_tokens", settings.chat_max_tokens))
+        _a_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
+        _a_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
         try:
             async for ev in astream_agent(
                 question=text,
@@ -561,6 +564,10 @@ async def on_audio_end():
                 input_type=audio_input_type,
                 image_data=audio_image_data or None,
                 session_uploads=audio_session_uploads,
+                temperature=_a_temp,
+                max_tokens=_a_max_tok,
+                retrieval_strategy=_a_strategy,
+                use_rerank=_a_rerank,
             ):
                 if isinstance(ev, tuple) and len(ev) == 2 and ev[0] == "updates":
                     payload = ev[1]
@@ -591,6 +598,10 @@ async def on_audio_end():
                 input_type=audio_input_type,
                 image_data=audio_image_data or None,
                 session_uploads=audio_session_uploads,
+                temperature=_a_temp,
+                max_tokens=_a_max_tok,
+                retrieval_strategy=_a_strategy,
+                use_rerank=_a_rerank,
             )
             answer_parts = [fallback]
 
@@ -973,6 +984,27 @@ async def on_message(message: cl.Message):
         source_filter = ingested_filenames[0] if len(ingested_filenames) == 1 else ""
         session_uploads: list[str] = list(cl.user_session.get("session_uploads") or [])
 
+        # Kullanıcı önce soruyu sordu, sonra dosyayı tek başına yükledi:
+        # yüklemeyle gelen mesaj boş/önemsiz ise, en son sorulan soruyu yeniden kullan.
+        if ingested_filenames:
+            stripped = (question or "").strip()
+            is_trivial = (not stripped) or len(stripped) < 3 or stripped.lower() in {
+                ".", "upload", "/upload", "ok", "tamam",
+            }
+            if is_trivial:
+                pending_q = (cl.user_session.get("pending_question") or "").strip()
+                last_user_q = ""
+                for m in reversed(chat_history or []):
+                    role = (m.get("role") if isinstance(m, dict) else getattr(m, "role", "")) or ""
+                    if role in {"user", "human"}:
+                        last_user_q = (m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or ""
+                        break
+                reuse_q = pending_q or last_user_q
+                if reuse_q:
+                    logger.info("Dosya tek başına yüklendi → son soru yeniden kullanılıyor: %s", reuse_q[:80])
+                    question = reuse_q
+                    cl.user_session.set("pending_question", "")
+
         # Eğer image_paths varsa zaten yukarıda pending kontrolü yapıldı
         # Buraya geldiyse ya soru vardı (pending temizlendi) ya da görsel yoktu
         agent_image_data = [_image_to_data(p) for p in image_paths] if image_paths else []
@@ -985,6 +1017,12 @@ async def on_message(message: cl.Message):
         last_route: str | None = None
         last_documents: list = []
         tts_streamer = _TtsStreamer.make(cl.user_session.get("tts_enabled", False))
+
+        _sess_temp = float(cl.user_session.get("temperature", settings.chat_temperature))
+        _sess_max_tok = int(cl.user_session.get("max_tokens", settings.chat_max_tokens))
+        _sess_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
+        _sess_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
+
         try:
             async for ev in _timed_stream(
                 astream_agent(
@@ -994,6 +1032,10 @@ async def on_message(message: cl.Message):
                     image_data=agent_image_data or None,
                     input_type=agent_input_type,
                     session_uploads=session_uploads,
+                    temperature=_sess_temp,
+                    max_tokens=_sess_max_tok,
+                    retrieval_strategy=_sess_strategy,
+                    use_rerank=_sess_rerank,
                 ),
                 _STREAM_CHUNK_TIMEOUT,
             ):
@@ -1055,6 +1097,10 @@ async def on_message(message: cl.Message):
                 image_data=agent_image_data or None,
                 input_type=agent_input_type,
                 session_uploads=session_uploads,
+                temperature=_sess_temp,
+                max_tokens=_sess_max_tok,
+                retrieval_strategy=_sess_strategy,
+                use_rerank=_sess_rerank,
             )
             final_parts = [answer]
             for i in range(0, len(answer), 24):
@@ -1073,6 +1119,10 @@ async def on_message(message: cl.Message):
                     image_data=agent_image_data or None,
                     input_type=agent_input_type,
                     session_uploads=session_uploads,
+                    temperature=_sess_temp,
+                    max_tokens=_sess_max_tok,
+                    retrieval_strategy=_sess_strategy,
+                    use_rerank=_sess_rerank,
                 )
             except Exception as exc:
                 logger.error("Fallback ainvoke de başarısız: %s", exc)
@@ -1118,7 +1168,9 @@ async def on_action_tts(action: cl.Action):
     answer = action.payload.get("answer", "")
     if not answer:
         return
-    audio_bytes = await tts_synthesize(answer)
+    voice_pref = cl.user_session.get("tts_voice", "auto")
+    voice = None if voice_pref == "auto" else voice_pref
+    audio_bytes = await tts_synthesize(answer, voice=voice)
     if audio_bytes:
         tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
         tmp.write(audio_bytes)
@@ -1138,23 +1190,31 @@ async def on_settings_update(settings_dict: dict):
     """Kullanici ayar panelinden bir degistirdiginde session state'i guncelle."""
     tts_now = bool(settings_dict.get("tts_enabled", False))
     tts_was = cl.user_session.get("tts_enabled", False)
+    tts_voice = settings_dict.get("tts_voice", "auto")
+    temp = float(settings_dict.get("temperature", settings.chat_temperature))
+    max_tok = int(settings_dict.get("max_tokens", settings.chat_max_tokens))
+    strategy = settings_dict.get("retrieval_strategy", settings.retrieval_strategy)
+    rerank = bool(settings_dict.get("use_rerank", settings.use_rerank))
+
     cl.user_session.set("tts_enabled", tts_now)
-    cl.user_session.set("tts_voice", settings_dict.get("tts_voice", "auto"))
+    cl.user_session.set("tts_voice", tts_voice)
+    cl.user_session.set("temperature", temp)
+    cl.user_session.set("max_tokens", max_tok)
+    cl.user_session.set("retrieval_strategy", strategy)
+    cl.user_session.set("use_rerank", rerank)
+
+    lines: list[str] = []
     if tts_now != tts_was:
-        status = "🔊 Sesli yanıt **aktif**" if tts_now else "🔇 Sesli yanıt **kapalı**"
-        await cl.Message(content=status).send()
-    cl.user_session.set("temperature", float(settings_dict.get("temperature", settings.chat_temperature)))
-    cl.user_session.set("max_tokens", int(settings_dict.get("max_tokens", settings.chat_max_tokens)))
-    cl.user_session.set("retrieval_strategy", settings_dict.get("retrieval_strategy", settings.retrieval_strategy))
-    cl.user_session.set("use_rerank", bool(settings_dict.get("use_rerank", settings.use_rerank)))
+        lines.append("🔊 Sesli yanıt **aktif**" if tts_now else "🔇 Sesli yanıt **kapalı**")
+    if tts_now and tts_voice != "auto":
+        lines.append(f"🎤 TTS sesi: **{tts_voice}**")
+    lines.append(f"🌡️ Sıcaklık: **{temp}** · Max token: **{max_tok}**")
+    lines.append(f"🔍 Strateji: **{strategy}** · Reranker: **{'açık' if rerank else 'kapalı'}**")
+    await cl.Message(content="\n".join(lines)).send()
+
     logger.info(
         "Settings updated: tts=%s voice=%s temp=%.2f max_tokens=%d strategy=%s rerank=%s",
-        settings_dict.get("tts_enabled"),
-        settings_dict.get("tts_voice"),
-        float(settings_dict.get("temperature", 0)),
-        int(settings_dict.get("max_tokens", 0)),
-        settings_dict.get("retrieval_strategy"),
-        settings_dict.get("use_rerank"),
+        tts_now, tts_voice, temp, max_tok, strategy, rerank,
     )
 
 
@@ -1166,6 +1226,17 @@ async def on_stop():
 @cl.on_chat_end
 async def on_chat_end():
     import shutil
+
+    # Session boyunca yüklenen dosyaların Qdrant chunk'larını temizle
+    session_uploads = cl.user_session.get("session_uploads") or []
+    if session_uploads:
+        try:
+            from src.rag.vectorstore import get_hybrid_store
+            await asyncio.to_thread(get_hybrid_store().delete_by_source, session_uploads)
+            logger.info("Session Qdrant temizliği: %d dosya silindi", len(session_uploads))
+        except Exception as exc:
+            logger.warning("Session Qdrant temizliği başarısız: %s", exc)
+
     session_dir = cl.user_session.get("session_upload_dir")
     if session_dir:
         p = Path(session_dir)

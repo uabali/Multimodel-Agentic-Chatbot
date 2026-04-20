@@ -44,6 +44,7 @@ class WebSearchService:
     def __init__(self, api_key: str, max_results: int = 5) -> None:
         self._api_key = api_key
         self._max_results = max_results
+        self._client = None
 
     @classmethod
     def from_settings(cls) -> "WebSearchService | None":
@@ -55,15 +56,21 @@ class WebSearchService:
             return None
         return cls(api_key=key, max_results=settings.web_search_max_results)
 
+    def _get_client(self):
+        """TavilyClient singleton — her aramada yeniden oluşturmaktan kaçınır."""
+        if self._client is None:
+            from tavily import TavilyClient
+            self._client = TavilyClient(api_key=self._api_key)
+        return self._client
+
     async def search(self, query: str) -> WebSearchResult | None:
         """Tavily API ile arama yapar; başarısız olursa None döner."""
         normalized = normalize_web_query(query)
         try:
-            from tavily import TavilyClient
             import datetime
 
             def _call() -> str:
-                client = TavilyClient(api_key=self._api_key)
+                client = self._get_client()
                 # Zaman duyarlı sorgular için güncel tarih bilgisi eklenir.
                 today = datetime.date.today().isoformat()
                 dated_query = f"{normalized} (bugün: {today})" if _is_time_sensitive(query) else normalized

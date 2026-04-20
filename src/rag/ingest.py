@@ -166,10 +166,17 @@ class DocumentIngester:
     def ingest_file(self, file_path: str | Path) -> dict:
         """Tek bir dosyayı yükler, böler ve Qdrant'a ekler.
 
+        Aynı dosya daha önce yüklendiyse eski chunk'lar silinir — duplicate önlenir.
+
         Returns:
             {"file_name": str, "file_id": str, "chunk_count": int, "status": str}
         """
         file_path = Path(file_path)
+
+        # Önceki indekslemeden kalan chunk'ları temizle (idempotent upsert davranışı).
+        if hasattr(self._vectorstore, "delete_by_source"):
+            self._vectorstore.delete_by_source([file_path.name])
+
         documents = self._loader.load(file_path)
 
         file_id = str(uuid.uuid4())

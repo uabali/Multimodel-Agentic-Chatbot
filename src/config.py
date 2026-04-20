@@ -37,13 +37,20 @@ class Settings(BaseSettings):
     # thinking=True → chain-of-thought (daha yavaş ama daha derin)
     llm_enable_thinking: bool = False
 
+    # Sunucunun gerçek context penceresi (llama-server -c / vLLM max-model-len).
+    # Generator bütçesi bu değerden max_tokens çıkarılarak hesaplanır.
+    llm_context_size: int = Field(
+        default=8192,
+        validation_alias=AliasChoices("LLM_CONTEXT_SIZE", "LLM_N_CTX"),
+    )
+
     # ── vLLM-only tuning (docker-compose'daki vLLM komutuna yansır) ──
     # gpu_memory_utilization: 0.85   → ~8.5 GB / 10 GB rezervasyon
     # max_model_len: 32768           → 32K context
     # max_num_seqs: 8                → eşzamanlı request sayısı (4B için artırıldı)
     # enable_auto_tool_choice: true  → agentic tool calling
 
-    # ── Dual LLM profile (Qwen3-4B 32K context — liberalleştirildi) ──
+    # ── Dual LLM profile (Gemma 4 E4B — liberalleştirildi) ──
     chat_temperature: float = 0.7
     chat_num_predict: int = 1024
     chat_max_tokens: int = 1024
@@ -53,7 +60,7 @@ class Settings(BaseSettings):
     router_max_tokens: int = 64
 
     # ── Agentic RAG profile (tool calls, multi-turn reasoning) ──
-    # Qwen3-4B tool calling çok güçlü — yüksek token budget
+    # Gemma 4 E4B tool calling için yüksek token budget
     agent_temperature: float = 0.1
     agent_max_tokens: int = 2048
 
@@ -77,14 +84,14 @@ class Settings(BaseSettings):
     qdrant_auto_recreate_on_mismatch: bool = True
 
     # ── RAG Settings ──
-    # Qwen3-4B 32K context destekler — daha büyük chunk'lar kullanılabilir
+    # Gemma 4 E4B büyük context destekler — chunk boyutu buna göre ayarlandı
     chunk_size: int = 1200
     chunk_overlap: int = 200
     top_k: int = 6
 
     # ── Hybrid Retrieval ──
     retrieval_strategy: str = "hybrid"
-    base_k: int = 10
+    base_k: int = 4
     fetch_k: int = 30
     lambda_mult: float = 0.6
     score_threshold: float = 0.70

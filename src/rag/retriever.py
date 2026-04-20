@@ -143,6 +143,7 @@ def create_retriever(
     question: str,
     strategy: str = "auto",
     base_k: int = 8,
+    max_k: int | None = None,
     fetch_k: int = 30,
     lambda_mult: float = 0.6,
     score_threshold: float = 0.70,
@@ -165,7 +166,7 @@ def create_retriever(
         BaseRetriever veya callable (rerank wrapper).
     """
     should_rerank = use_rerank and reranker is not None
-    k = calculate_dynamic_k(question, base_k)
+    k = calculate_dynamic_k(question, base_k, max_k=max_k if max_k is not None else base_k + 4)
 
     if strategy == "auto":
         strategy = auto_select_strategy(question)

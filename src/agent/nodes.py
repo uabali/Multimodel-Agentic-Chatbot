@@ -60,16 +60,32 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+_router_llm_cache = None
+
+
 def _get_router_llm():
-    """Routing için minimal token-budget LLM (tek JSON token üretir)."""
-    from src.rag.llm import create_vllm_llm
-    return create_vllm_llm(temperature=0.0, max_tokens=settings.router_max_tokens)
+    """Routing için minimal token-budget LLM — modül-level singleton."""
+    global _router_llm_cache
+    if _router_llm_cache is None:
+        from src.rag.llm import create_vllm_llm
+        _router_llm_cache = create_vllm_llm(temperature=0.0, max_tokens=settings.router_max_tokens)
+    return _router_llm_cache
 
 
-def _get_rag_llm(temperature: float = 0.0):
-    """RAG üretim / grader / rewriter için deterministik LLM."""
+def _get_rag_llm(temperature: float = 0.0, max_tokens: int | None = None):
+    """RAG üretim / grader / rewriter LLM.
+
+    temperature=0.0 ve max_tokens=None → DualLLM singleton (cached).
+    Diğer değerler yeni client oluşturur (per-session ayar desteği).
+    """
+    if temperature == 0.0 and max_tokens is None:
+        from src.rag.llm import get_rag_llm
+        return get_rag_llm()
     from src.rag.llm import create_vllm_llm
-    return create_vllm_llm(temperature=temperature, max_tokens=settings.rag_max_tokens)
+    return create_vllm_llm(
+        temperature=temperature,
+        max_tokens=max_tokens or settings.rag_max_tokens,
+    )
 
 
 def _get_agent_llm():
@@ -146,7 +162,7 @@ def _parse_route(text: str, default: str = "direct") -> str:
     return default
 
 
-def router_node(state: AgentState) -> AgentState:
+async def router_node(state: AgentState) -> AgentState:
     """Sorguyu 'rag', 'direct' veya 'vision' olarak sınıflandırır.
 
     Yol 0 (anlık): image_data doluysa LLM'e sormadan direkt 'vision' döner.
@@ -200,14 +216,11 @@ def router_node(state: AgentState) -> AgentState:
     logger.info("Router (LLM fallback): belirsiz sorgu işleniyor... (%d önceki mesaj)", len(prior_messages))
     llm = _get_router_llm()
     try:
-        # Chat history'yi dahil et - follow-up sorular için context
         messages_to_send = [SystemMessage(content=ROUTER_SYSTEM_PROMPT)]
         if prior_messages:
-            # Son 2 mesajı context olarak ekle (minimal token kullanımı)
             messages_to_send.extend(prior_messages[-2:])
         messages_to_send.append(HumanMessage(content=question))
-        
-        response = llm.invoke(messages_to_send)
+        response = await llm.ainvoke(messages_to_send)
         route = _parse_route(response.content)
     except Exception as exc:
         logger.warning("Router başarısız, 'direct' varsayıldı: %s", exc)
@@ -257,7 +270,7 @@ def _should_skip_rewrite(question: str, prior_messages: list) -> bool:
     return False
 
 
-def rewriter_node(state: AgentState) -> AgentState:
+async def rewriter_node(state: AgentState) -> AgentState:
     """Soruyu vektör veritabanı araması için optimize eder.
 
     Kısa/net sorgularda ve tek-turlu sorgularda LLM çağrısını atlar (~6s kazanç).
@@ -276,7 +289,7 @@ def rewriter_node(state: AgentState) -> AgentState:
         # Maksimum 2 mesaj (1 tur) — daha fazlası halüsinasyon riskini artırır.
         messages_to_send.extend(prior_messages[-2:])
     messages_to_send.append(HumanMessage(content=question))
-    response = llm.invoke(messages_to_send)
+    response = await llm.ainvoke(messages_to_send)
     rewritten = response.content.strip()
     logger.info("Rewriter sonucu: '%.80s'", rewritten)
 
@@ -331,7 +344,7 @@ def _build_source_filter(source_filter: str, session_uploads: list[str] | None =
     return None
 
 
-def retriever_node(state: AgentState) -> AgentState:
+async def retriever_node(state: AgentState) -> AgentState:
     """Hybrid retrieval + dense gate + opsiyonel reranking uygular."""
     question = state["question"]
     source_filter = state.get("source_filter", "")
@@ -353,8 +366,9 @@ def retriever_node(state: AgentState) -> AgentState:
                     session_uploads,
                 )
 
-        # source_filter veya session_uploads varsa kullanıcı dosyası kesin indekslendi
-        # → dense gate atla (yabancı içerik dışlama gereksiz, filter zaten kısıtlı).
+        # source_filter (bu turda yüklenen tek dosya) veya session_uploads (oturumda
+        # yüklü ≥1 dosya) varsa dense gate atlanır — kullanıcı bir belge bağlamında
+        # soru sorduğu için düşük similarity skoru bile kabul edilir.
         if source_filter or session_uploads:
             dense_score = 1.0
             logger.info(
@@ -362,7 +376,9 @@ def retriever_node(state: AgentState) -> AgentState:
                 source_filter, len(session_uploads),
             )
         else:
-            dense_score = store.max_dense_similarity(question, qdrant_filter=qdrant_filter)
+            dense_score = await asyncio.to_thread(
+                store.max_dense_similarity, question, qdrant_filter=qdrant_filter
+            )
             if dense_score < settings.rag_min_dense_similarity:
                 logger.info(
                     "Dense gate: %.3f < eşik %.3f → boş sonuç",
@@ -370,17 +386,23 @@ def retriever_node(state: AgentState) -> AgentState:
                 )
                 return {**state, "documents": []}
 
+        strategy = state.get("retrieval_strategy") or settings.retrieval_strategy
+        use_rerank_val = state.get("use_rerank")
+        if use_rerank_val is None:
+            use_rerank_val = settings.use_rerank
+
         retriever = create_retriever(
             vectorstore=store.store,
             question=question,
-            strategy=settings.retrieval_strategy,
+            strategy=strategy,
             base_k=settings.base_k,
-            use_rerank=settings.use_rerank,
+            max_k=settings.top_k,
+            use_rerank=use_rerank_val,
             reranker=_RerankerRegistry.get(),
             rerank_top_n=settings.rerank_top_n,
             qdrant_filter=qdrant_filter,
         )
-        documents = run_retriever(retriever, question)
+        documents = await asyncio.to_thread(run_retriever, retriever, question)
         logger.info("Retriever: %d belge (dense_score=%.3f)", len(documents), dense_score)
     except Exception as exc:
         logger.warning("Retriever hatası: %s", exc)
@@ -415,7 +437,7 @@ def _parse_yes_no(text: str, default: str = "no") -> str:
     return default
 
 
-def grader_node(state: AgentState) -> AgentState:
+async def grader_node(state: AgentState) -> AgentState:
     """Belge alaka değerlendirmesi — önce sıfır-maliyetli confidence skoru dener.
 
     Yüksek güven (≥0.7): LLM atlanır → "yes"  (~3s kazanç, çoğu istek).
@@ -445,7 +467,7 @@ def grader_node(state: AgentState) -> AgentState:
         )
         llm = _get_rag_llm(temperature=0.0)
         try:
-            response = llm.invoke([
+            response = await llm.ainvoke([
                 SystemMessage(content=GRADER_SYSTEM_PROMPT),
                 HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
             ])
@@ -474,7 +496,7 @@ def grader_node(state: AgentState) -> AgentState:
 
     llm = _get_rag_llm(temperature=0.0)
     try:
-        response = llm.invoke([
+        response = await llm.ainvoke([
             SystemMessage(content=GRADER_SYSTEM_PROMPT),
             HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
         ])
@@ -523,8 +545,15 @@ def vision_node(state: AgentState) -> AgentState:
     messages_to_send.extend(prior_messages[-6:])
     messages_to_send.append(HumanMessage(content=content_parts))
 
-    response = llm.invoke(messages_to_send)
-    generation = response.content or ""
+    try:
+        response = llm.invoke(messages_to_send)
+        generation = response.content or ""
+    except Exception as exc:
+        logger.error("Vision node hata: %s", exc)
+        generation = (
+            "Görseli işleyemedim. Lütfen PNG, JPEG veya WEBP formatında "
+            "ve makul boyutta (< 5 MB) bir görsel yükleyin."
+        )
 
     new_messages = [
         *prior_messages,
@@ -670,7 +699,7 @@ async def vision_search_node(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def generator_node(state: AgentState) -> AgentState:
+async def generator_node(state: AgentState) -> AgentState:
     """Belgeler ve/veya görsel bağlam varsa RAG ile, yoksa bağlamsız modda yanıt üretir.
 
     vision_context mevcutsa [Görsel Analizi] başlığıyla bağlamın başına eklenir.
@@ -692,17 +721,29 @@ def generator_node(state: AgentState) -> AgentState:
         if vision_context:
             context_parts.append(f"[Görsel Analizi]\n{vision_context}")
 
+        # Bütçe: n_ctx toplam limittir (giriş+çıkış). max_tokens çıkışa ayrılır;
+        # geri kalandan sistem şablonu, soru ve geçmiş için güvenlik payı düşülür.
+        # Türkçe için muhafazakâr: 1 token ≈ 2.5 karakter.
+        n_ctx = settings.llm_context_size
+        output_tokens = state.get("max_tokens") or settings.rag_max_tokens
+        overhead_tokens = 600  # sistem şablonu + soru + son 2 mesaj + pay
+        input_budget_tokens = max(512, n_ctx - output_tokens - overhead_tokens)
+        budget_chars = int(input_budget_tokens * 2.5)
+        used_chars = sum(len(p) for p in context_parts)
+
         for i, doc in enumerate(documents, 1):
             meta = getattr(doc, "metadata", {}) or {}
             src = meta.get("source_file", meta.get("source", ""))
             page = meta.get("page", "")
             header = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
-            # Web sonuçları daha agresif kırpılır — context window taşmasını önler.
-            # Belge chunk'ları daha az kırpılır (kritik formül/veri kaybı riski var).
             is_web = meta.get("type") == "web_search"
-            max_chars = 3000 if is_web else 6000
+            remaining = budget_chars - used_chars
+            if remaining <= len(header) + 50:
+                break
+            max_chars = min(2000 if is_web else 1500, remaining - len(header) - 10)
             content = doc.page_content[:max_chars]
             context_parts.append(f"{header}\n{content}")
+            used_chars += len(header) + len(content) + 10
 
         context = "\n\n---\n\n".join(context_parts)
         # .replace() yerine .format() kullanılmaz — PDF/kod içindeki { } format() çökertiyor
@@ -710,13 +751,15 @@ def generator_node(state: AgentState) -> AgentState:
     else:
         system_content = RAG_NO_CONTEXT_SYSTEM_PROMPT
 
-    llm = _get_rag_llm(temperature=0.0)
+    session_temp = state.get("temperature") or 0.0
+    session_max_tok = state.get("max_tokens") or None
+    llm = _get_rag_llm(temperature=session_temp, max_tokens=session_max_tok)
 
     messages_to_send = [SystemMessage(content=system_content)]
-    messages_to_send.extend(prior_messages)
+    messages_to_send.extend(prior_messages[-2:])
     messages_to_send.append(HumanMessage(content=question))
 
-    response = llm.invoke(messages_to_send)
+    response = await llm.ainvoke(messages_to_send)
     generation = response.content
 
     new_messages = [
