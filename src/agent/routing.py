@@ -127,6 +127,15 @@ _WEATHER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Pre-compiled lists — compiled once at module load, not per-request
+_DOCUMENT_PRONOUN_RE = [re.compile(p, re.IGNORECASE | re.UNICODE) for p in _DOCUMENT_PRONOUN_PATTERNS]
+_GENERAL_KNOWLEDGE_RE = [re.compile(p, re.IGNORECASE) for p in _GENERAL_KNOWLEDGE_PATTERNS]
+_RAG_RE = [re.compile(p, re.IGNORECASE) for p in _RAG_PATTERNS]
+_DIRECT_RE = [re.compile(p, re.IGNORECASE) for p in _DIRECT_PATTERNS]
+_WEB_RE = [re.compile(p, re.IGNORECASE) for p in _WEB_PATTERNS]
+_MCP_RE = [re.compile(p, re.IGNORECASE) for p in _MCP_PATTERNS]
+_TURKISH_RE = [re.compile(p, re.IGNORECASE) for p in _TURKISH_PATTERNS]
+
 
 # ── Public helpers ──────────────────────────────────────────────────────────
 
@@ -148,18 +157,18 @@ def keyword_route(question: str, *, has_uploads: bool = False) -> str | None:
         "rag", "direct", ya da eşleşme yoksa None (LLM fallback tetiklenir).
     """
     q = question.strip()
-    for pattern in _DOCUMENT_PRONOUN_PATTERNS:
-        if re.search(pattern, q, re.IGNORECASE | re.UNICODE):
+    for rx in _DOCUMENT_PRONOUN_RE:
+        if rx.search(q):
             return "rag"
     if not has_uploads:
-        for pattern in _GENERAL_KNOWLEDGE_PATTERNS:
-            if re.search(pattern, q, re.IGNORECASE):
+        for rx in _GENERAL_KNOWLEDGE_RE:
+            if rx.search(q):
                 return "direct"
-    for pattern in _RAG_PATTERNS:
-        if re.search(pattern, q, re.IGNORECASE):
+    for rx in _RAG_RE:
+        if rx.search(q):
             return "rag"
-    for pattern in _DIRECT_PATTERNS:
-        if re.search(pattern, q, re.IGNORECASE):
+    for rx in _DIRECT_RE:
+        if rx.search(q):
             return "direct"
     return None
 
@@ -167,18 +176,18 @@ def keyword_route(question: str, *, has_uploads: bool = False) -> str | None:
 def is_web_query(question: str) -> bool:
     """Sorunun gerçek zamanlı web araması gerektirip gerektirmediğini döner."""
     q = question.strip()
-    return any(re.search(p, q, re.IGNORECASE) for p in _WEB_PATTERNS)
+    return any(rx.search(q) for rx in _WEB_RE)
 
 
 def needs_mcp_tools(question: str) -> bool:
     """Sorunun MCP araçlarına ihtiyaç duyup duymadığını döner."""
     q = question.strip()
-    return any(re.search(p, q, re.IGNORECASE) for p in _MCP_PATTERNS)
+    return any(rx.search(q) for rx in _MCP_RE)
 
 
 def is_turkish_query(question: str) -> bool:
     """Sorgunun Türkçe olup olmadığını döner."""
-    return any(re.search(p, question, re.IGNORECASE) for p in _TURKISH_PATTERNS)
+    return any(rx.search(question) for rx in _TURKISH_RE)
 
 
 def is_weather_query(question: str) -> bool:

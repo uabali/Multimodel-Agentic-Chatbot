@@ -207,6 +207,18 @@ def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sa
 # ── TTS helpers ──
 
 
+async def _write_audio_tmp(audio_bytes: bytes) -> str:
+    """Ses baytlarını geçici MP3 dosyasına async olarak yazar; dosya yolunu döner."""
+    def _write():
+        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        tmp.write(audio_bytes)
+        tmp.flush()
+        path = tmp.name
+        tmp.close()
+        return path
+    return await asyncio.to_thread(_write)
+
+
 async def _send_tts(text: str, parent_msg: cl.Message | None = None) -> None:
     """TTS sentezle ve cl.Audio element olarak gonder."""
     voice_pref = cl.user_session.get("tts_voice", "auto")
@@ -214,12 +226,7 @@ async def _send_tts(text: str, parent_msg: cl.Message | None = None) -> None:
     audio_bytes = await tts_synthesize(text, voice=voice)
     if not audio_bytes:
         return
-    # Gecici dosyaya yaz (Chainlit cl.Audio path gerektiriyor)
-    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-    tmp.write(audio_bytes)
-    tmp.flush()
-    tmp_path = tmp.name
-    tmp.close()
+    tmp_path = await _write_audio_tmp(audio_bytes)
     audio_el = cl.Audio(path=tmp_path, name="response.mp3", display="inline")
     if parent_msg is not None:
         parent_msg.elements = list(getattr(parent_msg, "elements", None) or []) + [audio_el]
@@ -280,10 +287,8 @@ class _TtsStreamer:
         if not combined:
             return
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        tmp.write(combined)
-        tmp.close()
-        audio_el = cl.Audio(path=tmp.name, name="response.mp3", display="inline")
+        tmp_path = await _write_audio_tmp(combined)
+        audio_el = cl.Audio(path=tmp_path, name="response.mp3", display="inline")
         parent_msg.elements = list(getattr(parent_msg, "elements", None) or []) + [audio_el]
         await parent_msg.update()
 
@@ -315,6 +320,10 @@ def _image_to_data(image_path: Path) -> dict:
 def _track_session_upload(filename: str) -> None:
     """Yüklenen bir dosyayı session'daki kümülatif listeye ekler (sıra korunur, tekrar yok)."""
     if not filename:
+        return
+    # Path traversal koruması: "../" veya mutlak yol içeren isimler reddedilir
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        logger.warning("Güvensiz dosya adı reddedildi: %r", filename)
         return
     uploads = cl.user_session.get("session_uploads") or []
     if filename not in uploads:
@@ -460,8 +469,8 @@ async def set_chat_profiles():
         cl.ChatProfile(
             name=f"Frappe  ·  {settings.llm_model_name}",
             markdown_description=(
-                f"**{settings.llm_model_name}** — Multimodal RAG Agent\n\n"
-                "📄 Belge (RAG) · 🖼️ Görsel analiz · 🌐 Web arama · 🎤 Sesli giriş/çıkış"
+                f"**{settings.llm_model_name}** — FRAPPE\n\n"
+                "Multimodal RAG Agent"
             ),
             icon="/public/logo.svg",
         ),
@@ -473,7 +482,7 @@ async def set_starters():
     return [
         cl.Starter(label="📎 Dosya yükle (PDF/DOCX/XLSX/ses/görsel...)", message="/upload"),
         cl.Starter(label="🌐 URL'den belge ingest et", message="/url https://"),
-        cl.Starter(label="🤖 Aktif modelleri göster", message="/models"),
+        cl.Starter(label="Aktif modelleri göster", message="/models"),
         cl.Starter(label="☀️ Hava durumu", message="Istanbul hava durumu bugun nasil?"),
     ]
 
@@ -627,6 +636,10 @@ async def on_audio_end():
 
 # ── Helpers ──
 
+
+# ── Upload limitleri ──
+_MAX_FILES_PER_MESSAGE = 5    # Tek mesajda kabul edilecek maksimum dosya sayısı
+_MAX_FILE_SIZE_MB = 20        # Tek dosya için maksimum boyut (MB)
 
 MAX_HISTORY_TURNS = 20
 
@@ -825,14 +838,35 @@ async def on_message(message: cl.Message):
         sess_dir = Path(cl.user_session.get("session_upload_dir") or settings.upload_dir)
 
         if upload_candidates:
+            # Dosya sayısı limiti
+            if len(upload_candidates) > _MAX_FILES_PER_MESSAGE:
+                thinking_msg.content = (
+                    f"❌ Tek seferde en fazla **{_MAX_FILES_PER_MESSAGE}** dosya yüklenebilir. "
+                    f"({len(upload_candidates)} dosya gönderildi)"
+                )
+                await thinking_msg.update()
+                return
+
             status_lines = []
             for f in upload_candidates:
                 f_path = getattr(f, "path", None) or (f.get("path") if isinstance(f, dict) else None)
                 src = Path(f_path)
                 name = getattr(f, "name", None) or (f.get("name") if isinstance(f, dict) else None) or src.name
+
+                # Dosya boyutu limiti
+                try:
+                    size_mb = src.stat().st_size / (1024 * 1024)
+                    if size_mb > _MAX_FILE_SIZE_MB:
+                        status_lines.append(
+                            f"❌ **{name}** — {size_mb:.1f} MB, limit {_MAX_FILE_SIZE_MB} MB."
+                        )
+                        continue
+                except OSError:
+                    pass
+
                 dest = sess_dir / name
                 sess_dir.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(src.read_bytes())
+                await asyncio.to_thread(dest.write_bytes, src.read_bytes())
 
                 mime_val = getattr(f, "mime", None) or (f.get("mime") if isinstance(f, dict) else None) or ""
                 mime_str = str(mime_val)
@@ -938,7 +972,7 @@ async def on_message(message: cl.Message):
                     "text/csv",
                     "audio/mpeg", "audio/mp3", "audio/wav", "audio/ogg", "audio/x-wav",
                 ],
-                max_size_mb=50, timeout=180,
+                max_size_mb=_MAX_FILE_SIZE_MB, timeout=180,
             ).send()
             if not files:
                 thinking_msg.content = "Dosya yuklenmedi."
@@ -1172,11 +1206,7 @@ async def on_action_tts(action: cl.Action):
     voice = None if voice_pref == "auto" else voice_pref
     audio_bytes = await tts_synthesize(answer, voice=voice)
     if audio_bytes:
-        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        tmp.write(audio_bytes)
-        tmp.flush()
-        tmp_path = tmp.name
-        tmp.close()
+        tmp_path = await _write_audio_tmp(audio_bytes)
         await cl.Message(
             content="",
             elements=[cl.Audio(path=tmp_path, name="response.mp3", display="inline")],

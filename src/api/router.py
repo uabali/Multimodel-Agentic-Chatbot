@@ -142,7 +142,13 @@ async def health_check() -> HealthResponse:
     llm_info, qdrant_info = await asyncio.gather(
         _check_vllm(settings.llm_server_url),
         _check_qdrant(settings.qdrant_url),
+        return_exceptions=True,
     )
+
+    if isinstance(llm_info, Exception):
+        llm_info = {"reachable": False, "error": str(llm_info), "latency_ms": 0}
+    if isinstance(qdrant_info, Exception):
+        qdrant_info = {"reachable": False, "error": str(qdrant_info), "latency_ms": 0}
 
     total_ms = round((time.perf_counter() - t0) * 1000, 1)
 

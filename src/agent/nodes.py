@@ -514,7 +514,20 @@ async def grader_node(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def vision_node(state: AgentState) -> AgentState:
+def _build_vision_content_parts(image_data: list[dict], text: str) -> list[dict]:
+    """Görsel ve metin parçalarından LLM content listesi oluşturur."""
+    parts: list[dict] = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:{img['mime']};base64,{img['base64']}"},
+        }
+        for img in image_data
+    ]
+    parts.append({"type": "text", "text": text})
+    return parts
+
+
+async def vision_node(state: AgentState) -> AgentState:
     """Yüklenen görseli Gemma 4 multimodal API ile analiz eder.
 
     İçerik tipine göre (fatura, tablo, grafik, şema, genel) otomatik prompt seçimi yapılır.
@@ -525,17 +538,9 @@ def vision_node(state: AgentState) -> AgentState:
 
     image_names = [img.get("name", "") for img in image_data]
     system_prompt = select_vision_prompt(question, image_names)
-
-    content_parts: list[dict] = []
-    for img in image_data:
-        content_parts.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{img['mime']};base64,{img['base64']}"},
-        })
-    content_parts.append({
-        "type": "text",
-        "text": question.strip() or "Bu görseli analiz et.",
-    })
+    content_parts = _build_vision_content_parts(
+        image_data, question.strip() or "Bu görseli analiz et."
+    )
 
     logger.info("Vision node: %d görsel, prompt=%s, %d önceki mesaj",
                 len(image_data), system_prompt[:40].replace("\n", " "), len(prior_messages))
@@ -546,7 +551,7 @@ def vision_node(state: AgentState) -> AgentState:
     messages_to_send.append(HumanMessage(content=content_parts))
 
     try:
-        response = llm.invoke(messages_to_send)
+        response = await asyncio.to_thread(llm.invoke, messages_to_send)
         generation = response.content or ""
     except Exception as exc:
         logger.error("Vision node hata: %s", exc)
@@ -568,7 +573,7 @@ def vision_node(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def vision_rag_node(state: AgentState) -> AgentState:
+async def vision_rag_node(state: AgentState) -> AgentState:
     """Hibrit mode: görsel analizi yapar, sonucu state'e yazar; RAG pipeline devam eder.
 
     Akış: vision_rag → rewriter → retriever → grader → generator
@@ -580,21 +585,12 @@ def vision_rag_node(state: AgentState) -> AgentState:
 
     image_names = [img.get("name", "") for img in image_data]
     system_prompt = select_vision_prompt(question, image_names)
-
-    content_parts: list[dict] = []
-    for img in image_data:
-        content_parts.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{img['mime']};base64,{img['base64']}"},
-        })
-    content_parts.append({
-        "type": "text",
-        "text": (
-            "Bu görseli detaylıca analiz et. "
-            "Tüm metinleri, sayıları, tablo verilerini ve yapısal bilgileri eksiksiz çıkar. "
-            "Sonuç RAG sistemi için kaynak olarak kullanılacak."
-        ),
-    })
+    content_parts = _build_vision_content_parts(
+        image_data,
+        "Bu görseli detaylıca analiz et. "
+        "Tüm metinleri, sayıları, tablo verilerini ve yapısal bilgileri eksiksiz çıkar. "
+        "Sonuç RAG sistemi için kaynak olarak kullanılacak.",
+    )
 
     logger.info(
         "Vision-RAG: %d görsel analiz ediliyor (prompt=%s)",
@@ -603,10 +599,10 @@ def vision_rag_node(state: AgentState) -> AgentState:
     llm = _get_rag_llm(temperature=0.1)
 
     try:
-        response = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=content_parts),
-        ])
+        response = await asyncio.to_thread(
+            llm.invoke,
+            [SystemMessage(content=system_prompt), HumanMessage(content=content_parts)],
+        )
         vision_context = (response.content or "").strip()
     except Exception as exc:
         logger.warning("Vision-RAG görsel analizi başarısız: %s", exc)
@@ -639,21 +635,12 @@ async def vision_search_node(state: AgentState) -> AgentState:
     # ── Adım 1: Görsel analizi ──────────────────────────────────────────────
     image_names = [img.get("name", "") for img in image_data]
     system_prompt = select_vision_prompt(question, image_names)
-
-    content_parts: list[dict] = []
-    for img in image_data:
-        content_parts.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{img['mime']};base64,{img['base64']}"},
-        })
-    content_parts.append({
-        "type": "text",
-        "text": (
-            "Bu görseli analiz et. Tarih, tutar, döviz birimi, miktar gibi "
-            "tüm yapısal verileri olduğu gibi çıkar. "
-            "Sonuç gerçek zamanlı web verileriyle birleştirilecek."
-        ),
-    })
+    content_parts = _build_vision_content_parts(
+        image_data,
+        "Bu görseli analiz et. Tarih, tutar, döviz birimi, miktar gibi "
+        "tüm yapısal verileri olduğu gibi çıkar. "
+        "Sonuç gerçek zamanlı web verileriyle birleştirilecek.",
+    )
 
     logger.info("Vision-Search: %d görsel analiz ediliyor", len(image_data))
     llm = _get_rag_llm(temperature=0.1)
@@ -915,7 +902,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
             logger.warning("MCP araçları yüklenemedi: %s", exc)
 
     base_tools = [tavily_search, search_web, calculator, read_uploaded_file, mcp_call]
-    all_tools = _dedupe_tools(mcp_tools + base_tools)
+    all_tools = _get_deduped_tools_cached(mcp_tools, base_tools)
 
     system_prompt = build_generator_prompt(all_tools)
     llm = _get_agent_llm()
@@ -962,3 +949,19 @@ def _dedupe_tools(tools: list) -> list:
             seen.add(name)
             result.append(tool)
     return result
+
+
+def _get_deduped_tools_cached(mcp_tools: list, base_tools: list) -> list:
+    """Dedup sonucunu user_session'da cache'ler; MCP tool seti değişmezse yeniden hesaplamaz."""
+    try:
+        mcp_names = tuple(getattr(t, "name", "") for t in mcp_tools)
+        cached = cl.user_session.get("_deduped_tools_cache")
+        cached_key = cl.user_session.get("_deduped_tools_key")
+        if cached is not None and cached_key == mcp_names:
+            return cached
+        result = _dedupe_tools(mcp_tools + base_tools)
+        cl.user_session.set("_deduped_tools_cache", result)
+        cl.user_session.set("_deduped_tools_key", mcp_names)
+        return result
+    except Exception:
+        return _dedupe_tools(mcp_tools + base_tools)

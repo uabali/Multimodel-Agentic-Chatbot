@@ -25,3 +25,7 @@ uploads/
 
 # Claude Code local settings
 .claude/
+
+# Chainlit auto-generated files (not user-customized)
+.chainlit/translations/
+.chainlit/*.db
