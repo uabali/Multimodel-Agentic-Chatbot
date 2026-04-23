@@ -226,6 +226,11 @@ async def update_llm_config(
 
     # Önbelleği temizle — bir sonraki LLM çağrısında yeni URL kullanılır
     reset_llm_cache()
+    try:
+        from src.agent.nodes import reset_nodes_llm_cache
+        reset_nodes_llm_cache()
+    except Exception:
+        pass
 
     logger.info(
         "LLM URL güncellendi: %s → %s (model: %s)",

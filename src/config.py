@@ -39,8 +39,10 @@ class Settings(BaseSettings):
 
     # Sunucunun gerçek context penceresi (llama-server -c / vLLM max-model-len).
     # Generator bütçesi bu değerden max_tokens çıkarılarak hesaplanır.
+    # Varsayılan 4096 — llama-server genellikle bu değerle başlatılır.
+    # Daha büyük context için .env'de LLM_CONTEXT_SIZE=8192 ayarlayın.
     llm_context_size: int = Field(
-        default=8192,
+        default=4096,
         validation_alias=AliasChoices("LLM_CONTEXT_SIZE", "LLM_N_CTX"),
     )
 
@@ -119,6 +121,11 @@ class Settings(BaseSettings):
     mcp_filesystem_root: str = ""
     google_client_id: str = ""
     google_client_secret: str = ""
+
+    # ── Semantic Cache ──
+    semantic_cache_enabled: bool = True
+    semantic_cache_threshold: float = 0.92
+    semantic_cache_ttl_hours: int = 24
 
     # ── Confidence ──
     local_search_conf_threshold: float = 0.35

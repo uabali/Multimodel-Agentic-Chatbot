@@ -49,6 +49,7 @@ def _make_openai_compat_client(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "top_p": top_p,
+        "streaming": True,
     }
     if extra_body:
         kwargs["extra_body"] = extra_body

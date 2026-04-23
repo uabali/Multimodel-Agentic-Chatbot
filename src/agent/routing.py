@@ -63,6 +63,17 @@ _GENERAL_KNOWLEDGE_PATTERNS: list[str] = [
     r"\b(who (is|are|made|created|built|founded|developed|invented))\b",
     # Açık override — kullanıcı belgeyi dışladığını belirtiyor
     r"\b(belgeden hariç|belgede de[ğg]il|genel olarak|genel bilgi|d[ıi][şs]ar[ıi]dan)\b",
+    # Konum / köken soruları — "X nerede?", "X nereli?"
+    r"\b(nereli(dir)?|nerelisiniz?)\s*\??\s*$",
+    r"\b\w[\w\s]{0,40}\s+nerede\s*\??\s*$",
+    # Listeleme soruları — "X neler?", "X nelerdir?"
+    r"\b(neler(dir)?)\s*\??\s*$",
+    # Oluşum / süreç soruları — "nasıl oluştu/oluşur/meydana geldi?"
+    r"\b(nas[ıi]l\s+(olu[şs]tu|olu[şs]ur|meydana\s+geldi|meydana\s+gelir|ba[şs]lad[ıi]))\b",
+    # Neden soruları — "X neden Y?" (genel fizik/bilim/tarih)
+    r"^\s*[\w\sÀ-ɏ]{2,50}\s+neden\s+\w",
+    # "kim?" ile biten kısa genel bilgi soruları — "sahibi kim?", "kurucusu kim?"
+    r"\b(sahibi|kurucusu|mucidi|babas[ıi]|annesi|lideri|ba[şs]kan[ıi]?|kazananı?)\s+kim\s*\??\s*$",
 ]
 
 _DIRECT_PATTERNS: list[str] = [
@@ -79,6 +90,14 @@ _DIRECT_PATTERNS: list[str] = [
     r"^[\d\s\+\-\*\/\(\)\^\.]+$",
     r"(hesapla|calculate|asal|prime|fibonacci|factorial|s[ıi]rala|sort|reverse)",
     r"(yaz bir kod|write code|write a function|write a script)",
+    # Kod yazma / programlama istekleri (Türkçe & İngilizce)
+    r"(kod\s+(yazar\s*m[ıi]s[ıi]n|yaz[ıi]n?|ver[ir]?\s*m[ıi]s[ıi]n|oluştur|üret)|kodu?\s+(yaz|ver|oluştur))",
+    r"(kod\s+olarak\s+(ver|yaz|göster|sun))",
+    r"\b[Cc]\s+dili?nde?\s+",
+    r"(\b(python|javascript|typescript|java|rust|go|sql|bash|kotlin|swift|c\+\+)\s+(kodu?|programı?|scripti?|fonksiyon))",
+    r"(program\s+(yaz|oluştur|kodla)|algoritma\s+(yaz|oluştur|ver|kodla))",
+    r"(hesap\s+makinesi\s+(yap|oluştur|kodla|yaz|kod))",
+    r"(sql\s+(sorgu|query|oluştur|yaz)|sorgu\s+(yaz|oluştur|ver))",
     # Git / VCS / MCP araç çağrısı komutu (genel MCP tanımı DEĞİL)
     r"(github|gitlab|repo|repository|commit|pull request|branch|issue|gist)",
     r"^\s*mcp\s+(çağır|kullan|listele|call|use|list)",
@@ -109,6 +128,9 @@ _WEB_PATTERNS: list[str] = [
     r"(son\s+sürüm|yeni\s+sürüm|en\s+son\s+sürüm|latest\s+version|release\s+notes|changelog)",
     # Duyurular / haberler
     r"\b(duyurdu|açıkladı|released|launched|announced)\b",
+    # Kullanıcı açıkça web araması istiyor — "web search yap", "internetten ara" vb.
+    r"\b(web\s*[- ]?search\s*(yap|et)?|internett?en?\s+ara|internett?e?\s+bak|google'?[lL]a[yıi]?)\b",
+    r"\b(online\s+ara|arama\s+yap|ara[tı]\s+internett?e?)\b",
 ]
 
 _MCP_PATTERNS: list[str] = [
@@ -226,7 +248,7 @@ def normalize_web_query(question: str) -> str:
             end_str = f"{end_date.day} {months_tr[end_date.month]} {end_date.year}"
             normalized = f"{normalized} {start_str}-{end_str} günlük sıcaklık tahmin"
         elif not re.search(
-            r"(bugün|today|yarın|yarin|şu an|right now|currently|current|\d{4})",
+            r"(bug[üu]n|today|yar[ıi]n|[şs]u an|right now|currently|current|\d{4})",
             normalized, re.IGNORECASE
         ):
             normalized = f"{normalized} bugün"

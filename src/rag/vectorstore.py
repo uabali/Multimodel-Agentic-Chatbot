@@ -20,8 +20,16 @@ from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore, RetrievalMode
 from qdrant_client import QdrantClient, models
 
+from functools import lru_cache
+
 from src.config import settings
 from src.rag.embeddings import get_embeddings, get_embedding_dim
+
+
+@lru_cache(maxsize=256)
+def _cached_embed_query(query: str) -> list:
+    """Dense gate için embed sonucunu önbellekler (aynı sorgu retriever'da tekrar embed edilmez)."""
+    return get_embeddings().embed_query(query)
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +327,7 @@ class HybridVectorStore:
         if k is None:
             k = settings.rag_dense_gate_k
         try:
-            query_vector = self.embeddings.embed_query(query)
+            query_vector = _cached_embed_query(query)
             results = self.client.search(
                 collection_name=settings.qdrant_collection,
                 query_vector=(DENSE_VECTOR, query_vector),

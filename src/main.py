@@ -35,7 +35,7 @@ from pathlib import Path
 import chainlit as cl
 from chainlit.input_widget import Select, Slider, Switch
 from chainlit.server import app as _cl_app
-from langchain_core.messages import HumanMessage, AIMessage, AIMessageChunk
+from langchain_core.messages import HumanMessage, AIMessage, AIMessageChunk, SystemMessage
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -43,6 +43,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.config import settings
 from src.agent.graph import arun_agent, astream_agent
+from src.persistence.sqlite_data_layer import SQLiteDataLayer as _SQLiteDataLayer
 from src.mcp.mcp_client import get_mcp_tools, is_mcp_tools_cache_warm
 from src.rag.ingest import ingest_file
 from src.persistence.sqlite_data_layer import SQLiteDataLayer
@@ -145,6 +146,13 @@ async def on_chat_resume(thread):
     cl.user_session.set("chat_history", trimmed)
     if trimmed:
         cl.user_session.set("_resume_msg_count", len(trimmed))
+
+    # Önceki oturumdan özet yükle (uzun süreli bellek)
+    meta = thread.get("metadata", {}) if isinstance(thread, dict) else {}
+    summary = (meta.get("summary", "") or "") if isinstance(meta, dict) else ""
+    if summary:
+        cl.user_session.set("session_summary", summary)
+        logger.info("on_chat_resume: özet yüklendi (%dch)", len(summary))
 
 
 # ── Whisper / STT ──
@@ -362,14 +370,14 @@ async def _ingest_url(url: str, sess_dir: Path) -> dict | None:
 
 @cl.on_chat_start
 async def on_chat_start():
-    logger.info("=" * 60)
-    logger.info("Session starting...")
-    logger.info("  LLM: %s | Embedding: %s | Qdrant: %s",
-                settings.llm_model, settings.embedding_model, settings.qdrant_url)
-    logger.info("=" * 60)
-
-    # Session-scoped upload klasörü oluştur
     session_id = cl.user_session.get("id") or uuid.uuid4().hex
+    sid = session_id[:8]
+    logger.info(
+        "[%s] session_start [llm=%s, embed=%s, qdrant=%s, ctx=%dtok, rerank=%s]",
+        sid, settings.llm_model, settings.embedding_model,
+        settings.qdrant_url, settings.llm_context_size, settings.use_rerank,
+    )
+    cl.user_session.set("_session_id_short", session_id[:8])
     session_upload_dir = settings.upload_dir / f"session_{session_id}"
     session_upload_dir.mkdir(parents=True, exist_ok=True)
     cl.user_session.set("session_upload_dir", str(session_upload_dir))
@@ -541,7 +549,8 @@ async def on_audio_end():
         msg.content = f"**Transcript:** {text}\n\n"
         await msg.update()
 
-        lc_history = _build_lc_history(chat_history)
+        _audio_summary = cl.user_session.get("session_summary") or ""
+        lc_history = _build_lc_history(chat_history, summary=_audio_summary or None)
 
         # Pending görselleri kontrol et - sesli soruyla birlikte gönderilecek
         pending_images = cl.user_session.get("pending_vision_images", [])
@@ -623,7 +632,16 @@ async def on_audio_end():
 
         chat_history.append({"role": "user", "content": text})
         chat_history.append({"role": "assistant", "content": answer})
-        cl.user_session.set("chat_history", _trim_chat_history(chat_history))
+        if len(chat_history) >= _SUMMARY_TRIGGER:
+            thread_id = cl.user_session.get("id")
+            chat_history, new_summary = await _summarize_and_compress_history(
+                chat_history, thread_id
+            )
+            if new_summary:
+                cl.user_session.set("session_summary", new_summary)
+        else:
+            chat_history = _trim_chat_history(chat_history)
+        cl.user_session.set("chat_history", chat_history)
     except Exception as e:
         logger.error("STT error: %s", e, exc_info=True)
         msg.content = f"Audio processing error: {e}"
@@ -656,6 +674,70 @@ _MAX_STORED_MESSAGES = 100
 _MAX_HISTORY_CHARS = 6000
 
 
+# Uzun süreli bellek: bu eşiği geçince eski mesajlar LLM ile özetlenir.
+_SUMMARY_TRIGGER = 40       # Kaç mesajdan sonra özetleme başlatılır
+_SUMMARY_KEEP_RECENT = 10   # Özetlemeden sonra canlı tutulan son mesaj sayısı
+
+_dl_instance: "_SQLiteDataLayer | None" = None
+
+
+def _get_data_layer() -> "_SQLiteDataLayer":
+    global _dl_instance
+    if _dl_instance is None:
+        _dl_instance = _SQLiteDataLayer(Path("data") / "chainlit.db")
+    return _dl_instance
+
+
+async def _summarize_and_compress_history(
+    chat_history: list[dict],
+    thread_id: str | None,
+) -> tuple[list[dict], str]:
+    """Eski mesajları LLM ile özetler, chat_history'yi sıkıştırır.
+
+    Returns (compressed_history, summary_text).
+    compressed_history = son _SUMMARY_KEEP_RECENT mesaj.
+    """
+    from src.rag.llm import get_rag_llm
+
+    old_msgs = chat_history[:-_SUMMARY_KEEP_RECENT]
+    recent_msgs = chat_history[-_SUMMARY_KEEP_RECENT:]
+
+    lines = []
+    for m in old_msgs:
+        role = m.get("role", "")
+        content = (m.get("content", "") or "")[:600]
+        if role == "user":
+            lines.append(f"Kullanıcı: {content}")
+        elif role == "assistant":
+            lines.append(f"Asistan: {content}")
+
+    summary = ""
+    try:
+        llm = get_rag_llm()
+        prompt = (
+            "Aşağıdaki konuşmayı, ileride bağlam olarak kullanılacak şekilde "
+            "kısa ve bilgi yoğun biçimde özetle. Önemli kararları, gerçekleri "
+            "ve bağlamı koru. Maksimum 300 kelime.\n\n"
+            f"Konuşma:\n{chr(10).join(lines)}\n\nÖzet:"
+        )
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        summary = response.content.strip()
+        logger.info(
+            "Konuşma özetlendi: %d→%d mesaj, özet=%dch",
+            len(chat_history), len(recent_msgs), len(summary),
+        )
+    except Exception as exc:
+        logger.warning("Özetleme başarısız: %s", exc)
+
+    if summary and thread_id:
+        try:
+            await _get_data_layer().patch_thread_metadata(thread_id, {"summary": summary})
+        except Exception as exc:
+            logger.warning("Thread metadata güncellenemedi: %s", exc)
+
+    return recent_msgs, summary
+
+
 def _trim_chat_history(chat_history: list[dict]) -> list[dict]:
     """Trim in-memory chat_history to _MAX_STORED_MESSAGES.
 
@@ -667,7 +749,7 @@ def _trim_chat_history(chat_history: list[dict]) -> list[dict]:
     return chat_history
 
 
-def _build_lc_history(chat_history: list[dict]) -> list:
+def _build_lc_history(chat_history: list[dict], summary: str | None = None) -> list:
     """Son MAX_HISTORY_TURNS cift (user+assistant) mesaji LangChain formatina cevirir.
 
     Uc katmanli koruma:
@@ -675,6 +757,8 @@ def _build_lc_history(chat_history: list[dict]) -> list:
     2. Per-message truncation: her mesaj MAX_MSG_CHARS ile kesilir
     3. Total char budget: toplam karakter sayisi _MAX_HISTORY_CHARS'i asmaz
        (per-user context window'a sigdirmak icin)
+
+    summary verilirse en başa SystemMessage olarak eklenir (uzun süreli bellek).
     """
     MAX_MSG_CHARS = 1500
     lc = []
@@ -691,11 +775,16 @@ def _build_lc_history(chat_history: list[dict]) -> list:
     if len(lc) > max_msgs:
         lc = lc[-max_msgs:]
 
-    # Total character budget guard — trim from oldest until within budget
+    # Total character budget guard — trim oldest user+assistant PAIR to preserve role order
     total_chars = sum(len(m.content) for m in lc)
-    while total_chars > _MAX_HISTORY_CHARS and len(lc) > 2:
-        removed = lc.pop(0)
-        total_chars -= len(removed.content)
+    while total_chars > _MAX_HISTORY_CHARS and len(lc) >= 4:
+        # Always remove a pair (user + assistant) so history never starts with assistant
+        removed_u = lc.pop(0)
+        removed_a = lc.pop(0)
+        total_chars -= len(removed_u.content) + len(removed_a.content)
+
+    if summary:
+        lc.insert(0, SystemMessage(content=f"Önceki konuşma özeti:\n{summary}"))
 
     return lc
 
@@ -748,9 +837,16 @@ async def _timed_stream(gen, timeout: float):
 
 @cl.on_message
 async def on_message(message: cl.Message):
+    import time as _time
+    _t0 = _time.perf_counter()
     question = message.content
-    logger.info("Message received: %s...", question[:100])
+    sid = cl.user_session.get("_session_id_short", "?")
     chat_history = cl.user_session.get("chat_history", [])
+    n_attach = len(getattr(message, "elements", None) or [])
+    logger.info(
+        "[%s] → msg [len=%dch, history=%d, attachments=%d] '%.80s'",
+        sid, len(question), len(chat_history), n_attach, question,
+    )
     thinking_msg = cl.Message(content="")
     await thinking_msg.send()
 
@@ -1014,7 +1110,8 @@ async def on_message(message: cl.Message):
 
         # ── Agent streaming ──
 
-        lc_history = _build_lc_history(chat_history)
+        session_summary = cl.user_session.get("session_summary") or ""
+        lc_history = _build_lc_history(chat_history, summary=session_summary or None)
         source_filter = ingested_filenames[0] if len(ingested_filenames) == 1 else ""
         session_uploads: list[str] = list(cl.user_session.get("session_uploads") or [])
 
@@ -1042,6 +1139,24 @@ async def on_message(message: cl.Message):
         # Eğer image_paths varsa zaten yukarıda pending kontrolü yapıldı
         # Buraya geldiyse ya soru vardı (pending temizlendi) ya da görsel yoktu
         agent_image_data = [_image_to_data(p) for p in image_paths] if image_paths else []
+
+        # Yeni görsel yüklendiyse reuse counter sıfırla
+        if image_paths:
+            cl.user_session.set("_vision_reuse_left", 4)
+        elif not agent_image_data:
+            # Yeni görsel yok — önceki görsel follow-up turlar için yeniden kullan
+            reuse_left = cl.user_session.get("_vision_reuse_left", 0)
+            if reuse_left > 0:
+                last_imgs = cl.user_session.get("last_vision_images") or []
+                valid_imgs = [Path(p) for p in last_imgs if Path(p).exists()]
+                if valid_imgs:
+                    agent_image_data = [_image_to_data(p) for p in valid_imgs]
+                    cl.user_session.set("_vision_reuse_left", reuse_left - 1)
+                else:
+                    cl.user_session.set("_vision_reuse_left", 0)
+            else:
+                cl.user_session.set("last_vision_images", [])
+
         agent_input_type = "image" if agent_image_data else "text"
         
         thinking_msg.content = ""
@@ -1139,6 +1254,9 @@ async def on_message(message: cl.Message):
             final_parts = [answer]
             for i in range(0, len(answer), 24):
                 await thinking_msg.stream_token(answer[i:i + 24])
+            # Feed fallback answer into TTS streamer so audio isn't silently dropped
+            if tts_streamer:
+                tts_streamer.feed(answer)
 
         answer = "".join(final_parts).strip()
 
@@ -1183,12 +1301,30 @@ async def on_message(message: cl.Message):
             ]
             await thinking_msg.update()
 
+        logger.info(
+            "[%s] ← msg [route=%s, ans_len=%dch, total_t=%.3fs]",
+            sid, last_route or "?", len(answer), _time.perf_counter() - _t0,
+        )
         chat_history.append({"role": "user", "content": question})
         chat_history.append({"role": "assistant", "content": answer})
-        cl.user_session.set("chat_history", _trim_chat_history(chat_history))
+
+        if len(chat_history) >= _SUMMARY_TRIGGER:
+            thread_id = cl.user_session.get("id")
+            chat_history, new_summary = await _summarize_and_compress_history(
+                chat_history, thread_id
+            )
+            if new_summary:
+                cl.user_session.set("session_summary", new_summary)
+        else:
+            chat_history = _trim_chat_history(chat_history)
+
+        cl.user_session.set("chat_history", chat_history)
 
     except Exception as e:
-        logger.error("Agent error: %s", e, exc_info=True)
+        logger.error(
+            "[%s] ✗ msg [err=%s, total_t=%.3fs]",
+            sid, type(e).__name__, _time.perf_counter() - _t0, exc_info=True,
+        )
         thinking_msg.content = f"Error: {e}"
         await thinking_msg.update()
         chat_history.append({"role": "user", "content": question})
@@ -1242,9 +1378,10 @@ async def on_settings_update(settings_dict: dict):
     lines.append(f"🔍 Strateji: **{strategy}** · Reranker: **{'açık' if rerank else 'kapalı'}**")
     await cl.Message(content="\n".join(lines)).send()
 
+    sid = cl.user_session.get("_session_id_short", "?")
     logger.info(
-        "Settings updated: tts=%s voice=%s temp=%.2f max_tokens=%d strategy=%s rerank=%s",
-        tts_now, tts_voice, temp, max_tok, strategy, rerank,
+        "[%s] settings_update [tts=%s, voice=%s, temp=%.2f, max_tokens=%d, strategy=%s, rerank=%s]",
+        sid, tts_now, tts_voice, temp, max_tok, strategy, rerank,
     )
 
 
@@ -1257,15 +1394,21 @@ async def on_stop():
 async def on_chat_end():
     import shutil
 
-    # Session boyunca yüklenen dosyaların Qdrant chunk'larını temizle
+    sid = cl.user_session.get("_session_id_short", "?")
     session_uploads = cl.user_session.get("session_uploads") or []
+    chat_history = cl.user_session.get("chat_history") or []
+    n_turns = len(chat_history) // 2
+
     if session_uploads:
         try:
             from src.rag.vectorstore import get_hybrid_store
             await asyncio.to_thread(get_hybrid_store().delete_by_source, session_uploads)
-            logger.info("Session Qdrant temizliği: %d dosya silindi", len(session_uploads))
+            logger.info(
+                "[%s] session_cleanup: qdrant [files=%d, %s]",
+                sid, len(session_uploads), session_uploads,
+            )
         except Exception as exc:
-            logger.warning("Session Qdrant temizliği başarısız: %s", exc)
+            logger.warning("[%s] session_cleanup: qdrant_error [%s]", sid, exc)
 
     session_dir = cl.user_session.get("session_upload_dir")
     if session_dir:
@@ -1273,7 +1416,8 @@ async def on_chat_end():
         if p.exists() and p.is_dir():
             try:
                 shutil.rmtree(p)
-                logger.info("Session upload dir temizlendi: %s", p)
+                logger.info("[%s] session_cleanup: upload_dir [%s]", sid, p)
             except Exception as exc:
-                logger.warning("Session upload dir silinemedi: %s", exc)
-    logger.info("Session ended.")
+                logger.warning("[%s] session_cleanup: rmtree_error [%s]", sid, exc)
+
+    logger.info("[%s] session_end [turns=%d, uploads=%d]", sid, n_turns, len(session_uploads))

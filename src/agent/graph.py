@@ -29,6 +29,7 @@ SOLID uyumu:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from langgraph.graph import END, StateGraph
@@ -91,7 +92,9 @@ def _grader_decision(state: AgentState) -> str:
     """
     if state.get("relevance") == "yes":
         return "sufficient"
-    if state.get("source_filter") or state.get("session_uploads"):
+    # source_filter: bu turda yüklenen dosyayla ilgili sorgu → "bilgi belgede yok" demeli.
+    # session_uploads + "no": önceki turda yüklenen belgeyle ilgisiz sorgu → web aramasına düş.
+    if state.get("source_filter"):
         return "sufficient"
     return "insufficient"
 
@@ -272,10 +275,45 @@ async def astream_agent(
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
 ):
-    """Agent çalıştırıcı: mesaj ve güncelleme olaylarını stream eder."""
+    """Agent çalıştırıcı: mesaj ve güncelleme olaylarını stream eder.
+
+    Semantic cache etkinse:
+      - Önce benzer soru cache'te aranır; bulunursa pipeline atlanır.
+      - Bulunamazsa pipeline çalışır ve yanıt cache'e yazılır.
+    """
+    from src.config import settings as _s
+
+    # Semantic cache kontrolü — görsel/ses sorguları cache'e alınmaz
+    if _s.semantic_cache_enabled and not image_data and input_type == "text":
+        from src.rag.semantic_cache import SemanticCache
+        from langchain_core.messages import AIMessageChunk
+
+        cached = await SemanticCache.get().lookup(question)
+        if cached:
+            yield ("updates", {"generator": {"generation": cached}})
+            chunk_size = 20
+            for i in range(0, len(cached), chunk_size):
+                yield ("messages", (AIMessageChunk(content=cached[i:i + chunk_size]),
+                                    {"langgraph_node": "generator"}))
+            return
+
+    collected_generation = ""
     async for event in get_graph().astream(
         _init_state(question, chat_history, source_filter, image_data, input_type,
                     session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank),
         stream_mode=["messages", "updates"],
     ):
+        # Yanıtı cache için topla (generator / direct_response / vision)
+        if isinstance(event, tuple) and event[0] == "updates":
+            for node_name, delta in (event[1] or {}).items():
+                if isinstance(delta, dict):
+                    gen = delta.get("generation")
+                    if gen and node_name in {"generator", "direct_response", "vision"}:
+                        collected_generation = gen
         yield event
+
+    # Cache'e yaz (görsel/ses sorgular hariç)
+    if (_s.semantic_cache_enabled and collected_generation
+            and not image_data and input_type == "text"):
+        from src.rag.semantic_cache import SemanticCache
+        await SemanticCache.get().store(question, collected_generation)

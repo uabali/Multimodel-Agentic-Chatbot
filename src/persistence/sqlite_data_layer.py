@@ -29,8 +29,11 @@ class SQLiteDataLayer(BaseDataLayer):
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
     def _init_db(self) -> None:
@@ -69,11 +72,21 @@ class SQLiteDataLayer(BaseDataLayer):
                     createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
                     UNIQUE(userIdentifier, name))""")
             cur.execute("""
-                UPDATE threads SET userIdentifier = (
-                    SELECT identifier FROM users WHERE users.id = threads.userId)
-                WHERE (userIdentifier IS NULL OR userIdentifier = '')
-                  AND userId IS NOT NULL
-                  AND EXISTS (SELECT 1 FROM users WHERE users.id = threads.userId)""")
+                CREATE TABLE IF NOT EXISTS _migrations (
+                    id TEXT PRIMARY KEY, appliedAt TEXT NOT NULL)""")
+            # One-time backfill: populate userIdentifier from users table
+            cur.execute("SELECT id FROM _migrations WHERE id='backfill_user_identifier'")
+            if not cur.fetchone():
+                cur.execute("""
+                    UPDATE threads SET userIdentifier = (
+                        SELECT identifier FROM users WHERE users.id = threads.userId)
+                    WHERE (userIdentifier IS NULL OR userIdentifier = '')
+                      AND userId IS NOT NULL
+                      AND EXISTS (SELECT 1 FROM users WHERE users.id = threads.userId)""")
+                cur.execute(
+                    "INSERT INTO _migrations (id, appliedAt) VALUES ('backfill_user_identifier', ?)",
+                    (_now_iso(),)
+                )
             conn.commit()
 
     async def build_debug_url(self) -> str:
@@ -315,6 +328,22 @@ class SQLiteDataLayer(BaseDataLayer):
                 "metadata": json.loads(t["metadata"] or "{}"), "steps": steps,
             }
         return await self._run(_g)
+
+    async def patch_thread_metadata(self, thread_id: str, patch: Dict) -> None:
+        """Mevcut thread metadata'sını değiştirmeden patch uygular (JSON merge)."""
+        def _p():
+            with self._connect() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT metadata FROM threads WHERE id=?", (thread_id,))
+                row = cur.fetchone()
+                existing = json.loads(row["metadata"] or "{}") if row else {}
+                existing.update(patch)
+                cur.execute(
+                    "UPDATE threads SET metadata=?, updatedAt=? WHERE id=?",
+                    (json.dumps(existing), _now_iso(), thread_id),
+                )
+                conn.commit()
+        await self._run(_p)
 
     async def update_thread(self, thread_id: str, name: Optional[str] = None,
                             user_id: Optional[str] = None, metadata: Optional[Dict] = None,

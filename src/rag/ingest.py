@@ -39,20 +39,15 @@ except ImportError:
 try:
     from langchain_community.document_loaders import TextLoader
     LOADER_MAP[".txt"] = TextLoader
+    LOADER_MAP[".md"] = TextLoader  # UnstructuredMarkdownLoader 'markdown' paketi gerektirir
 except ImportError:
-    logger.warning("TextLoader bulunamadı; TXT desteği devre dışı.")
+    logger.warning("TextLoader bulunamadı; TXT/MD desteği devre dışı.")
 
 try:
     from langchain_community.document_loaders import UnstructuredWordDocumentLoader
     LOADER_MAP[".docx"] = UnstructuredWordDocumentLoader
 except ImportError:
     logger.warning("UnstructuredWordDocumentLoader bulunamadı; DOCX desteği devre dışı.")
-
-try:
-    from langchain_community.document_loaders import UnstructuredMarkdownLoader
-    LOADER_MAP[".md"] = UnstructuredMarkdownLoader
-except ImportError:
-    logger.warning("UnstructuredMarkdownLoader bulunamadı; MD desteği devre dışı.")
 
 try:
     from langchain_community.document_loaders import UnstructuredExcelLoader

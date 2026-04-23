@@ -32,13 +32,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 
 import chainlit as cl
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from src.agent.state import AgentState
-from src.agent.routing import keyword_route, is_web_query, needs_mcp_tools, is_weather_query
+from src.agent.routing import keyword_route, is_web_query, needs_mcp_tools, is_weather_query, normalize_web_query
 from src.agent.web_search import WebSearchService, WebResultFormatter
 from src.agent.prompts import (
     ROUTER_SYSTEM_PROMPT,
@@ -61,6 +62,7 @@ logger = logging.getLogger(__name__)
 
 
 _router_llm_cache = None
+_rag_llm_cache: dict[tuple, object] = {}
 
 
 def _get_router_llm():
@@ -76,16 +78,27 @@ def _get_rag_llm(temperature: float = 0.0, max_tokens: int | None = None):
     """RAG üretim / grader / rewriter LLM.
 
     temperature=0.0 ve max_tokens=None → DualLLM singleton (cached).
-    Diğer değerler yeni client oluşturur (per-session ayar desteği).
+    Diğer değerler (temperature, max_tokens) tuple'ı ile önbelleklenir;
+    per-session ayar değişikliklerinde TCP bağlantısı yeniden kullanılır.
     """
     if temperature == 0.0 and max_tokens is None:
         from src.rag.llm import get_rag_llm
         return get_rag_llm()
-    from src.rag.llm import create_vllm_llm
-    return create_vllm_llm(
-        temperature=temperature,
-        max_tokens=max_tokens or settings.rag_max_tokens,
-    )
+    key = (temperature, max_tokens)
+    if key not in _rag_llm_cache:
+        from src.rag.llm import create_vllm_llm
+        _rag_llm_cache[key] = create_vllm_llm(
+            temperature=temperature,
+            max_tokens=max_tokens or settings.rag_max_tokens,
+        )
+    return _rag_llm_cache[key]
+
+
+def reset_nodes_llm_cache() -> None:
+    """LLM ayarları runtime'da değiştiğinde (api/router.py) çağrılır."""
+    global _router_llm_cache
+    _router_llm_cache = None
+    _rag_llm_cache.clear()
 
 
 def _get_agent_llm():
@@ -103,22 +116,29 @@ class _RerankerRegistry:
     """Reranker instance'ını lazy olarak yükler ve önbellekte tutar."""
 
     _instance = None
+    _loading = False
 
     @classmethod
     def get(cls):
-        if cls._instance is None:
-            if settings.use_rerank:
-                try:
-                    from src.rag.reranker import create_reranker
-                    cls._instance = create_reranker(
-                        model_name=settings.reranker_model,
-                        device=settings.reranker_device,
-                    )
-                except Exception as exc:
-                    logger.warning("Reranker yüklenemedi (devre dışı): %s", exc)
-                    cls._instance = None
-            else:
-                cls._instance = None
+        if cls._instance is not None:
+            return cls._instance
+        if cls._loading:
+            # Another thread is loading; return None so caller skips rerank this request
+            return None
+        if not settings.use_rerank:
+            return None
+        cls._loading = True
+        try:
+            from src.rag.reranker import create_reranker
+            cls._instance = create_reranker(
+                model_name=settings.reranker_model,
+                device=settings.reranker_device,
+            )
+        except Exception as exc:
+            logger.warning("Reranker yüklenemedi (devre dışı): %s", exc)
+            cls._instance = None
+        finally:
+            cls._loading = False
         return cls._instance
 
 
@@ -169,22 +189,30 @@ async def router_node(state: AgentState) -> AgentState:
     Yol 1 (hızlı): Keyword eşleşmesi varsa LLM çağrısı yapılmaz.
     Yol 2 (yavaş): Belirsiz sorgular için düşük bütçeli LLM, text parsing ile rota belirlenir.
     """
+    t0 = time.perf_counter()
     question = state["question"]
     prior_messages = list(state.get("messages", []))
+    q_len = len(question)
 
     if state.get("image_data"):
-        logger.info("Router (vision): görsel içerik tespit edildi → 'vision'")
+        imgs = state["image_data"]
+        logger.info(
+            "Router → vision [images=%d, mimes=%s, q_len=%d, t=0.00s]",
+            len(imgs),
+            ",".join(img.get("mime", "?") for img in imgs),
+            q_len,
+        )
         return {**state, "route": "vision"}
 
     if state.get("input_type") == "audio":
-        logger.info("Router (audio): ses girdisi → 'direct' (hafif yol)")
+        logger.info("Router → direct [reason=audio, q_len=%d, t=0.00s]", q_len)
         return {**state, "route": "direct"}
 
     # Dosya yüklendiyse: deterministik RAG — keyword/LLM routing atlanır.
     if state.get("source_filter"):
         logger.info(
-            "Router (file): dosya bağlı sorgu → 'rag' (source_filter='%s')",
-            state["source_filter"],
+            "Router → rag [reason=source_filter, file='%s', q_len=%d, t=%.3fs]",
+            state["source_filter"], q_len, time.perf_counter() - t0,
         )
         return {**state, "route": "rag"}
 
@@ -192,28 +220,29 @@ async def router_node(state: AgentState) -> AgentState:
     fast_route = keyword_route(question, has_uploads=bool(session_uploads))
     if fast_route:
         logger.info(
-            "Router (keyword): %s ← '%.60s' (session_uploads=%d)",
-            fast_route, question, len(session_uploads),
+            "Router → %s [reason=keyword, uploads=%d, q_len=%d, t=%.3fs]",
+            fast_route, len(session_uploads), q_len, time.perf_counter() - t0,
         )
         return {**state, "route": fast_route}
 
-    # Session'da yüklü belge varsa ve keyword karar veremediyse RAG'ı tercih et
-    # (follow-up sorular için kritik — yoksa LLM router belge olduğunu bilmez).
-    # İstisna: açıkça web gerektiren sorgular (spor, finans, haber) → 'direct'.
     if session_uploads:
         if is_web_query(question):
             logger.info(
-                "Router (session-uploads + web override): web sorgusu → 'direct' (%.60s)",
-                question,
+                "Router → direct [reason=web_override+uploads, uploads=%d, q_len=%d, t=%.3fs]",
+                len(session_uploads), q_len, time.perf_counter() - t0,
             )
             return {**state, "route": "direct"}
         logger.info(
-            "Router (session-uploads bias): %d dosya yüklü → 'rag' (LLM atlandı)",
-            len(session_uploads),
+            "Router → rag [reason=uploads_bias, uploads=%d, q_len=%d, t=%.3fs]",
+            len(session_uploads), q_len, time.perf_counter() - t0,
         )
         return {**state, "route": "rag"}
 
-    logger.info("Router (LLM fallback): belirsiz sorgu işleniyor... (%d önceki mesaj)", len(prior_messages))
+    logger.info(
+        "Router → LLM [prior_msgs=%d, q_len=%d, max_tokens=%d]",
+        len(prior_messages), q_len, settings.router_max_tokens,
+    )
+    t_llm = time.perf_counter()
     llm = _get_router_llm()
     try:
         messages_to_send = [SystemMessage(content=ROUTER_SYSTEM_PROMPT)]
@@ -223,10 +252,13 @@ async def router_node(state: AgentState) -> AgentState:
         response = await llm.ainvoke(messages_to_send)
         route = _parse_route(response.content)
     except Exception as exc:
-        logger.warning("Router başarısız, 'direct' varsayıldı: %s", exc)
+        logger.warning("Router LLM başarısız → direct [err=%s]", exc)
         route = "direct"
 
-    logger.info("Router (LLM): %s", route)
+    logger.info(
+        "Router → %s [reason=llm, llm_t=%.3fs, total_t=%.3fs]",
+        route, time.perf_counter() - t_llm, time.perf_counter() - t0,
+    )
     return {**state, "route": route}
 
 
@@ -275,26 +307,36 @@ async def rewriter_node(state: AgentState) -> AgentState:
 
     Kısa/net sorgularda ve tek-turlu sorgularda LLM çağrısını atlar (~6s kazanç).
     """
+    t0 = time.perf_counter()
     question = state["question"]
     prior_messages = list(state.get("messages", []))
 
     if _should_skip_rewrite(question, prior_messages):
-        logger.info("Rewriter: atlandı (kısa/net sorgu) — '%.60s'", question)
+        logger.info(
+            "Rewriter: skip [reason=short_clear, q_len=%d, t=%.3fs]",
+            len(question), time.perf_counter() - t0,
+        )
         return state
 
-    logger.info("Rewriter: '%.60s' (%d önceki mesaj)", question, len(prior_messages))
     llm = _get_rag_llm(temperature=0.0)
     messages_to_send = [SystemMessage(content=REWRITER_SYSTEM_PROMPT)]
     if prior_messages:
-        # Maksimum 2 mesaj (1 tur) — daha fazlası halüsinasyon riskini artırır.
         messages_to_send.extend(prior_messages[-2:])
     messages_to_send.append(HumanMessage(content=question))
-    response = await llm.ainvoke(messages_to_send)
-    rewritten = response.content.strip()
-    logger.info("Rewriter sonucu: '%.80s'", rewritten)
 
-    # Halüsinasyon koruması: rewriter cevap ürettiyse orijinal soruya dön.
-    # Belirtiler: çok uzun metin, satır sonu içeriyor, veya cevap kalıpları var.
+    # Dense gate embedding ve LLM rewrite paralelde — retriever_node LRU cache'ten hızlı alır
+    async def _warm_embed_cache():
+        try:
+            from src.rag.vectorstore import _cached_embed_query
+            await asyncio.to_thread(_cached_embed_query, question)
+        except Exception:
+            pass
+
+    embed_task = asyncio.create_task(_warm_embed_cache())
+    response = await llm.ainvoke(messages_to_send)
+    await embed_task  # cache'in doldurulmasını garanti et
+    rewritten = response.content.strip()
+
     _ANSWER_MARKERS = ("ihtiyacım", "yapabilmem için", "kritik bilgi", "hesaplayabilmem",
                        "belirtmek isterim", "lütfen", "sunabilmem", "verebilmem")
     is_hallucination = (
@@ -303,9 +345,17 @@ async def rewriter_node(state: AgentState) -> AgentState:
         or any(m in rewritten.lower() for m in _ANSWER_MARKERS)
     )
     if is_hallucination:
-        logger.warning("Rewriter halüsinasyon → orijinal soru korunuyor: '%.80s'", rewritten)
+        logger.warning(
+            "Rewriter: hallucination → original kept [rewritten_len=%d, t=%.3fs]",
+            len(rewritten), time.perf_counter() - t0,
+        )
         return state
 
+    logger.info(
+        "Rewriter: rewritten [%d→%dch, prior=%d, t=%.3fs] '%.80s'",
+        len(question), len(rewritten), len(prior_messages),
+        time.perf_counter() - t0, rewritten,
+    )
     return {**state, "question": rewritten}
 
 
@@ -346,10 +396,10 @@ def _build_source_filter(source_filter: str, session_uploads: list[str] | None =
 
 async def retriever_node(state: AgentState) -> AgentState:
     """Hybrid retrieval + dense gate + opsiyonel reranking uygular."""
+    t0 = time.perf_counter()
     question = state["question"]
     source_filter = state.get("source_filter", "")
     session_uploads = state.get("session_uploads") or []
-    logger.info("Retriever: '%.80s'", question)
 
     try:
         from src.rag.vectorstore import get_hybrid_store
@@ -357,32 +407,26 @@ async def retriever_node(state: AgentState) -> AgentState:
 
         store = get_hybrid_store()
         qdrant_filter = _build_source_filter(source_filter, session_uploads)
-        if qdrant_filter:
-            if source_filter:
-                logger.info("Retriever: source_filter aktif → '%s'", source_filter)
-            else:
-                logger.info(
-                    "Retriever: session_uploads filtresi aktif → %s",
-                    session_uploads,
-                )
 
-        # source_filter (bu turda yüklenen tek dosya) veya session_uploads (oturumda
-        # yüklü ≥1 dosya) varsa dense gate atlanır — kullanıcı bir belge bağlamında
-        # soru sorduğu için düşük similarity skoru bile kabul edilir.
         if source_filter or session_uploads:
             dense_score = 1.0
-            logger.info(
-                "Dense gate: atlandı (source_filter='%s', session_uploads=%d)",
-                source_filter, len(session_uploads),
-            )
+            filter_desc = f"source_filter='{source_filter}'" if source_filter else f"uploads={session_uploads}"
+            logger.info("Retriever: dense_gate=skip [%s]", filter_desc)
         else:
+            t_gate = time.perf_counter()
             dense_score = await asyncio.to_thread(
                 store.max_dense_similarity, question, qdrant_filter=qdrant_filter
             )
+            logger.info(
+                "Retriever: dense_gate=%.3f [threshold=%.3f, t=%.3fs]",
+                dense_score, settings.rag_min_dense_similarity,
+                time.perf_counter() - t_gate,
+            )
             if dense_score < settings.rag_min_dense_similarity:
                 logger.info(
-                    "Dense gate: %.3f < eşik %.3f → boş sonuç",
+                    "Retriever: gate_reject [score=%.3f < %.3f, t=%.3fs]",
                     dense_score, settings.rag_min_dense_similarity,
+                    time.perf_counter() - t0,
                 )
                 return {**state, "documents": []}
 
@@ -402,10 +446,25 @@ async def retriever_node(state: AgentState) -> AgentState:
             rerank_top_n=settings.rerank_top_n,
             qdrant_filter=qdrant_filter,
         )
+        t_fetch = time.perf_counter()
         documents = await asyncio.to_thread(run_retriever, retriever, question)
-        logger.info("Retriever: %d belge (dense_score=%.3f)", len(documents), dense_score)
+        t_fetch_elapsed = time.perf_counter() - t_fetch
+
+        # Kaynak dağılımını özetle
+        sources: dict[str, int] = {}
+        for doc in documents:
+            meta = getattr(doc, "metadata", {}) or {}
+            src = meta.get("source_file", meta.get("source", "?"))
+            sources[src] = sources.get(src, 0) + 1
+        src_summary = ", ".join(f"{s}×{n}" for s, n in sources.items())
+
+        logger.info(
+            "Retriever: docs=%d [strategy=%s, rerank=%s, dense=%.3f, fetch_t=%.3fs, total_t=%.3fs] {%s}",
+            len(documents), strategy, use_rerank_val, dense_score,
+            t_fetch_elapsed, time.perf_counter() - t0, src_summary,
+        )
     except Exception as exc:
-        logger.warning("Retriever hatası: %s", exc)
+        logger.warning("Retriever: error [%s, t=%.3fs]", exc, time.perf_counter() - t0)
         documents = []
 
     return {**state, "documents": documents}
@@ -444,68 +503,74 @@ async def grader_node(state: AgentState) -> AgentState:
     Düşük güven  (<0.3): LLM atlanır → "no".
     Orta  (0.3–0.7):     LLM grader çalışır (borderline durum).
     """
+    t0 = time.perf_counter()
     from src.rag.retriever import estimate_confidence
 
     question = state["question"]
     documents = state.get("documents", [])
 
     if not documents:
-        logger.info("Grader: belge yok → 'no'")
+        logger.info("Grader: no_docs → relevance=no [t=%.3fs]", time.perf_counter() - t0)
         return {**state, "relevance": "no"}
 
-    # Dosya bağlı sorgularda confidence skoru atlanır: retriever zaten filtreyle
-    # eşleşmiş belgeleri döndürdüğünden skor her zaman yüksek gelir.
-    # LLM grader, belgenin soruyu TAMAMEN yanıtlayıp yanıtlamadığını değerlendirir —
-    # gerçek zamanlı veri gerektiren hibrit sorgularda web search'ün devreye girmesini sağlar.
     if state.get("source_filter") or state.get("session_uploads"):
         top_docs = documents[:MAX_GRADER_DOCS]
         doc_texts = "\n---\n".join(doc.page_content for doc in top_docs)
-        logger.info(
-            "Grader: dosya bağlı sorgu → LLM yeterlilik değerlendirmesi (source_filter='%s', session_uploads=%d)",
-            state.get("source_filter", ""),
-            len(state.get("session_uploads") or []),
-        )
+        doc_chars = sum(len(d.page_content) for d in top_docs)
         llm = _get_rag_llm(temperature=0.0)
         try:
+            t_llm = time.perf_counter()
             response = await llm.ainvoke([
                 SystemMessage(content=GRADER_SYSTEM_PROMPT),
                 HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
             ])
             relevance = _parse_yes_no(response.content)
+            logger.info(
+                "Grader: relevance=%s [mode=file_llm, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
+                relevance, len(top_docs), len(documents), doc_chars,
+                time.perf_counter() - t_llm, time.perf_counter() - t0,
+            )
         except Exception as exc:
-            logger.warning("Grader başarısız, 'yes' varsayıldı: %s", exc)
+            logger.warning("Grader: llm_error → yes [err=%s, t=%.3fs]", exc, time.perf_counter() - t0)
             relevance = "yes"
-        logger.info("Grader (dosya): %s", relevance)
         return {**state, "relevance": relevance}
 
     confidence = estimate_confidence(question, documents)
-    logger.info("Grader: confidence=%.3f (%d belge)", confidence, len(documents))
 
     if confidence >= _GRADER_CONF_HIGH:
-        logger.info("Grader: yüksek güven → 'yes' (LLM atlandı)")
+        logger.info(
+            "Grader: relevance=yes [mode=high_conf, conf=%.3f>=%.3f, docs=%d, t=%.3fs]",
+            confidence, _GRADER_CONF_HIGH, len(documents), time.perf_counter() - t0,
+        )
         return {**state, "relevance": "yes"}
 
     if confidence < _GRADER_CONF_LOW:
-        logger.info("Grader: düşük güven → 'no' (LLM atlandı)")
+        logger.info(
+            "Grader: relevance=no [mode=low_conf, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
+            confidence, _GRADER_CONF_LOW, len(documents), time.perf_counter() - t0,
+        )
         return {**state, "relevance": "no"}
 
-    # Orta güven: LLM doğrulaması
     top_docs = documents[:MAX_GRADER_DOCS]
     doc_texts = "\n---\n".join(doc.page_content for doc in top_docs)
-    logger.info("Grader: orta güven (%.3f) → LLM değerlendirmesi", confidence)
-
+    doc_chars = sum(len(d.page_content) for d in top_docs)
     llm = _get_rag_llm(temperature=0.0)
     try:
+        t_llm = time.perf_counter()
         response = await llm.ainvoke([
             SystemMessage(content=GRADER_SYSTEM_PROMPT),
             HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
         ])
         relevance = _parse_yes_no(response.content)
+        logger.info(
+            "Grader: relevance=%s [mode=mid_conf, conf=%.3f, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
+            relevance, confidence, len(top_docs), len(documents), doc_chars,
+            time.perf_counter() - t_llm, time.perf_counter() - t0,
+        )
     except Exception as exc:
-        logger.warning("Grader başarısız, 'yes' varsayıldı: %s", exc)
+        logger.warning("Grader: llm_error → yes [err=%s, t=%.3fs]", exc, time.perf_counter() - t0)
         relevance = "yes"
 
-    logger.info("Grader: %s", relevance)
     return {**state, "relevance": relevance}
 
 
@@ -542,8 +607,15 @@ async def vision_node(state: AgentState) -> AgentState:
         image_data, question.strip() or "Bu görseli analiz et."
     )
 
-    logger.info("Vision node: %d görsel, prompt=%s, %d önceki mesaj",
-                len(image_data), system_prompt[:40].replace("\n", " "), len(prior_messages))
+    img_sizes = [len(img.get("base64", "")) * 3 // 4 for img in image_data]
+    logger.info(
+        "Vision: images=%d [mimes=%s, sizes=%s], prior=%d, temp=0.2",
+        len(image_data),
+        ",".join(img.get("mime", "?") for img in image_data),
+        ",".join(f"{s//1024}KB" for s in img_sizes),
+        len(prior_messages),
+    )
+    t0 = time.perf_counter()
     llm = _get_rag_llm(temperature=0.2)
 
     messages_to_send = [SystemMessage(content=system_prompt)]
@@ -551,10 +623,14 @@ async def vision_node(state: AgentState) -> AgentState:
     messages_to_send.append(HumanMessage(content=content_parts))
 
     try:
-        response = await asyncio.to_thread(llm.invoke, messages_to_send)
+        response = await llm.ainvoke(messages_to_send)
         generation = response.content or ""
+        logger.info(
+            "Vision: done [ans_len=%dch, t=%.3fs]",
+            len(generation), time.perf_counter() - t0,
+        )
     except Exception as exc:
-        logger.error("Vision node hata: %s", exc)
+        logger.error("Vision: error [%s, t=%.3fs]", exc, time.perf_counter() - t0)
         generation = (
             "Görseli işleyemedim. Lütfen PNG, JPEG veya WEBP formatında "
             "ve makul boyutta (< 5 MB) bir görsel yükleyin."
@@ -691,15 +767,11 @@ async def generator_node(state: AgentState) -> AgentState:
 
     vision_context mevcutsa [Görsel Analizi] başlığıyla bağlamın başına eklenir.
     """
+    t0 = time.perf_counter()
     question = state["question"]
     documents = state.get("documents", [])
     prior_messages = list(state.get("messages", []))
     vision_context = state.get("vision_context", "")
-
-    logger.info(
-        "Generator: %d belge + görsel=%s, %d önceki mesaj",
-        len(documents), "var" if vision_context else "yok", len(prior_messages),
-    )
 
     if documents or vision_context:
         context_parts = []
@@ -713,8 +785,11 @@ async def generator_node(state: AgentState) -> AgentState:
         # Türkçe için muhafazakâr: 1 token ≈ 2.5 karakter.
         n_ctx = settings.llm_context_size
         output_tokens = state.get("max_tokens") or settings.rag_max_tokens
-        overhead_tokens = 600  # sistem şablonu + soru + son 2 mesaj + pay
-        input_budget_tokens = max(512, n_ctx - output_tokens - overhead_tokens)
+        # prior_messages[-2:] yaklaşık token maliyetini hesaba kat
+        prior_chars = sum(len(getattr(m, "content", "") or "") for m in prior_messages[-2:])
+        prior_tokens_est = max(0, prior_chars // 4)
+        overhead_tokens = 800 + prior_tokens_est  # sistem şablonu + soru + geçmiş + pay
+        input_budget_tokens = max(256, n_ctx - output_tokens - overhead_tokens)
         budget_chars = int(input_budget_tokens * 2.5)
         used_chars = sum(len(p) for p in context_parts)
 
@@ -732,11 +807,24 @@ async def generator_node(state: AgentState) -> AgentState:
             context_parts.append(f"{header}\n{content}")
             used_chars += len(header) + len(content) + 10
 
+        docs_included = len(context_parts) - (1 if vision_context else 0)
         context = "\n\n---\n\n".join(context_parts)
         # .replace() yerine .format() kullanılmaz — PDF/kod içindeki { } format() çökertiyor
         system_content = RAG_WITH_CONTEXT_SYSTEM_PROMPT.replace("{context}", context)
+        logger.info(
+            "Generator: ctx_budget=%dtok/%dch, used=%dch, docs=%d/%d, vision=%s, prior=%d, "
+            "n_ctx=%d, output_max=%dtok, overhead=%dtok",
+            input_budget_tokens, budget_chars, used_chars,
+            docs_included, len(documents), bool(vision_context),
+            len(prior_messages[-2:]), n_ctx, output_tokens, overhead_tokens,
+        )
     else:
         system_content = RAG_NO_CONTEXT_SYSTEM_PROMPT
+        logger.info(
+            "Generator: no_context [prior=%d, n_ctx=%d, output_max=%dtok]",
+            len(prior_messages[-2:]), settings.llm_context_size,
+            state.get("max_tokens") or settings.rag_max_tokens,
+        )
 
     session_temp = state.get("temperature") or 0.0
     session_max_tok = state.get("max_tokens") or None
@@ -746,8 +834,15 @@ async def generator_node(state: AgentState) -> AgentState:
     messages_to_send.extend(prior_messages[-2:])
     messages_to_send.append(HumanMessage(content=question))
 
+    t_llm = time.perf_counter()
     response = await llm.ainvoke(messages_to_send)
-    generation = response.content
+    generation = response.content or ""
+
+    logger.info(
+        "Generator: done [ans_len=%dch, temp=%.2f, llm_t=%.3fs, total_t=%.3fs]",
+        len(generation), session_temp,
+        time.perf_counter() - t_llm, time.perf_counter() - t0,
+    )
 
     new_messages = [
         *prior_messages,
@@ -771,12 +866,13 @@ async def web_search_node(state: AgentState) -> AgentState:
     # Orijinal soru vektör DB için yeniden yazılmış olabilir; web için doğal dili tercih et.
     question = state.get("original_question") or state["question"]
     existing_docs = state.get("documents", [])
+    search_query = normalize_web_query(question)
 
     async with cl.Step(name="Web Search", type="tool") as step:
-        step.input = question
+        step.input = search_query
 
         service = _get_web_search_service()
-        result = await service.search(question) if service else None
+        result = await service.search(search_query) if service else None
 
         if result is None:
             logger.warning("Web search: Tavily kullanılamıyor veya sonuç yok")
@@ -847,7 +943,7 @@ async def _fast_web_summarize(question: str, result_text: str, prior_messages: l
     messages_to_send.append(
         HumanMessage(content=f"Question: {question}\n\nWeb results:\n{result_text[:5000]}")
     )
-    response = await asyncio.to_thread(llm.invoke, messages_to_send)
+    response = await llm.ainvoke(messages_to_send)
     text = (response.content or "").strip()
     return WebResultFormatter.append_sources(text, result_text, question)
 
@@ -858,19 +954,36 @@ async def direct_response_node(state: AgentState) -> AgentState:
     Web sorguları için hızlı yol: ReAct döngüsüne girmeden önce web sonucunu
     özetler ve döner. Geri kalan sorgular için araçlı ReAct agent çalıştırılır.
     """
+    t0 = time.perf_counter()
     question = state["question"]
     prior_messages = list(state.get("messages", []))
-    logger.info("Direct Response: '%.80s' (%d önceki mesaj)", question, len(prior_messages))
 
     # Hızlı yol — gerçek zamanlı web sorguları
     if is_web_query(question):
         service = _get_web_search_service()
-        web_result = await service.search(question) if service else None
+        search_query = normalize_web_query(question)
+        logger.info(
+            "Direct: web_fast [query='%.80s', prior=%d]",
+            search_query, len(prior_messages),
+        )
+        t_search = time.perf_counter()
+        web_result = await service.search(search_query) if service else None
         if web_result:
+            logger.info(
+                "Direct: web_result [provider=%s, chars=%d, search_t=%.3fs]",
+                web_result.provider, len(web_result.text),
+                time.perf_counter() - t_search,
+            )
+            t_sum = time.perf_counter()
             if is_weather_query(question) and _is_pure_weather_query(question):
                 answer = WebResultFormatter.format_weather(question, web_result.text)
+                logger.info("Direct: weather_format [ans_len=%dch, t=%.3fs]", len(answer), time.perf_counter() - t_sum)
             else:
                 answer = await _fast_web_summarize(question, web_result.text, prior_messages)
+                logger.info(
+                    "Direct: web_summarize [ans_len=%dch, llm_t=%.3fs, total_t=%.3fs]",
+                    len(answer), time.perf_counter() - t_sum, time.perf_counter() - t0,
+                )
 
             new_messages = [
                 *prior_messages,
@@ -878,6 +991,8 @@ async def direct_response_node(state: AgentState) -> AgentState:
                 AIMessage(content=answer),
             ]
             return {**state, "generation": answer, "messages": new_messages}
+        else:
+            logger.warning("Direct: web_no_result [search_t=%.3fs]", time.perf_counter() - t_search)
 
     # Normal yol — araçlı ReAct agent (backend capability dependent)
     from langgraph.prebuilt import create_react_agent
@@ -909,7 +1024,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
     backend = (settings.llm_backend or "").lower().strip()
 
     if backend in {"llama.cpp", "llamacpp", "llama"} and needs_mcp_tools(question):
-        logger.info("Tool calling disabled on llama.cpp backend; returning non-tool response.")
+        logger.info("Direct: react_skip [reason=llamacpp_no_tools, prior=%d]", len(prior_messages))
         messages_to_send = [SystemMessage(content=system_prompt)]
         messages_to_send.extend(prior_messages)
         messages_to_send.append(HumanMessage(content=question))
@@ -922,10 +1037,19 @@ async def direct_response_node(state: AgentState) -> AgentState:
         ]
         return {**state, "generation": generation, "messages": new_messages}
 
+    logger.info(
+        "Direct: react_agent [tools=%d, prior=%d, backend=%s]",
+        len(all_tools), len(prior_messages), backend,
+    )
+    t_react = time.perf_counter()
     agent = create_react_agent(llm, all_tools, prompt=system_prompt)
     result = await agent.ainvoke({"messages": prior_messages + [HumanMessage(content=question)]})
 
     generation = result["messages"][-1].content
+    logger.info(
+        "Direct: react_done [ans_len=%dch, react_t=%.3fs, total_t=%.3fs]",
+        len(generation), time.perf_counter() - t_react, time.perf_counter() - t0,
+    )
     new_messages = [
         *prior_messages,
         HumanMessage(content=question),
