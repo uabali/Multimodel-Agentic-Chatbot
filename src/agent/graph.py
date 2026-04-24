@@ -85,16 +85,18 @@ def _grader_decision(state: AgentState) -> str:
     "insufficient" → web_search → generator (doğrudan edge, grader'a geri dönmez).
     Döngü koruması graph yapısı tarafından sağlanır, retry_count burada gereksiz.
 
-    Dosya-bağlı sorgularda (source_filter veya session_uploads aktifken) web
-    aramasına düşmek tehlikeli: kullanıcı belgede olmayan bir alan sorduğunda
-    (ör. CV'de olmayan LinkedIn URL'si) web'den konu-genelinde alakasız
-    sonuçlar getirilmesin. Generator dürüstçe "bu bilgi belgede yok" der.
+    source_filter aktifken iki senaryo:
+    - reason="irrelevant": belge soruyla ilgisiz → "bu bilgi belgede yok" de, web arama.
+    - reason="needs_live_data": belge formülü içeriyor ama canlı veri eksik → web arama.
+    Reason belirsizse/yoksa: güvenli taraf olan "sufficient" seçilir.
     """
     if state.get("relevance") == "yes":
         return "sufficient"
-    # source_filter: bu turda yüklenen dosyayla ilgili sorgu → "bilgi belgede yok" demeli.
-    # session_uploads + "no": önceki turda yüklenen belgeyle ilgisiz sorgu → web aramasına düş.
     if state.get("source_filter"):
+        # Yalnızca canlı veri gerekiyorsa web fallback'e izin ver; diğer durumlarda
+        # generator "bu bilgi belgede yok" diye yanıt vermeli.
+        if state.get("grader_reason") == "needs_live_data":
+            return "insufficient"
         return "sufficient"
     return "insufficient"
 
@@ -173,7 +175,12 @@ _graph = None
 
 
 def get_graph():
-    """Graph singleton'ını döner (ilk çağrıda derlenir)."""
+    """Graph singleton'ını döner (ilk çağrıda derlenir).
+
+    Thread safety: build_graph() senkrondur (await noktası yok). asyncio
+    cooperative scheduling'de iki coroutine aynı anda buraya giremez.
+    Güvenli, ek lock gereksiz.
+    """
     global _graph
     if _graph is None:
         _graph = build_graph()
@@ -206,6 +213,7 @@ def _init_state(
         "generation": "",
         "route": "",
         "relevance": "",
+        "grader_reason": "",
         "source_filter": source_filter,
         "session_uploads": list(session_uploads or []),
         "image_data": image_data or [],
@@ -281,14 +289,27 @@ async def astream_agent(
       - Önce benzer soru cache'te aranır; bulunursa pipeline atlanır.
       - Bulunamazsa pipeline çalışır ve yanıt cache'e yazılır.
     """
+    import hashlib as _hashlib
+    import json as _json
     from src.config import settings as _s
+
+    # Semantic cache bağlam anahtarı — aynı soru farklı belge setlerinde
+    # yanlış cache dönmesini engeller.
+    def _build_cache_ctx() -> str:
+        payload = _json.dumps({
+            "sf": source_filter or "",
+            "su": sorted(session_uploads or []),
+            "rs": retrieval_strategy or "",
+        }, sort_keys=True)
+        return _hashlib.sha256(payload.encode()).hexdigest()[:16]
 
     # Semantic cache kontrolü — görsel/ses sorguları cache'e alınmaz
     if _s.semantic_cache_enabled and not image_data and input_type == "text":
         from src.rag.semantic_cache import SemanticCache
         from langchain_core.messages import AIMessageChunk
 
-        cached = await SemanticCache.get().lookup(question)
+        cache_ctx = _build_cache_ctx()
+        cached = await SemanticCache.get().lookup(question, cache_ctx=cache_ctx)
         if cached:
             yield ("updates", {"generator": {"generation": cached}})
             chunk_size = 20
@@ -296,6 +317,8 @@ async def astream_agent(
                 yield ("messages", (AIMessageChunk(content=cached[i:i + chunk_size]),
                                     {"langgraph_node": "generator"}))
             return
+    else:
+        cache_ctx = ""
 
     collected_generation = ""
     async for event in get_graph().astream(
@@ -316,4 +339,4 @@ async def astream_agent(
     if (_s.semantic_cache_enabled and collected_generation
             and not image_data and input_type == "text"):
         from src.rag.semantic_cache import SemanticCache
-        await SemanticCache.get().store(question, collected_generation)
+        await SemanticCache.get().store(question, collected_generation, cache_ctx=cache_ctx)

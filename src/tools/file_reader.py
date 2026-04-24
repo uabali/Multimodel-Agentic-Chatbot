@@ -16,7 +16,10 @@ def read_uploaded_file(filename: str) -> str:
     Args:
         filename: Name of the file in the uploads directory.
     """
-    file_path = settings.upload_dir / filename
+    upload_root = settings.upload_dir.resolve()
+    file_path = (upload_root / filename).resolve()
+    if not file_path.is_relative_to(upload_root):
+        return "Access denied: path outside upload directory"
     if not file_path.exists():
         return f"File not found: {filename}"
 

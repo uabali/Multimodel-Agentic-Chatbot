@@ -1,9 +1,11 @@
 ================================================================================
-TEKNİK MİMARİ RAPORU: Multi-modal Agentic RAG Pipeline
+TEKNİK MİMARİ RAPORU — FRAPPE
+Multimodal Agentic RAG Pipeline
 ================================================================================
-Proje  : Multimodal-Agentic-Chatbot
-Tarih  : 19 Nisan 2026
-Stack  : Python 3.12 · LangGraph · Qdrant · Gemma 4 E4B · Chainlit
+Proje   : FRAPPE (Fully-local Retrieval Augmented Pipeline with Persistent Engine)
+Tarih   : 25 Nisan 2026
+Yazar   : @uabali
+Stack   : Python 3.12 · LangGraph 0.4 · Qdrant · Gemma 4 E4B · Chainlit 2.x
 ================================================================================
 
 
@@ -11,660 +13,883 @@ Stack  : Python 3.12 · LangGraph · Qdrant · Gemma 4 E4B · Chainlit
 1. YÜKSEK SEVİYE MİMARİ
 ────────────────────────────────────────────────────────────────────────────────
 
-┌─────────────────────────────────────────────────────────────────┐
-│                   Chainlit UI (Port 7860)                       │
-│  STT (faster-whisper) ← Audio  Text  Image → TTS (edge-tts)  │
-│            FastAPI Admin (/api/*) — embedded router             │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │ astream_agent()
-┌─────────────────────────▼───────────────────────────────────────┐
-│                   LangGraph DAG (StateGraph)                    │
-│                                                                 │
-│  START → Router → [rag | direct | vision | vision_rag |         │
-│                    vision_search]                               │
-│                                                                 │
-│  RAG PATH:   Rewriter → Retriever → Grader                     │
-│              ↓ sufficient     ↓ insufficient                    │
-│           Generator      WebSearch → Generator → END            │
-│                                                                 │
-│  DIRECT:   DirectResponse (ReAct Agent / FastPath Web) → END   │
-│  VISION:   VisionNode → END                                     │
-│  VISION_RAG: VisionRAG → Rewriter → ... → Generator → END      │
-│  VISION_SEARCH: VisionSearch → Generator → END                 │
-└──────────────┬────────────────────────┬────────────────────────┘
-               │                        │
-┌──────────────▼──────┐    ┌────────────▼──────────────────────┐
-│  llama.cpp / vLLM   │    │   Qdrant (Docker, port 6333)      │
-│  Gemma 4 E4B (GGUF) │    │   Dense: BGE-M3 (1024-dim)        │
-│  OpenAI-compat API  │    │   Sparse: BM25 (FastEmbedSparse)  │
-│  Port 8080 / 8000   │    │   Collection: user_documents       │
-└─────────────────────┘    └───────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                      Chainlit UI (port 7860)                              │
+│  Text · Image · Audio (STT: faster-whisper) · TTS (edge-tts)             │
+│  FastAPI Admin Router (/api/*) — Chainlit'e mount                        │
+└─────────────────────────────┬────────────────────────────────────────────┘
+                              │ astream_agent()
+         ┌────────────────────▼────────────────────────────────────┐
+         │                LangGraph StateGraph (DAG)                │
+         │                                                          │
+         │  SemanticCache.lookup() ──── hit? ──── stream + return  │
+         │          │ miss                                          │
+         │          ▼                                               │
+         │  Router (keyword Tier 0-3 | LLM Tier 4)                 │
+         │    ├─ rag   → Rewriter → Retriever → Grader             │
+         │    │              sufficient → Generator → END           │
+         │    │              insufficient → WebSearch → Generator   │
+         │    ├─ direct → DirectResponse (ReAct Agent) → END       │
+         │    ├─ vision → VisionNode → END                          │
+         │    ├─ vision_rag → VisionRAG → Rewriter → RAG path      │
+         │    └─ vision_search → VisionSearch → Generator → END    │
+         │          │                                               │
+         │  SemanticCache.store()                                   │
+         └─────────┬──────────────────────┬────────────────────────┘
+                   │                      │
+    ┌──────────────▼──────┐  ┌────────────▼─────────────────────────┐
+    │  llama.cpp / vLLM   │  │  Qdrant (Docker, port 6333/6334)     │
+    │  Gemma 4 E4B GGUF   │  │  user_documents: Dense BGE-M3 +BM25  │
+    │  OpenAI-compat API  │  │  semantic_cache: cosine TTL cache    │
+    │  port 8080 / 8000   │  └──────────────────────────────────────┘
+    └─────────────────────┘
+         │ also used by:
+    ┌────▼──────────────────────────┐
+    │  BGE-M3 embeddings (CPU)      │
+    │  BGE Reranker Base (CPU)      │
+    │  faster-whisper small (CPU)   │
+    └───────────────────────────────┘
 
 
 ────────────────────────────────────────────────────────────────────────────────
-2. KATMAN-KATMAN ANALİZ
+2. AGENT STATE — src/agent/state.py
 ────────────────────────────────────────────────────────────────────────────────
 
-2.1 Frontend Katmanı — src/main.py
-───────────────────────────────────
-
-Chainlit üzerine kurulu frontend, aynı zamanda uygulamanın orkestrasyon giriş
-noktasıdır.
-
-Ses Hattı (STT/TTS):
-- faster-whisper ile PCM → WAV dönüşümü sonrası transcription
-  (asyncio.to_thread ile bloklamayan)
-- _TtsStreamer sınıfı: LLM stream ederken PARALELDE ilk 150 karakterlik sesi
-  sentezliyor, streaming bitince kalan ses ile MP3 concat ediyor.
-  Tek audio element olarak gönderildiğinden seamless playback sağlıyor.
-- Whisper ve Reranker modelleri on_chat_start'ta asyncio.create_task() ile
-  background preload yapılıyor — ilk kullanımda gecikme yok.
-
-Konuşma Geçmişi Yönetimi — 3 Katmanlı Koruma:
-  _MAX_STORED_MESSAGES = 100    → RAM koruması (session dict'i)
-  MAX_HISTORY_TURNS    = 20     → LLM context'e kaç tur gönderilir
-  _MAX_HISTORY_CHARS   = 6000   → Token budget guard (4K per-user context)
-
-Dosya İşleme Pipeline'ı:
-  Format               İşlem
-  ─────────────────────────────────────────────────────────────────
-  PDF, DOCX, TXT, ...  ingest_file() → Qdrant
-  PNG, JPG, WEBP       Base64 encode → pending_vision_images
-  MP3, WAV, OGG        Whisper STT → TXT → ingest_file()
-  URL (/url komutu)    WebBaseLoader → scrape → TXT → ingest_file()
-
-Auth Güvenliği:
-- PBKDF2-HMAC-SHA256, 210.000 iterasyon (OWASP 2024 önerisi ≥210K)
-- hmac.compare_digest ile sabit-zamanlı karşılaştırma (timing attack önlemi)
-- CHAINLIT_AUTH_SECRET yoksa rastgele oluşturulur, uyarı loglanır
-
-
-2.2 Agent State — src/agent/state.py
-──────────────────────────────────────
-
-LangGraph TypedDict tanımı minimal ve temiz:
+LangGraph'ın paylaşımlı durum nesnesi. TypedDict olarak tanımlanmıştır; her
+alan tek bir sorumluluğa sahiptir.
 
   class AgentState(TypedDict):
-      messages: Annotated[Sequence[BaseMessage], add_messages]  # immutable accumulator
-      original_question: str   # rewriter dokunmaz → web search bunu kullanır
-      question: str            # rewriter overwrite eder
-      vision_context: str      # VisionRAG çıktısı → Generator'a kaynak olarak girer
-      session_uploads: list[str]  # follow-up RAG sorgularında kritik
+      messages         : Annotated[Sequence[BaseMessage], add_messages]
+      documents        : list[Document]       # retriever çıktısı
+      original_question: str                  # rewriter dokunmaz (web search kullanır)
+      question         : str                  # rewriter güncelleyebilir
+      generation       : str                  # nihai LLM yanıtı
+      route            : str                  # "rag"|"direct"|"vision"|...
+      relevance        : str                  # "yes"|"no"
+      grader_reason    : str                  # ""|"irrelevant"|"needs_live_data"
+      source_filter    : str                  # tek dosya filtreleme
+      session_uploads  : list[str]            # oturum dosya listesi (follow-up RAG)
+      image_data       : list[dict]           # base64 görseller
+      input_type       : str                  # "text"|"image"|"audio"
+      vision_context   : str                  # vision_rag_node çıktısı
+      temperature      : float                # per-session override
+      max_tokens       : int
+      retrieval_strategy: str
+      use_rerank       : bool
 
-original_question / question ayrımı önemli tasarım kararı: Rewriter sorguyu
-vektör DB için optimize ederken web search'ün doğal dil sorgusunu koruması
-gerekiyor. Bu ikili alan bunu zarif biçimde çözüyor.
+Kritik tasarım kararı — original_question / question ayrımı:
+  Rewriter, retrieval kalitesi için soruyu yeniden formüle edebilir. Ancak
+  web_search_node, doğal dil kalıplarına daha iyi yanıt verdiğinden
+  original_question'ı kullanır. Bu iki alanlı tasarım her iki bağlamı da
+  optimize eder.
 
-
-2.3 Graph Topolojisi — src/agent/graph.py
-──────────────────────────────────────────
-
-  Router (keyword → 0ms | LLM fallback → ~200ms)
-    ├─ vision_rag → Rewriter → Retriever → Grader → Generator
-    ├─ vision_search → Generator (web + görsel, rewrite atlanır)
-    ├─ vision → END (saf görsel analiz)
-    ├─ rag → Rewriter → Retriever → Grader
-    │         ├─ sufficient → Generator → END
-    │         └─ insufficient → WebSearch → Generator → END  ← CRAG
-    └─ direct → DirectResponse → END
-
-Döngü Önlemi: web_search → generator kenarı grader'a geri dönmüyor.
-Bu, sonsuz CRAG döngüsünü yapısal olarak (not runtime counter ile) engelliyor.
-
-
-2.4 Router Node — 4 Kademeli Rota Kararı
-──────────────────────────────────────────
-
-  Kademe 0: image_data doluysa → "vision"   (0ms, LLM yok)
-  Kademe 1: source_filter varsa → "rag"     (deterministic, 0ms)
-  Kademe 2: keyword_route() eşleşirse       (0ms)
-  Kademe 3: session_uploads + is_web_query() kombinasyonu
-  Kademe 4: LLM fallback (Router LLM, max_tokens=64, ~200ms)
-
-Router LLM çağrısı yalnızca belirsiz sorgularda yapılıyor. Tipik isteklerin
-büyük çoğunluğu için sıfır LLM maliyeti.
-
-
-2.5 Retriever Pipeline — src/rag/retriever.py + vectorstore.py
-────────────────────────────────────────────────────────────────
-
-Dense Gate: max_dense_similarity() ile Qdrant'a doğrudan sorgu atılarak en
-yüksek cosine skoru alınır. Eğer < 0.45 ise retriever hiç çalıştırılmaz →
-boş döner → Grader "no" → WebSearch. Yabancı sorguların RAG'a girmesini önlüyor.
-
-Dinamik K: Soru karmaşıklığına göre k değeri base_k ± 4 aralığında ayarlanıyor.
-
-4 Retrieval Stratejisi:
-  hybrid     → Dense + BM25 sparse fusion (varsayılan)
-  mmr        → "Neden/nasıl" — çeşitlilik öncelikli
-  threshold  → Score eşiği altındakileri filtrele
-  similarity → Saf cosine similarity
-
-Reranker: BAAI/bge-reranker-base cross-encoder, _RerankerRegistry singleton
-üzerinden lazy load.
-
-Fingerprint-based Smart Reindex: SHA-256 ile belge seti parmak izi alınıyor;
-değişmemişse Qdrant'a yeniden yazma atlanıyor.
-
-
-2.6 Grader Node — CRAG Implementasyonu
-────────────────────────────────────────
-
-3 Kademe:
-  Yüksek güven (≥0.75) → LLM atlanır → "yes"  (~3s kazanç)
-  Düşük güven  (<0.15)  → LLM atlanır → "no"
-  Orta güven (0.15–0.75) → LLM grader (temperature=0.0)
-
-estimate_confidence() fonksiyonu rerank skoru varsa onu kullanır, yoksa
-term overlap hesaplar. Turkish stopwords listesi mevcut.
-
-Dosya bağlı sorgularda confidence atlanarak doğrudan LLM grader'a gidiyor —
-yüklü dosyada gerçek zamanlı veri gerektiren sorgularda web search'ün devreye
-girmesini sağlıyor.
-
-
-2.7 Vision Sistemi — 3 Mod
-────────────────────────────
-
-  image_data + session_uploads  → vision_rag   (görsel analiz + RAG retrieval)
-  image_data + is_web_query()   → vision_search (görsel analiz + web search)
-  image_data (diğer)            → vision        (saf Gemma 4 multimodal)
-
-select_vision_prompt() keyword matching ile (0ms) fatura/tablo/grafik/diyagram
-için uzmanlaşmış promptlar seçiyor.
-  "fatura" → JSON şeması çıkarımı
-  "tablo"  → Markdown tablo formatı
-  "grafik" → Veri nokta analizi
-  "şema"   → Bileşen ve akış analizi
-
-
-2.8 Çift-Geçişli PDF Ingestion
-────────────────────────────────
-
-  1. Geçiş: Metin (PyPDFLoader)
-     documents = loader.load(pdf_path)
-     chunks = splitter.split(documents)
-     vectorstore.add_documents(chunks)
-
-  2. Geçiş: Görsel (Gemma 4 Vision)
-     pages = pdf2image.convert_from_path(pdf, dpi=150)
-     for page_num, image_bytes in pages:
-         text = gemma4_vision.analyse(image_bytes)  # tablo, grafik, şema
-         vectorstore.add_documents([Document(metadata={"chunk_type": "visual_description"})])
-
-DPI=150: yeterli çözünürlük, aşırı büyük PNG'den kaçınma dengesi iyi kurulmuş.
-
-
-2.9 MCP Entegrasyonu — src/mcp/mcp_client.py
-─────────────────────────────────────────────
-
-MultiServerMCPClient her server için ayrı ayrı yükleniyor. Process-level cache
-ile tekrar eden tool discovery önleniyor.
-
-Desteklenen MCP Sunucuları:
-  filesystem       → Yerel dosya erişimi (varsayılan aktif)
-  brave-search     → Web arama (BRAVE_API_KEY)
-  google-calendar  → Takvim entegrasyonu (Google OAuth)
-  gmail            → E-posta erişimi (Google OAuth)
-  github           → Repo/issue/PR sorguları (PAT)
-
-mcp_config.json disabled flag'i ile sunucular aktif/pasif ediliyor.
-Windows path backslash escape bug'ı json.dumps() ile çözülmüş.
-
-
-2.10 Admin API — src/api/router.py
-────────────────────────────────────
-
-Chainlit'in içindeki FastAPI uygulamasına /api prefix'iyle mount ediliyor.
-
-  GET  /api/health        → LLM + Qdrant parallel kontrol, overall latency
-  GET  /api/config        → Aktif LLM parametreleri
-  PUT  /api/config/llm    → Runtime URL değişikliği (önbellek sıfırlama + probe)
-  POST /api/llm/probe     → Ayar değiştirmeden bağlantı testi
-
-Swagger UI: http://localhost:7860/docs
+grader_reason alanı (yeni):
+  Grader LLM artık "no" kararında sebep de üretiyor. "needs_live_data" sebebi,
+  source_filter aktifken dahi web fallback'in tetiklenmesini sağlar. Önceki
+  tasarımda, yüklü belgede canlı veri gerektiren sorgularda (ör. fatura +
+  güncel döviz kuru) web search hiç devreye girmiyordu.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-3. KONFİGÜRASYON SİSTEMİ
+3. GRAPH TOPOLOJİSİ — src/agent/graph.py
 ────────────────────────────────────────────────────────────────────────────────
 
-pydantic_settings.BaseSettings + .env dosyası.
+LangGraph StateGraph, DAG (directed acyclic graph) olarak derlenir.
 
-Önemli parametreler:
-  # RAG tuning
-  chunk_size                = 1200
-  chunk_overlap             = 200
-  base_k                    = 10
-  top_k                     = 6
-  rerank_top_n              = 10
-  rag_min_dense_similarity  = 0.45   # dense gate eşiği
+  START
+    └─ router_node
+         ├─ "rag"           → rewriter_node
+         │                       └─ retriever_node
+         │                             └─ grader_node
+         │                                  ├─ "sufficient" → generator_node → END
+         │                                  └─ "insufficient" → web_search_node
+         │                                                         └─ generator_node → END
+         ├─ "direct"        → direct_response_node → END
+         ├─ "vision"        → vision_node → END
+         ├─ "vision_rag"    → vision_rag_node → rewriter_node (RAG yoluna devam)
+         └─ "vision_search" → vision_search_node → generator_node → END
 
-  # Context window budget
-  chat_max_tokens           = 1024
-  rag_max_tokens            = 1536
-  agent_max_tokens          = 2048
-  router_max_tokens         = 64     # Router LLM mümkün olduğunca az token
+Döngü önlemi (yapısal):
+  web_search_node → generator_node kenarı grader_node'a geri dönmüyor.
+  Sonsuz CRAG döngüsü runtime sayaç değil, graph topolojisi tarafından
+  önleniyor. Bu OCP uyumlu bir tasarım kararıdır.
 
-  # LLM profilleri
-  chat_temperature          = 0.7    # konuşma modu
-  rag_temperature           = 0.0    # deterministik üretim
-  agent_temperature         = 0.1    # tool calling
+_route_decision koşullu kenarı:
+  route == "vision" ise ikincil kararlar devreye girer:
+    source_filter var  → "vision_rag"  (aynı turda yüklenen belge + görsel)
+    is_web_query()     → "vision_search"
+    diğer              → "vision"  (saf analiz, END)
+
+  Not: session_uploads varlığı vision_rag'ı tetiklemez. Önceki oturum
+  belgeleri görsel analiziyle birleştirilmemeli; yalnızca aynı turda yüklenen
+  belge (source_filter) bu yola yönlendirir.
+
+_grader_decision koşullu kenarı:
+  relevance == "yes"                               → "sufficient"
+  relevance == "no" AND source_filter AND
+    grader_reason == "needs_live_data"             → "insufficient" (web arama)
+  relevance == "no" AND source_filter (diğer)     → "sufficient"   ("belgede yok" der)
+  relevance == "no" AND source_filter yok          → "insufficient" (web arama)
+
+astream_agent() — semantic cache sarmalayıcısı:
+  Grafı çalıştırmadan önce SemanticCache.lookup() çağrılır. Cache hit olursa
+  graph atlanır, mock event'lar yield edilir. Cache miss sonrası graph çalışır
+  ve SemanticCache.store() ile yanıt kaydedilir.
+  Bağlam anahtarı: SHA-256(source_filter + sorted(session_uploads) +
+  retrieval_strategy)[:16] — farklı belge setlerinde aynı soru yanlış cache
+  dönmez.
+
+Thread safety notu:
+  get_graph() senkrondur (await noktası yok). asyncio cooperative scheduling
+  altında iki coroutine if/set arasına giremez. Lock gereksizdir.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-4. SOLID UYUM DEĞERLENDİRMESİ
+4. ROUTER NODE — 4 Kademe
 ────────────────────────────────────────────────────────────────────────────────
 
-  Prensip   Uygulama                                     Not
+router_node'un karar sırası:
+
+  Kademe 0 (0 ms)  : image_data doluysa → "vision"
+  Kademe 1 (0 ms)  : source_filter varsa → "rag" (deterministik)
+  Kademe 2 (0 ms)  : keyword_route(question, has_uploads) eşleşirse
+  Kademe 3 (0 ms)  : session_uploads var + is_web_query() → "direct"
+                     session_uploads var ama web değil  → "rag"
+  Kademe 4 (~200ms): LLM fallback (max_tokens=64, temp=0.0, JSON parse)
+
+  NOT: input_type=="audio" için önceki early return kaldırıldı. Sesli
+  sorgular artık yazılı sorgularla özdeş routing mantığından geçiyor.
+  Bu, sesli belge follow-up sorgularının RAG'a yönelmesini sağlar.
+
+keyword_route() — src/agent/routing.py:
+  6 regex pattern seti, sıfır dış bağımlılık:
+
+  _DOCUMENT_PRONOUN_PATTERNS  → "bu/şu cv/dosya", "kime ait", "bu belgedeki..."
+  _GENERAL_KNOWLEDGE_PATTERNS → "X nedir?" (^ anchor — uzun sorularda FP önler)
+  _RAG_PATTERNS               → "belgede", "dosyaya göre", "yüklediğim..."
+  _DIRECT_PATTERNS            → selamlama, matematik, hava, borsa, sohbet
+  _WEB_PATTERNS               → gerçek zamanlı sinyal sözcükler
+  _MCP_PATTERNS               → github, calendar, email komutları
+
+  has_uploads=True olduğunda _GENERAL_KNOWLEDGE_PATTERNS atlanır:
+  "transformer nedir?" → belge yüklüyse rag'a yönlenebilir.
+
+  ^ anchor kritik: "bağlantısı nedir?" gibi uzun sorgular _GENERAL_KNOWLEDGE
+  eşleşmesinden kaçarak doğru route alır.
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. RETRIEVER PIPELINE — src/rag/retriever.py + vectorstore.py
+────────────────────────────────────────────────────────────────────────────────
+
+5.1 HybridVectorStore (vectorstore.py)
+
+  Qdrant üzerinde iki vektör kanalı:
+    Dense  : BAAI/bge-m3, 1024 boyut, cosine benzerliği
+    Sparse : FastEmbedSparse (BM25), token-level
+  RetrievalMode.HYBRID (varsayılan) — fusion skoru döner.
+
+  Dense Gate:
+    Retriever çalışmadan önce max_dense_similarity() çağrılır:
+    Qdrant'tan top-k cosine skoru alınır. Eğer en yüksek skor
+    rag_min_dense_similarity (varsayılan 0.38) altındaysa retriever
+    boş döner → Grader "no" → WebSearch. Yabancı sorguların Qdrant'a
+    girmesini yapısal olarak önler.
+    Not: source_filter aktifken Dense Gate atlanır.
+
+  Smart Reindex (fingerprint-based):
+    Belge seti SHA-256 parmak izi .rag_cache/{collection}.fingerprint
+    dosyasında tutulur. Parmak izi değişmemişse add_documents() atlanır.
+    Aynı belgeyi ikinci kez yüklemek Qdrant'a yazma yapmaz.
+
+  delete_by_source():
+    on_chat_end'de session_uploads listesindeki dosyalar Qdrant'tan silinir.
+    metadata.source_file filtresiyle hedefli temizlik yapılır.
+
+5.2 Retrieval Stratejileri
+
+  Strateji    | Yöntem                     | Uygun Senaryo
+  ────────────┼────────────────────────────┼──────────────────────────
+  hybrid      | Dense + BM25 fusion        | Genel (varsayılan)
+  mmr         | Max Marginal Relevance     | "Neden/nasıl" — çeşitlilik
+  threshold   | Skor eşiği filtresi        | Yüksek hassasiyet
+  similarity  | Saf cosine similarity      | Belirli eşleşme
+
+  auto_select_strategy() — Sorgu bazlı otomatik seçim:
+    "kaç|süre" → hybrid
+    "neden|nasıl" → mmr
+    "hangi projelerde" → threshold
+
+5.3 Dinamik K
+
+  calculate_dynamic_k(question, base_k):
+    "neden|nasıl|karşılaştır|fark" gibi karmaşıklık belirteçleri +4 ek doküman
+    getirir. Temel k: 8, maksimum: 15.
+
+5.4 Reranker — src/rag/reranker.py
+
+  CrossEncoder (BAAI/bge-reranker-base) — sorgu-doküman çifti skoru:
+    Batch size : 8
+    TTL cache  : MD5(sorgu + doküman içerikleri + top_k) → 600s / 100 entry
+    Immutability: Skor, Document nesnesini mutate etmeden yeni metadata ile
+    yeni Document oluşturur.
+
+  confidence_score:
+    Rerank skoru mevcutsa birincil kaynak; yoksa Türkçe-aware term overlap.
+    Grader'ın LLM kararı verip vermeyeceğini bu skor belirler.
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. GRADER NODE — CRAG Implementasyonu
+────────────────────────────────────────────────────────────────────────────────
+
+Üç kademeli değerlendirme:
+
+  Kademe A (LLM yok): confidence >= 0.75 → relevance = "yes"
+  Kademe B (LLM yok): confidence < 0.15  → relevance = "no"
+  Kademe C (LLM var): 0.15–0.75          → LLM grader (temp=0.0)
+
+LLM grader artık üç-değerli JSON üretiyor:
+  {"relevant": "yes"}
+  {"relevant": "no", "reason": "irrelevant"}
+  {"relevant": "no", "reason": "needs_live_data"}
+
+_parse_grader_reason() regex ile reason alanını çıkarır; state'e yazar.
+
+Hata yönetimi düzeltmesi:
+  source_filter/session_uploads dalı LLM hatası → "yes" korundu (generator
+  "belgede yok" der, makul).
+  mid_conf dalı LLM hatası → önceki "yes" yerine "no"+"irrelevant" atandı.
+  Böylece belirsiz durumda yetersiz bağlamla üretim yerine web fallback
+  tercih edilir.
+
+_grader_decision(state) kenar fonksiyonu:
+  relevance == "yes"                              → "sufficient"
+  source_filter + reason == "needs_live_data"     → "insufficient"
+  source_filter + (diğer reason / yok)            → "sufficient"
+  source_filter yok                               → "insufficient"
+
+
+────────────────────────────────────────────────────────────────────────────────
+7. VISION SİSTEMİ
+────────────────────────────────────────────────────────────────────────────────
+
+7.1 Üç Mod
+
+  Koşul                                    → Rota
   ─────────────────────────────────────────────────────────────────────────────
-  SRP       Her node/class tek sorumluluk                main.py biraz büyük
-  OCP       LOADER_MAP, _STRATEGY_MAP, MCP config        Yeni format = 1 satır
-  LSP       Tüm node'lar AgentState → AgentState         Tutarlı
-  ISP       Node'lar sadece ihtiyaç duydukları alanlara
-  DIP       LLM fabrika, _RerankerRegistry, duck-type    İyi
+  image_data + source_filter               → vision_rag
+  image_data + is_web_query()              → vision_search
+  image_data (diğer)                       → vision (END)
 
+7.2 select_vision_prompt() — keyword tabanlı prompt seçimi (0 ms)
 
-────────────────────────────────────────────────────────────────────────────────
-5. PERFORMANS OPTİMİZASYONLARI
-────────────────────────────────────────────────────────────────────────────────
-
-  Optimizasyon                  Nerede                Kazanç
+  Tetikleyici      → Prompt               → Çıktı
   ─────────────────────────────────────────────────────────────────────────────
-  Keyword routing (Kademe 0-3)  router_node           Router LLM'i atlama
-  Rewriter skip                 _should_skip_rewrite  ~6s
-  Grader confidence gate        grader_node           ~3s
-  Dense gate                    retriever_node        Yabancı sorgularda Qdrant atlama
-  TTS parallel streaming        _TtsStreamer          İlk ses gecikmesi ~%50 azalma
-  Whisper/Reranker preload      on_chat_start         İlk kullanımda sıfır gecikme
-  MCP process-level cache       mcp_client.py         Tool discovery tekrar yok
-  Smart reindex fingerprint     vectorstore.py        Değişmeyen koleksiyon yeniden yazılmıyor
-  Reranker TTL cache            reranker.py           Aynı sorgu-belge kombinasyonu
-  LLM dim table                 embeddings.py         Runtime probe yok
+  fatura/invoice   → VISION_INVOICE_PROMPT → Yapılandırılmış JSON şema
+  tablo/table      → VISION_TABLE_PROMPT   → Markdown tablo
+  grafik/chart     → VISION_CHART_PROMPT   → Veri noktaları + trend analizi
+  şema/diagram     → VISION_DIAGRAM_PROMPT → Bileşenler + akış
+  (diğer)          → VISION_SYSTEM_PROMPT  → Genel görsel analiz
+
+7.3 vision_rag_node
+
+  vision_node çalışır, vision_context üretilir. Ardından Rewriter ile
+  devam ederek tam RAG pipeline'ı işler. Generator şablonu:
+    [Görsel Analizi] + [Kaynak X] şeklinde hibrit sentez yapar.
+
+7.4 vision_search_node
+
+  Görsel analizi + web araması. Rewriter/Retriever atlanır (anlamsız
+  olur); sonuç doğrudan generator'a gider.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-6. DİKKAT ÇEKEN TASARIM KARARLARI
+8. SEMANTİK CACHE — src/rag/semantic_cache.py
 ────────────────────────────────────────────────────────────────────────────────
 
-Rewriter Hallucination Guard:
-  Rewriter 250+ karakter üretirse veya cevap kalıpları içerirse orijinal soru
-  korunuyor. Küçük model kullanıldığında halüsinasyonu önlüyor.
+Qdrant collection "semantic_cache" üzerinde çalışır.
 
-.format() yerine .replace():
-  RAG context içinde { ve } karakterleri olabildiğinden (kod, JSON, PDF içeriği)
-  prompt inject için Python str.format() kullanılmıyor — bilerek seçilmiş.
+Payload şeması:
+  question   : normalize edilmiş sorgu (lowercase + whitespace)
+  response   : tam metin yanıt
+  timestamp  : Unix timestamp (TTL hesabı için)
+  context_key: SHA-256(source_filter + sorted(session_uploads) +
+               retrieval_strategy)[:16]
 
-Web search'te original_question:
-  Rewriter web sorgusu için optimize etmez; web search natural language query
-  ile daha iyi sonuç veriyor.
+lookup(question, cache_ctx):
+  Qdrant nearest-neighbor araması — filtreler:
+    1. timestamp >= now - (ttl_hours * 3600)
+    2. context_key == cache_ctx
+  Eşik: semantic_cache_threshold (varsayılan 0.92 cosine)
+  Cache hit → astream_agent() grafı çalıştırmaz.
 
-llama.cpp backend guard:
-  direct_response_node'da needs_mcp_tools() true olsa bile llama.cpp backend'de
-  tool calling devre dışı — bu backend grammar-based JSON desteklemiyor.
+store(question, response, cache_ctx):
+  UUID ile yeni point upsert edilir.
+  TTL veya context_key uyuşmazlığı eski kayıtları pasifleştirir.
 
-Query Expansion (hava durumu):
-  "5 günlük hava durumu" → "... 19 Nisan-23 Nisan 2026 günlük sıcaklık tahmin"
-  Tavily'nin tarih aralığı bazlı snippet döndürmesini zorlayan ince teknik.
+Context key tasarım kararı:
+  "Türkiye başkenti nedir?" sorusu hem genel chat'te hem de "Türkiye ekonomisi"
+  adlı belgede sorulabilir. İkinci durumda cevap belgeden gelmeli. Aynı
+  embedding yakın olsa da context_key farklı olduğu için cache çakışması olmaz.
 
-^-anchored routing patterns:
-  _GENERAL_KNOWLEDGE_PATTERNS'ta ^ anchor kullanımı uzun sorularda false-positive
-  önlüyor. "bağlantısı nedir?" → direct'e kaçırmıyor.
-
-has_uploads ile _GENERAL_KNOWLEDGE_PATTERNS bypass:
-  Belge yüklüyken "transformer nedir?" sorusu RAG'a gidiyor — belgedeki
-  transformer mimarisini soruyor olabilir.
-
-
-────────────────────────────────────────────────────────────────────────────────
-7. LLM FABRİKA SİSTEMİ — src/rag/llm.py
-────────────────────────────────────────────────────────────────────────────────
-
-DualLLM — 3 Profil, 1 Backend:
-  chat_model   → temperature=0.7, max_tokens=1024  (konuşma modu)
-  rag_model    → temperature=0.0, max_tokens=1536  (deterministik üretim)
-  agent_model  → temperature=0.1, max_tokens=2048  (tool calling, top_p=0.9)
-
-Tüm profiller aynı llama-server / vLLM endpoint'ine bağlanıyor; yalnızca
-sampling parametreleri farklı. GPU'da tek model ağırlığı yüklü kalırken farklı
-davranışlar elde ediliyor.
-
-reset_llm_cache() → _dual_llm = None: Admin API üzerinden runtime'da LLM URL
-değiştirildiğinde tüm önbellek temizleniyor.
-
-vLLM-specific extra_body: llm_enable_thinking=True ise sadece vLLM backend'de
-chat_template_kwargs enjekte ediliyor. llama.cpp bu parametreyi görmüyor.
+Bypass koşulları (cache hiç çalışmaz):
+  image_data doluysa → kesinlikle bypass
+  input_type != "text" → bypass
 
 
 ────────────────────────────────────────────────────────────────────────────────
-8. ROUTING SİSTEMİ — src/agent/routing.py
+9. LLM FABRİKA SİSTEMİ — src/rag/llm.py
 ────────────────────────────────────────────────────────────────────────────────
 
-Saf Python, sıfır dış bağımlılık. 6 pattern seti:
+DualLLM — 3 profil, 1 backend:
 
-  _DOCUMENT_PRONOUN_PATTERNS  → "bu cv", "kime ait", "bu belgedeki telefon"
-  _GENERAL_KNOWLEDGE_PATTERNS → "X nedir?", "kim tarafından geliştirildi?"
-  _RAG_PATTERNS               → "belgede", "dosyaya göre", "dosyadan özetle"
-  _DIRECT_PATTERNS            → selamlama, matematik, hava/borsa/spor, sohbet
-  _WEB_PATTERNS               → gerçek zamanlı sinyal kelimeler
-  _MCP_PATTERNS               → github/gitlab, calendar, email komutları
+  Profil        temp   max_tokens  Kullanım
+  ─────────────────────────────────────────────────────────────────────────────
+  chat_model    0.7    1024        Konuşma modu (on_message genel)
+  rag_model     0.0    1536        Deterministik RAG üretimi, grader
+  agent_model   0.1    2048        Tool calling, ReAct agent
 
-Öncelik sırası:
-  1. _DOCUMENT_PRONOUN_PATTERNS → rag     (kesin belge referansı, override)
-  2. _GENERAL_KNOWLEDGE_PATTERNS → direct (has_uploads=False iken)
-  3. _RAG_PATTERNS               → rag
-  4. _DIRECT_PATTERNS            → direct
-  Eşleşme yok → LLM fallback
+  Tüm profiller aynı llama-server / vLLM endpoint'ine bağlanır.
+  GPU'da tek model ağırlığı yüklü kalırken farklı sampling parametreleri.
+
+  reset_llm_cache() + reset_nodes_llm_cache():
+    Admin API /api/config/llm güncellediğinde tüm önbellek temizlenir;
+    bir sonraki çağrıda yeni URL kullanılır.
+
+  vLLM thinking knob:
+    llm_enable_thinking=True ise yalnızca vLLM backend'de
+    extra_body={"chat_template_kwargs": {"enable_thinking": True}} enjekte
+    edilir. llama.cpp bu parametreyi görmez (ignorelur).
+
+  llama.cpp tool-calling guard:
+    direct_response_node'da needs_mcp_tools() true iken llama.cpp backend'de
+    ReAct atlanır; doğrudan llm.ainvoke() kullanılır.
+    llama.cpp grammar-based JSON tool calling'i desteklemiyor.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-9. WEB SEARCH — src/agent/web_search.py
+10. DIRECT RESPONSE NODE — ReAct Ajan
 ────────────────────────────────────────────────────────────────────────────────
 
-Tavily API üzerinden; asyncio.to_thread ile sync SDK async context'e uyarlanmış.
-Her aramaya "(bugün: 2026-04-19)" tarih etiketi ekleniyor.
+Yerleşik araçlar:
+
+  Araç               Açıklama
+  ─────────────────────────────────────────────────────────────────────────────
+  tavily_search      Tavily API web araması (gelişmiş mod)
+  search_web         DuckDuckGo fallback (API key gerektirmez)
+  calculator         AST tabanlı güvenli matematiksel ifade değerlendirici
+  read_uploaded_file Upload sandbox içinde dosya okuyucu
+  mcp_call           MCP server köprüsü
+
+  Dinamik MCP araçları: get_mcp_tools() process-level cache'den yüklenir.
+  Tüm araçlar build_generator_prompt() ile sistem prompt'una enjekte edilir.
+
+create_react_agent() (vLLM/API backends için):
+  Tool calling + multi-turn reasoning.
+
+Async düzeltme:
+  llama.cpp backend llm.invoke() çağrısı → await llm.ainvoke() olarak
+  düzeltildi. Önceki senkron çağrı event loop'u bloke ediyordu.
+
+
+────────────────────────────────────────────────────────────────────────────────
+11. WEB SEARCH — src/agent/web_search.py
+────────────────────────────────────────────────────────────────────────────────
+
+WebSearchService.search():
+  Sorgu normalize edilir (normalize_web_query).
+  Zaman duyarlı sorgulara "(bugün: YYYY-MM-DD)" etiketi eklenir —
+  datetime.date.today() ile dinamik, hardcoded değil.
+  asyncio.to_thread() ile sync Tavily SDK async context'e uyarlanmıştır.
 
 WebResultFormatter — Saf Sunum Katmanı (SRP):
-  format_weather(): LLM çağrısı YAPMIYOR. Regex ile web metninden sıcaklık ve
-  hava koşulu çekiyor, Fahrenheit → Celsius dönüşümü yapıyor, dil tespitine
-  göre yanıt formatlıyor. ~200ms LLM maliyetinden kaçınıyor.
 
-  append_sources(): [Result N] ve Source: satırlarını parse ederek yanıtın
-  altına kaynak listesi ekliyor.
+  format_weather():
+    LLM çağrısı YAPMIYOR. Web metninden regex ile sıcaklık ve hava koşulu
+    çıkarılıyor. Fahrenheit → Celsius dönüşümü dahil.
+    Dil tespiti (is_turkish_query) ile Türkçe veya İngilizce çıktı.
+    ~200 ms LLM maliyetinden kaçınıyor.
 
-
-────────────────────────────────────────────────────────────────────────────────
-10. RERANKER — src/rag/reranker.py
-────────────────────────────────────────────────────────────────────────────────
-
-sentence_transformers.CrossEncoder (BAAI/bge-reranker-base).
-
-TTL Cache: cachetools.TTLCache ile rerank sonuçları MD5 hash üzerinden
-önbelleğe alınıyor (varsayılan: 100 entry, 600s TTL). Aynı sorgu-belge
-kombinasyonu 10 dakika içinde tekrar gelirse cross-encoder çalıştırılmıyor.
-
-Immutability: Rerank sonrası orijinal Document mutate edilmiyor:
-  new_meta = {**doc.metadata, "rerank_score": float(score)}
-  result.append(Document(page_content=doc.page_content, metadata=new_meta))
+  append_sources():
+    [Result N] ve Source: satırlarından URL'ler parse ediliyor; yanıtın
+    altına kaynak listesi ekleniyor.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-11. PERSISTENCE — src/persistence/sqlite_data_layer.py
+12. FRONTEND & OTURUM YÖNETİMİ — src/main.py
+────────────────────────────────────────────────────────────────────────────────
+
+12.1 TTS/STT
+
+  STT (Speech-to-Text):
+    faster-whisper, CPU int8 quantization.
+    on_audio_end: PCM buffer → WAV dönüşümü → transcribe → agent.
+    _preload_whisper(): on_chat_start'ta asyncio.create_task() ile arka planda
+    model yüklenir — ilk sesli sorguda gecikme olmaz.
+
+  TTS (Text-to-Speech):
+    edge-tts (Microsoft Azure Neural, API key gerektirmiyor).
+    Dört ses: tr-TR-AhmetNeural, tr-TR-EmelNeural, en-US-AriaNeural,
+    en-US-GuyNeural. "auto" modu Türkçe karakter tespiti ile seçer.
+
+  _TtsStreamer — Paralel Sentez:
+    feed(chunk): _MIN_FIRST_CHARS=150 karakter birikince cümle sınırında
+    split eder, ilk grubun sentezini background'a başlatır.
+    send_to(msg): İlk task await edilir, kalan metin sentezlenir, iki MP3
+    byte-concatenate edilir → single seamless audio element.
+
+  Temp dosya yönetimi (düzeltildi):
+    _write_audio_tmp() artık session_upload_dir'e yazar (erişilebilirse).
+    on_chat_end'deki shutil.rmtree() otomatik temizler.
+    /tmp birikimi önlendi.
+
+12.2 Konuşma Geçmişi — 3 Katmanlı Koruma
+
+  _MAX_STORED_MESSAGES = 100    → RAM'de depolanan maksimum mesaj
+  MAX_HISTORY_TURNS    = 20     → LLM context'ine gönderilen tur
+  _MAX_HISTORY_CHARS   = 6000   → Token budget guard
+
+  Oran: per-user context = LLM_CTX_SIZE / LLM_PARALLEL.
+  16384 / 4 = 4096 token. System + RAG chunks ~2000-3000 token.
+  Kalan ~1000-2000 token → ~4000-8000 karakter geçmiş.
+
+  _build_lc_history(chat_history, summary):
+    Önce tur limiti, sonra per-msg truncate (1500 char), sonra toplam
+    karakter bütçesi kontrolü. Çift mesaj (user+assistant) birlikte
+    kırpılır — geçmiş asistan mesajıyla başlamaz.
+
+12.3 Uzun Süreli Bellek
+
+  _SUMMARY_TRIGGER = 40    → Bu mesaj sayısından sonra özetleme tetiklenir
+  _SUMMARY_KEEP_RECENT = 10 → Özetleme sonrası canlı tutulan son mesaj sayısı
+
+  _summarize_and_compress_history():
+    Eski mesajlar LLM'e "kısa ve bilgi yoğun özetle" promptuyla gönderilir.
+    Özet thread metadata'ya (SQLite) kaydedilir.
+    Chat resume'de yüklenerek SystemMessage olarak geçmişe eklenir.
+
+12.4 Dosya İşleme Pipeline'ı
+
+  Format          İşlem                            RAG'a girer?
+  ─────────────────────────────────────────────────────────────────────────────
+  PDF, DOCX       PyPDFLoader / UnstructuredWord    Evet
+  TXT, MD         TextLoader                        Evet
+  XLSX, CSV       UnstructuredExcel / CSV           Evet
+  MP3/WAV/OGG     Whisper STT → TXT                 Evet (TXT olarak)
+  PNG/JPG/WEBP    pending_vision_images listesi     Hayır (vision pipeline)
+  URL (/url cmd)  WebBaseLoader scrape → TXT        Evet
+
+  Limitler: 5 dosya / mesaj, 20 MB / dosya.
+  Path traversal koruması: _track_session_upload() "/", "\", "." ile
+  başlayan dosya adlarını reddeder.
+
+12.5 Session Cleanup
+
+  on_chat_end():
+    1. get_hybrid_store().delete_by_source(session_uploads) → Qdrant temizliği
+    2. shutil.rmtree(session_upload_dir) → dosya sistemi temizliği
+    3. Session'daki TTS MP3 temp dosyaları da bu dizinde olduğundan otomatik
+       silinir (önceden /tmp'ye yazılıp silinmiyordu).
+
+
+────────────────────────────────────────────────────────────────────────────────
+13. DOCUMENT INGESTION — src/rag/ingest.py
+────────────────────────────────────────────────────────────────────────────────
+
+Üç katmanlı SRP tasarımı:
+
+  DocumentLoader:
+    LOADER_MAP {.pdf, .txt, .md, .docx, .xlsx, .csv} → OCP uyumlu pluggability.
+    Yeni format: 1 satır ekleme yeterli.
+
+  DocumentSplitter:
+    RecursiveCharacterTextSplitter.
+    PDF için özel separator sırası: "\n\n\n" → "\n\n" → "\n" → ". " → ...
+    chunk_size=1200, chunk_overlap=200 (Gemma 4 E4B büyük context'i için).
+
+  DocumentIngester:
+    Loader + Splitter + vectorstore.add_documents() bileşkesi.
+    Smart reindex (fingerprint değişmemişse atlanır).
+
+ingest_file(file_path) → dict {"file_name", "chunk_count"}
+
+
+────────────────────────────────────────────────────────────────────────────────
+14. MCP ENTEGRASYONu — src/mcp/mcp_client.py
+────────────────────────────────────────────────────────────────────────────────
+
+  Server          Durum       Zorunlu Env Var
+  ─────────────────────────────────────────────────────────────────────────────
+  filesystem      Aktif       MCP_FILESYSTEM_ROOT (opsiyonel)
+  brave-search    Pasif       BRAVE_API_KEY
+  google-calendar Pasif       GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+  gmail           Pasif       GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+  github          Pasif       GITHUB_PERSONAL_ACCESS_TOKEN
+
+load_mcp_connections():
+  ${VAR} → os.environ[VAR] ikamesi.
+  API key eksikse ilgili server otomatik atlanır (graceful skip).
+  Windows path backslash sorunları json.dumps() ile çözülmüştür.
+
+get_mcp_tools():
+  Process-level cache (_mcp_tools_cache). İlk çağrıda yüklenir; sonraki
+  çağrılar cache'den döner. force_refresh=True ile yenileme mümkün.
+  Bir server yüklenemezse diğerleri etkilenmez.
+
+
+────────────────────────────────────────────────────────────────────────────────
+15. ADMIN API — src/api/router.py
+────────────────────────────────────────────────────────────────────────────────
+
+Chainlit'in içindeki FastAPI'ye /api prefix'iyle mount.
+Swagger UI: http://localhost:7860/docs
+
+  Endpoint              Auth    Açıklama
+  ─────────────────────────────────────────────────────────────────────────────
+  GET  /api/health      yok     LLM + Qdrant parallel kontrol + latency
+  GET  /api/config      admin   Aktif LLM yapılandırması
+  PUT  /api/config/llm  admin   Runtime LLM URL + model güncellemesi
+  PUT  /api/config/vllm admin   Geriye dönük uyumluluk alias'ı
+  POST /api/llm/probe   admin   Ayar değiştirmeden bağlantı + latency testi
+
+require_admin() dependency:
+  fastapi.security.HTTPBasic → HTTPBasicCredentials.
+  PBKDF2-HMAC-SHA256 hash karşılaştırması (210K iterasyon).
+  secrets.compare_digest → constant-time, timing attack önlemi.
+
+PUT /api/config/llm akışı:
+  1. Yeni URL'ye _check_vllm() probe (8s timeout)
+  2. Erişilemezse HTTP 503 + hata mesajı
+  3. settings.llm_server_url güncellenir
+  4. reset_llm_cache() + reset_nodes_llm_cache()
+  5. Güncel yapılandırma döner
+
+
+────────────────────────────────────────────────────────────────────────────────
+16. GÜVENLİK MİMARİSİ
+────────────────────────────────────────────────────────────────────────────────
+
+Alan                  Uygulama                                 Seviye
+─────────────────────────────────────────────────────────────────────────────────
+Kimlik doğrulama      PBKDF2-HMAC-SHA256, 210K iterasyon       Yüksek
+Timing saldırısı      hmac.compare_digest (sabit-zamanlı)      Yüksek
+Credential fallback   APP_ADMIN_PASSWORD/SALT → zorunlu alan   Yüksek
+                      Varsayılan yok — startup başarısız olur
+Admin API erişimi     HTTP Basic Auth, /api/health hariç       Yüksek
+Dosya okuma sandbox   Path.resolve() + is_relative_to()        Yüksek
+Rate limiting         Sliding window, per-IP (30/60s chat)     Orta
+XFF spoofing          TRUSTED_PROXY_IPS (ortam değişkeni)      Orta
+Session izolasyonu    UUID-based upload dizini                  Orta
+Prompt injection      .replace() (not .format()) — { } safe   İyi
+MCP sandbox           disabled flag + API key guard            Orta
+LLM URL değişimi      Reachability probe zorunlu               İyi
+TLS                   Localhost'ta yok; ngrok/Cloudflare ile   Ortam bağımlı
+CSRF                  Chainlit CORS config (allow_origins)     Minimum
+
+Uygulanan düzeltmeler (25 Nisan 2026):
+  P1 - Varsayılan credential fallback kaldırıldı (config.py)
+  P1 - auth_callback çift fallback → settings.* kullanımı (main.py)
+  P1 - Path traversal: resolve() + is_relative_to() (file_reader.py)
+  P2 - Admin API require_admin() dependency eklendi (api/router.py)
+  P2 - X-Forwarded-For TRUSTED_PROXIES filtresi (rate_limiter.py)
+  P3 - 14 unit test: path traversal, rate limiter, API auth (test_security.py)
+
+
+────────────────────────────────────────────────────────────────────────────────
+17. PERSISTENCE — src/persistence/sqlite_data_layer.py
 ────────────────────────────────────────────────────────────────────────────────
 
 Chainlit BaseDataLayer implementasyonu. 6 tablo:
 
-  users            → id, identifier, createdAt, metadata (JSON)
-  threads          → id, name, userId, userIdentifier, timestamps, tags, metadata
-  steps            → id, threadId, parentId, name, type, input, output, metadata
-  elements         → id, threadId, data (JSON), createdAt
-  feedback         → id, data (JSON), createdAt
-  mcp_saved_configs → userIdentifier + name UNIQUE, command, args, env
+  users              → id, identifier (UNIQUE), createdAt, metadata (JSON)
+  threads            → id, name, userId, userIdentifier, timestamps, tags,
+                       metadata (özet burada saklanır)
+  steps              → id, threadId, parentId, name, type, input, output,
+                       metadata, createdAt, startTime, endTime, tags
+  elements           → id, threadId, data (JSON), createdAt
+  feedback           → id, data (JSON), createdAt
+  mcp_saved_configs  → userIdentifier + name UNIQUE, command, args, env
 
-Tüm I/O asyncio.to_thread() ile — Chainlit event loop'u bloklamıyor.
-Thread auto-heal: INSERT OR IGNORE + UPDATE pattern'ı orphan step önlüyor.
-Session resume: steps createdAt ASC sıralı — on_chat_resume history reconstruct.
+WAL modu + busy_timeout=5000: eşzamanlı yazma uyumu.
+Tüm I/O asyncio.to_thread() ile — Chainlit event loop'u bloklamaz.
+Thread auto-heal: INSERT OR IGNORE + UPDATE → orphan step önleme.
+Session resume: steps createdAt ASC, on_chat_resume history reconstruct.
 
-
-────────────────────────────────────────────────────────────────────────────────
-12. RATE LIMITER — src/middleware/rate_limiter.py
-────────────────────────────────────────────────────────────────────────────────
-
-  chat_rate_limiter   → 30 req / 60s / IP  (genel chat)
-  config_rate_limiter → 10 req / 60s / IP  (LLM config mutation)
-
-Sliding window, O(1) amortize: deque tabanlı timestamp tutma.
-Cloudflare Tunnel desteği: X-Forwarded-For header'ı okunuyor.
-asyncio.Lock: Concurrent request'lerde deque race condition önleniyor.
+patch_thread_metadata(thread_id, {"summary": text}):
+  Konuşma özetini thread metadata'ya yazar; session resume'de yüklenir.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-13. TTS — src/tts.py
+18. RATE LIMITER — src/middleware/rate_limiter.py
 ────────────────────────────────────────────────────────────────────────────────
 
-edge-tts → Microsoft Azure Neural TTS (API key gerektirmiyor).
+SlidingWindowLimiter — deque tabanlı O(1) amortize sliding window:
 
-Sesler:
-  tr-TR-AhmetNeural  (Türkçe erkek)
-  tr-TR-EmelNeural   (Türkçe kadın)
-  en-US-AriaNeural   (İngilizce kadın)
-  en-US-GuyNeural    (İngilizce erkek)
+  chat_rate_limiter   → 30 istek / 60s / IP  (genel chat)
+  config_rate_limiter → 10 istek / 60s / IP  (admin config mutation)
 
-Markdown stripping: kod blokları, headers, bold/italic, URL'ler temizleniyor.
+asyncio.Lock: Concurrent coroutine'lerde deque race condition önlenir.
 
-Auto language detection: Türkçe karakter (çğıöşü) veya Türkçe function words
-(ve, ile, bir, bu) → tr-TR-AhmetNeural. Regex ile sıfır LLM maliyeti.
-
-max_chars=1500: Uzun yanıtlar truncate ediliyor. _TtsStreamer ile ilk 150
-karakter paralelde sentezlendiğinden kullanıcı ilk sesi çok önce duyuyor.
+_get_client_ip() — Proxy güven modeli (düzeltildi):
+  Eski: X-Forwarded-For her zaman okunuyordu → IP spoofing mümkündü.
+  Yeni: request.client.host yalnızca _TRUSTED_PROXIES içindeyse XFF okunur.
+  TRUSTED_PROXY_IPS env var ile konfigüre edilir (varsayılan: 127.0.0.1,::1).
 
 
 ────────────────────────────────────────────────────────────────────────────────
-14. EMBEDDINGS — src/rag/embeddings.py
+19. EMBEDDINGS — src/rag/embeddings.py
 ────────────────────────────────────────────────────────────────────────────────
 
-@lru_cache(maxsize=1) ile HuggingFaceEmbeddings singleton.
-normalize_embeddings=True → cosine similarity için birim vektör.
+@lru_cache(maxsize=1) singleton. normalize_embeddings=True → cosine için
+birim vektör.
 
-get_embedding_dim() — 3 Kademeli Boyut Tespiti:
-  1. EMBEDDING_VECTOR_SIZE env var → doğrudan kullan (0ms)
-  2. Model adı substring tablosu  → 0ms, runtime probe yok
-  3. Dummy embed_query("probe")   → en yavaş, bilinmeyen modellerde
+get_embedding_dim() — 3 kademeli boyut tespiti:
+  1. EMBEDDING_VECTOR_SIZE env var (0 ms)
+  2. Model adı substring tablosu (0 ms, runtime probe yok)
+  3. Dummy embed_query("probe") (yavaş, bilinmeyen modeller)
 
-Bilinen modeller ve boyutları:
-  BGE-M3        → 1024
-  BGE-Large     → 1024
-  BGE-Base      → 768
-  All-MiniLM    → 384
-  E5-Large      → 1024
+Bilinen boyutlar:
+  BAAI/bge-m3 → 1024     BAAI/bge-large → 1024
+  BAAI/bge-base → 768    nomic-embed → 768
+  all-MiniLM → 384       E5-large → 1024
 
 
 ────────────────────────────────────────────────────────────────────────────────
-15. TAM SİSTEM AKIŞ DİYAGRAMI
+20. PERFORMANS OPTİMİZASYONLARI
 ────────────────────────────────────────────────────────────────────────────────
 
-PDF yüklenip ardından belge hakkında soru sorulduğunda:
-
-  Kullanıcı: [PDF yükler + soru yazar]
-      │
-      ├─ main.py: ingest_file(pdf)
-      │     ├─ PyPDFLoader → chunk → Qdrant (text chunks)
-      │     └─ VisualPageIngester → pdf2image → Gemma4 vision → Qdrant (visual chunks)
-      │
-      └─ on_message() → astream_agent()
-            │
-            └─ LangGraph: router_node
-                  ├─ source_filter set → route="rag" (0ms, deterministic)
-                  └─ rewriter_node
-                        ├─ short/clear query → skip (0ms)
-                        └─ LLM rewrite → improved query
-                              │
-                              └─ retriever_node
-                                    ├─ _build_source_filter() → Qdrant metadata filter
-                                    ├─ dense gate ATLAN (source_filter var)
-                                    └─ hybrid retrieval (dense+BM25) → reranker → docs
-                                          │
-                                          └─ grader_node
-                                                ├─ LLM yeterlilik değerlendirmesi
-                                                ├─ "yes" → generator_node → LLM → yanıt
-                                                └─ "no" → web_search_node → generator_node
-                                                                │
-                                                                └─ Chainlit stream → kullanıcı
-                                                                          └─ _TtsStreamer (parallel)
+Optimizasyon              Konum                 Kazanç
+─────────────────────────────────────────────────────────────────────────────────
+Semantic cache            astream_agent()       Tam pipeline atlanır (~2-10s)
+Keyword routing (Tier0-3) router_node           Router LLM atlanır (~200ms)
+Rewriter skip             rewriter_node         _should_skip_rewrite() (~6s)
+Grader confidence gate    grader_node           LLM atlanır (~3s)
+Dense gate                retriever_node        Yabancı sorgu Qdrant'a girmez
+TTS parallel streaming    _TtsStreamer          İlk ses gecikmesi ~%50 azalır
+Whisper/Reranker preload  on_chat_start         İlk kullanımda sıfır gecikme
+MCP process-level cache   mcp_client.py         Tool discovery tekrar yok
+Smart reindex fingerprint vectorstore.py        Aynı belge 2x yazılmaz
+Reranker TTL cache        reranker.py           Aynı sorgu-belge kombinasyonu
+LLM dim lookup table      embeddings.py         Runtime probe yok
+asyncio.to_thread()       Tüm sync IO           Event loop bloklanmaz
 
 
 ────────────────────────────────────────────────────────────────────────────────
-16. BAĞIMLILIK GRAFİĞİ (Modüller Arası)
+21. BAĞIMLILIK GRAFİĞİ (Modüller Arası)
 ────────────────────────────────────────────────────────────────────────────────
 
   main.py
-    ├── agent/graph.py → agent/nodes.py → agent/state.py
-    │                               ├── agent/prompts.py
-    │                               ├── agent/routing.py
-    │                               ├── agent/web_search.py
-    │                               └── rag/llm.py → config.py
-    ├── rag/ingest.py → rag/vectorstore.py → rag/embeddings.py
-    │                                     └── rag/retriever.py → rag/reranker.py
+    ├── agent/graph.py
+    │     └── agent/nodes.py
+    │           ├── agent/state.py
+    │           ├── agent/prompts.py
+    │           ├── agent/routing.py
+    │           ├── agent/web_search.py
+    │           └── rag/llm.py
+    ├── rag/ingest.py
+    │     └── rag/vectorstore.py
+    │           ├── rag/embeddings.py
+    │           └── rag/retriever.py
+    │                 └── rag/reranker.py
+    ├── rag/semantic_cache.py
+    │     ├── rag/vectorstore.py
+    │     └── rag/embeddings.py
     ├── mcp/mcp_client.py
     ├── persistence/sqlite_data_layer.py
-    ├── api/router.py → middleware/rate_limiter.py
-    └── tts.py
+    ├── api/router.py
+    │     └── middleware/rate_limiter.py
+    ├── tools/{search, calculator, file_reader, mcp_bridge}.py
+    ├── tts.py
+    └── config.py
 
-Circular import YOK. config.py tek yönlü — hiçbir modülü import etmiyor.
+  config.py tek yönlü bağımlılık — hiçbir modülü import etmez.
+  Circular import yok.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-17. GÜVENLİK ÖZETİ
+22. DEPLOYMENT PROFİLİ
 ────────────────────────────────────────────────────────────────────────────────
 
-  Alan                    Uygulama                              Seviye
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Tek Sunucu                                     │
+│                                                                          │
+│  GPU (≥8GB VRAM):                                                        │
+│    llama-server — Gemma 4 E4B Q4_K_M (~3.9 GB)                          │
+│    KV cache — CTX / 1024 * 0.33 GB                                       │
+│                                                                          │
+│  CPU/RAM:                                                                │
+│    BGE-M3 embeddings (~2 GB RAM)                                         │
+│    BGE Reranker Base (~300 MB RAM)                                       │
+│    Whisper "small" (~300 MB RAM)                                         │
+│                                                                          │
+│  Docker:                                                                 │
+│    Qdrant (port 6333 REST, 6334 gRPC)                                    │
+│                                                                          │
+│  Python process:                                                         │
+│    Chainlit + FastAPI (port 7860)                                        │
+│    SQLite (data/chainlit.db)                                             │
+└─────────────────────────────────────────────────────────────────────────┘
+
+VRAM bütçesi (hesaplama):
+  Model weight: Q4_K_M ~3.9 GB, Q5_K_M ~5.5 GB
+  KV cache    : CTX_SIZE / 1024 * 0.33 GB * PARALLEL
+
+  GPU    | CTX   | PAR | Model+KV | Kullanıcı başına context
+  ───────┼───────┼─────┼──────────┼─────────────────────────
+  8 GB   | 4096  |  2  | ~5.2 GB  | 2048 token
+  12 GB  | 8192  |  4  | ~6.6 GB  | 2048 token
+  16 GB  | 16384 |  4  | ~9.2 GB  | 4096 token
+
+Makefile hedefleri:
+  make setup   → uv sync + .env şablonu
+  make qdrant  → docker compose up + health check
+  make llm     → llama-server başlat (ilk çalıştırmada model indirir)
+  make app     → chainlit run src/main.py --port 7860
+  make dev     → check-qdrant + check-llm + app
+  make check   → health endpoints + verify_llm_runtime.py
+  make tunnel  → ngrok / Cloudflare tunnel (port 7860)
+  make stop    → Docker durdur + llama-server kapat
+  make clean   → .venv, cache, __pycache__ temizle
+
+
+────────────────────────────────────────────────────────────────────────────────
+23. SOLID UYUM DEĞERLENDİRMESİ
+────────────────────────────────────────────────────────────────────────────────
+
+  Prensip   Uygulama                                        Değerlendirme
   ─────────────────────────────────────────────────────────────────────────────
-  Auth                    PBKDF2-HMAC-SHA256, 210K iter         Yüksek
-  Timing attack           hmac.compare_digest                   Yüksek
-  Rate limiting           Sliding window / IP                   Orta
-  Session isolation       UUID-based upload dizini              Orta
-  Prompt injection        .replace() (not .format())            İyi tasarım
-  Secrets                 .env + pydantic_settings              Standart
-  LLM URL validation      Reachability probe before update      İyi
-  MCP subprocess          disabled flag, env var guard          Orta
-  EKSIK                   TLS (localhost-only varsayım)         —
-  EKSIK                   CSRF koruması                         —
+  SRP       Her node tek sorumluluk; web_search.py sunum    main.py büyük (1420s)
+            katmanı ayrı (WebResultFormatter)
+  OCP       LOADER_MAP, MCP config disabled flag,           Yeni format = 1 satır
+            prompt seçimi keyword match → genişleme kolay
+  LSP       Tüm node'lar AgentState → AgentState dönüyor   Tutarlı
+  ISP       Node'lar yalnızca ihtiyaç duydukları state
+            alanlarına erişiyor
+  DIP       DualLLM fabrika, _RerankerRegistry, duck-type   İyi; node'lar
+            ile soyutlama                                   implementasyona değil
+                                                           sözleşmeye bağlı
 
 
 ────────────────────────────────────────────────────────────────────────────────
-18. DEPLOYMENT PROFİLİ
+24. GRAFİK İÇİ DÖNGÜ KORUMASI
 ────────────────────────────────────────────────────────────────────────────────
 
-┌─────────────────────────────────────────────────────────────────┐
-│                        Tek Sunucu                               │
-│                                                                 │
-│  GPU (≥8GB VRAM):                                               │
-│    llama-server (Gemma 4 E4B GGUF, Q5_K_M ~5.48GB)             │
-│    BGE-M3 embeddings (CPU, ~2GB RAM)                            │
-│    BGE Reranker (CPU, ~300MB RAM)                               │
-│    Whisper "small" (CPU, ~300MB RAM)                            │
-│                                                                 │
-│  Docker:                                                        │
-│    Qdrant (port 6333/6334)                                      │
-│                                                                 │
-│  Python process (Chainlit + FastAPI):                           │
-│    Port 7860 (UI + API)                                         │
-│    SQLite (data/chainlit.db)                                    │
-│                                                                 │
-│  Optional: Cloudflare tunnel (make tunnel)                      │
-└─────────────────────────────────────────────────────────────────┘
+CRAG döngü tehlikesi:
+  Naive CRAG → grader "no" → web_search → grader → sonsuz döngü.
 
-VRAM Bütçesi (12GB GPU):
-  Gemma 4 E4B Q5_K_M  → ~5.5GB
-  Buffer (context)    → ~2.5GB
-  Toplam              → ~8GB  →  12GB GPU'da güvenli
+FRAPPE çözümü (yapısal):
+  web_search_node → generator_node kenarı doğrudan. Grader'a geri dönüş
+  yoktur. Bu sonsuz döngüyü runtime sayaç veya flag değil, graph topolojisi
+  tarafından önler. Yeni bir node eklendiğinde döngü riski yoktur.
+
+Benzer koruma:
+  vision_search_node da rewriter/retriever/grader'ı atlar;
+  generator'a doğrudan edge. Görsel + web araması döngüsüz.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-19. İYİLEŞTİRME ÖNERİLERİ
+25. DİKKAT ÇEKEN TASARIM KARARLARI
 ────────────────────────────────────────────────────────────────────────────────
 
-1. main.py refactor (1179 satır):
-   on_message handler'ı ayrı bir handlers/ modülüne taşınabilir.
+1. .replace() — not .format():
+   RAG context { ve } içerebilir (JSON belgeleri, kod). Python str.format()
+   çöker veya yanlış enjeksiyon yapar. Tüm prompt birleştirmelerinde
+   .replace() kullanılıyor. Bilinçli karar.
 
-2. Async PDF ingestion:
-   VisualPageIngester._analyse_page() senkron. Büyük PDF'lerde UI donabiliyor.
-   asyncio.gather() ile paralel sayfa analizi yapılabilir.
+2. original_question / question ayrımı:
+   Rewriter retrieval için optimize ederken web search doğal dil ister.
+   İki alan bu gergeyi zarif biçimde çözüyor.
 
-3. Session upload temizleme:
-   on_chat_end'de upload dizini siliniyor ama Qdrant chunk'ları kalıyor.
-   Uzun süreli kullanımda koleksiyon şişebilir. TTL veya manuel temizlik gerekli.
+3. ^ anchor routing pattern:
+   _GENERAL_KNOWLEDGE_PATTERNS'ta "^... nedir?$" anchor. Uzun sorgularda
+   "bağlantısı nedir?" gibi ifadenin false-positive oluşturmasını önler.
 
-4. _graph singleton thread safety:
-   if _graph is None → concurrent session'larda race condition riski.
-   asyncio.Lock() veya başlangıçta eager init ile düzeltilebilir.
+4. has_uploads ile _GENERAL_KNOWLEDGE bypass:
+   Belge yüklüyken "transformer nedir?" → rag. Belgede geçen terimi
+   soruyor olabilir. Uploads yokken → direct.
 
-5. TTS temp dosya temizleme:
-   tempfile.NamedTemporaryFile(delete=False) dosyaları silmiyor.
-   Uzun çalışmada /tmp dolabilir. weakref veya atexit handler eklenebilir.
+5. Grader confidence gate:
+   BGE-M3 reranker skoru veya term overlap ile LLM öncesi eleme.
+   Tipik sorgularda LLM grader çağrısından ~3s kaçınılır.
 
-6. Reranker CPU bottleneck:
-   BGE-Reranker-Base CPU'da çalışıyor. VRAM müsaitse GPU'ya taşınabilir.
-   settings.reranker_device = "cuda" ile.
+6. TTS temp dosya session dizini:
+   Önceden /tmp'ye yazılan MP3'ler hiç silinmiyordu. Artık session_upload_dir
+   altına yazılıyor; on_chat_end'deki shutil.rmtree() otomatik temizliyor.
 
-7. Qdrant GRPC:
-   qdrant_prefer_grpc=True ayarlanmış ama port 6334 Docker'da açık mı
-   kontrol edilmeli. HTTP/REST fallback var ama GRPC daha hızlı.
+7. Grader reason ayrımı (yeni):
+   source_filter aktifken "no/irrelevant" → generator dürüstçe "belgede yok"
+   der. "no/needs_live_data" → web fallback izin verilir. Önceki tasarım
+   bu iki senaryoyu ayırt edemiyordu.
 
+8. Cache context key:
+   Aynı sorgunun farklı belge setlerinde farklı yanıtlar gerektirdiği
+   durumda stale cache dönmesini önler. SHA-256 hash üretimi 0 ms.
 
-────────────────────────────────────────────────────────────────────────────────
-20. UZAKTAN ERİŞİM — ngrok Tunnel Kurulumu
-────────────────────────────────────────────────────────────────────────────────
-
-Proje, tek komutla internet üzerinden paylaşılabilir şekilde yapılandırılmıştır.
-
-Komut:
-  make tunnel
-
-Nasıl çalışır:
-  start-tunnel.sh → ngrok http 7860 → public HTTPS URL
-
-Desteklenen Sağlayıcılar:
-  ngrok (varsayılan)   → NGROK_AUTHTOKEN .env'de tanımlı; WebSocket + HTTPS
-  localtunnel (fallback) → TUNNEL_PROVIDER=localtunnel make tunnel
-                           SSH tabanlı, hesap gerektirmez, daha yavaş
-
-ngrok v3 Kurulum Detayları:
-  Binary   : /snap/bin/ngrok  (v3.37.6)
-  Config   : ~/.config/ngrok/ngrok.yml  (authtoken kayıtlı)
-  Inspector: http://localhost:4040  (canlı istek/yanıt izleme)
-
-URL Davranışı:
-  Free plan  → her çalıştırmada yeni URL (https://xxxx.ngrok-free.app)
-  Paid plan  → sabit subdomain tanımlanabilir
-
-Chainlit Tarafı Ayarları:
-  allow_origins = ["*"]          → .chainlit/config.toml (CORS açık)
-  WebSocket                      → ngrok tarafından natively desteklenir
-  Password auth (PBKDF2-HMAC-SHA256) → dışarıdan erişimde kimlik doğrulama zorunlu
-
-Auth Güvenlik Güncellemesi (19 Nisan 2026):
-  Dışa açmadan önce varsayılan admin/admin kimlik bilgileri güçlendirildi:
-  APP_ADMIN_PASSWORD  → rastgele token_urlsafe(12)
-  APP_PASSWORD_SALT   → token_hex(16)
-  CHAINLIT_AUTH_SECRET → token_hex(32)  (JWT imzalama anahtarı)
-
-Güvenlik Notu:
-  - ngrok free URL değiştiği için kullanıcıya her oturumda yeni URL iletilmeli.
-  - Rate limiter (30 req/60s/IP) public erişimi de kapsamaktadır.
-  - TLS, ngrok tarafından sağlanır — uygulama kendi TLS yönetmez.
-  - TAVILY ve GITHUB token'ları .env'de; ngrok şifrelemesi bunları korur.
+9. asyncio.to_thread() kullanım yeri:
+   Tüm CPU-bound veya sync IO işlemleri (embedding, reranking, SQLite,
+   Qdrant, Whisper, TTS) to_thread ile event loop dışına alınmış.
+   direct_response_node'daki llm.invoke() düzeltmesi bu kapsamda.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-21. GENEL DEĞERLENDİRME
+26. TEST KAPSAMASI
 ────────────────────────────────────────────────────────────────────────────────
 
-Proje; tamamen yerel çalışan, production kalitesinde bir multimodal agentic RAG
-sistemidir. Mimari kararların büyük çoğunluğu bilinçli ve doğru:
+tests/test_security.py — 14 test (pytest, anyio):
+
+  Path Traversal:
+    test_path_traversal_blocked         → "../secret.txt" → "Access denied"
+    test_path_traversal_absolute_blocked → "/etc/passwd" → reddedilir
+    test_safe_file_readable             → "safe.txt" → içerik döner
+
+  Rate Limiter:
+    test_rate_limiter_allows_under_limit
+    test_rate_limiter_blocks_over_limit
+    test_rate_limiter_separate_keys     → farklı IP'ler izole
+    test_xff_ignored_from_untrusted_client → spoof önlemi
+    test_xff_trusted_from_known_proxy   → meşru proxy XFF okunur
+
+  Admin Auth:
+    test_require_admin_no_credentials   → 401
+    test_require_admin_wrong_password   → 401
+    test_require_admin_correct_credentials → None (başarılı)
+    test_config_endpoint_rejects_unauthenticated → 401
+    test_config_endpoint_accepts_admin  → 200
+    test_health_endpoint_public         → 200 (auth yok)
+
+  Çalıştırma: pytest tests/test_security.py -v
+
+
+────────────────────────────────────────────────────────────────────────────────
+27. GENEL DEĞERLENDİRME
+────────────────────────────────────────────────────────────────────────────────
 
 Güçlü Yönler:
-  ✔ LLM çağrısından kaçınılan optimizasyon noktaları (router, rewriter, grader)
+  ✔ 4 kademeli router — LLM çağrısından azami kaçınma
+  ✔ CRAG döngü önlemi yapısal (runtime counter değil)
   ✔ Streaming TTS parallelizasyonu (_TtsStreamer)
-  ✔ Çift-geçişli PDF ingestion (metin + görsel)
-  ✔ CRAG pattern doğru implementasyonu (yapısal döngü önlemi)
+  ✔ Grader üç-değerli karar (irrelevant vs needs_live_data)
+  ✔ Semantic cache context-aware (belge seti değişince stale cache yok)
+  ✔ OpenAI-compat API soyutlaması (backend swap = .env değişikliği)
   ✔ original_question / question ayrımı
-  ✔ OpenAI-compat API soyutlaması (backend swap kolay)
-  ✔ SOLID prensiplerine uyum — yeni özellik eklemeyi kolaylaştırıyor
   ✔ Fingerprint-based smart reindex
   ✔ Reranker TTL cache
-  ✔ Dil tespiti — Türkçe/İngilizce otomatik yönetim
+  ✔ Tüm async IO event loop dışına alınmış
+  ✔ TTS temp dosya leak kapatıldı
+  ✔ Credential fallback yok — startup zorunlu validation
+  ✔ 14 güvenlik testi
 
-Geliştirme Alanları:
-  ✘ main.py büyüklüğü (1179 satır)
-  ✘ Async PDF ingestion eksikliği
-  ✘ Qdrant'ta kalan session chunk'ları
-  ✘ TLS eksikliği (local deployment varsayımı)
-  ✘ _graph singleton thread safety
+Kabul Edilebilir Kısıtlar (küçük-orta ölçekli kullanım için):
+  ⚠ main.py büyüklüğü (1420 satır) — refactor fırsatı
+  ⚠ Tek sunucu deployment — yatay ölçeklenme için Redis/Milvus gerekir
+  ⚠ SQLite + tek-node Qdrant — HA/yedeklilik yok
+  ⚠ TLS yoktur — ngrok/Cloudflare tunnel veya reverse proxy ile çözülür
 
-Sonuç: Sağlam bir temel. VRAM bütçesi ve latency optimizasyonları özenle
-hesaplanmış. Kod tabanı büyüdükçe main.py refactor öncelik almalı.
+Proje; mimari kararları bilinçli, optimizasyon noktaları yerinde, güvenlik
+açıkları kapatılmış, production kullanımına hazır bir multimodal agentic RAG
+sistemidir.
 
 ================================================================================
-@uabali
+@uabali — FRAPPE — 25 Nisan 2026
 ================================================================================

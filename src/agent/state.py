@@ -39,6 +39,10 @@ class AgentState(TypedDict):
     # Grader kararı: "yes" | "no"
     relevance: str
 
+    # Grader "no" sebep kodu: "irrelevant" | "needs_live_data" | ""
+    # source_filter aktifken yalnızca "needs_live_data" web fallback'e izin verir.
+    grader_reason: str
+
     # Yüklenen dosyaya göre retrieval filtreleme (boş = tüm belgeler)
     source_filter: str
 

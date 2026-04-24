@@ -67,8 +67,13 @@ class SemanticCache:
         except Exception as exc:
             logger.warning("SemanticCache: koleksiyon hazırlama başarısız: %s", exc)
 
-    async def lookup(self, question: str) -> Optional[str]:
-        """Benzer soru cache'te varsa yanıtı döner, yoksa None."""
+    async def lookup(self, question: str, cache_ctx: str = "") -> Optional[str]:
+        """Benzer soru cache'te varsa yanıtı döner, yoksa None.
+
+        cache_ctx: source_filter/session_uploads/retrieval_strategy'den türetilen
+        bağlam özeti — farklı belge setlerindeki aynı sorunun yanlış cache
+        dönmesini engeller.
+        """
         if not settings.semantic_cache_enabled:
             return None
         try:
@@ -96,7 +101,11 @@ class SemanticCache:
                         models.FieldCondition(
                             key="timestamp",
                             range=models.Range(gte=cutoff),
-                        )
+                        ),
+                        models.FieldCondition(
+                            key="context_key",
+                            match=models.MatchValue(value=cache_ctx),
+                        ),
                     ]
                 ),
             )
@@ -104,15 +113,15 @@ class SemanticCache:
                 score = results[0].score
                 cached = results[0].payload.get("response", "")
                 logger.info(
-                    "SemanticCache: hit [score=%.3f, threshold=%.3f, q=%.60s]",
-                    score, settings.semantic_cache_threshold, question,
+                    "SemanticCache: hit [score=%.3f, threshold=%.3f, ctx=%.12s, q=%.60s]",
+                    score, settings.semantic_cache_threshold, cache_ctx or "none", question,
                 )
                 return cached
         except Exception as exc:
             logger.warning("SemanticCache lookup hatası: %s", exc)
         return None
 
-    async def store(self, question: str, response: str) -> None:
+    async def store(self, question: str, response: str, cache_ctx: str = "") -> None:
         """Soru–yanıt çiftini cache'e kaydeder."""
         if not settings.semantic_cache_enabled:
             return
@@ -139,13 +148,14 @@ class SemanticCache:
                             "question": normalized,
                             "response": response,
                             "timestamp": time.time(),
+                            "context_key": cache_ctx,
                         },
                     )
                 ],
             )
             logger.info(
-                "SemanticCache: kaydedildi [q=%.60s, resp=%dch]",
-                question, len(response),
+                "SemanticCache: kaydedildi [ctx=%.12s, q=%.60s, resp=%dch]",
+                cache_ctx or "none", question, len(response),
             )
         except Exception as exc:
             logger.warning("SemanticCache store hatası: %s", exc)

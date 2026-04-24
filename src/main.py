@@ -102,14 +102,10 @@ def data_layer():
 
 @cl.password_auth_callback
 def auth_callback(username: str, password: str):
-    admin_user = os.getenv("APP_ADMIN_USERNAME", "admin")
-    admin_pass = os.getenv("APP_ADMIN_PASSWORD", "admin")
-    salt = os.getenv("APP_PASSWORD_SALT", "local-dev-salt")
-
-    if username != admin_user:
+    if username != settings.app_admin_username:
         return None
-    expected = _hash_password(admin_pass, salt)
-    given = _hash_password(password, salt)
+    expected = _hash_password(settings.app_admin_password, settings.app_password_salt)
+    given = _hash_password(password, settings.app_password_salt)
     if not _constant_time_eq(given, expected):
         return None
     return cl.User(identifier=username, metadata={"role": "admin", "provider": "credentials"})
@@ -216,9 +212,18 @@ def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sa
 
 
 async def _write_audio_tmp(audio_bytes: bytes) -> str:
-    """Ses baytlarını geçici MP3 dosyasına async olarak yazar; dosya yolunu döner."""
+    """Ses baytlarını session dizinine (varsa) geçici MP3 olarak yazar.
+
+    Session dizinine yazılırsa on_chat_end'deki shutil.rmtree otomatik temizler.
+    Session yoksa system /tmp kullanılır.
+    """
+    try:
+        session_dir = cl.user_session.get("session_upload_dir")
+    except Exception:
+        session_dir = None
+
     def _write():
-        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False, dir=session_dir or None)
         tmp.write(audio_bytes)
         tmp.flush()
         path = tmp.name

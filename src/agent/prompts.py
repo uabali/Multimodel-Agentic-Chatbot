@@ -80,20 +80,25 @@ Decide whether the retrieved document chunks are SUFFICIENT to fully answer
 the user's question without needing any additional real-time or external data.
 
 GRADING CRITERIA:
-- "yes" → Chunks contain complete information to answer the question entirely on their own.
-- "no"  → Chunks are off-topic, OR they are partially relevant but cannot fully answer
-          because the answer requires real-time / external data not present in the chunks
-          (e.g. current prices, live exchange rates, today's market values, up-to-date statistics).
+- "yes"            → Chunks contain complete information to answer the question entirely.
+- "no/irrelevant"  → Chunks are off-topic or do not contain information relevant to the question.
+- "no/needs_live_data" → Chunks are partially relevant but cannot fully answer because
+                     the answer requires real-time / external data not in the chunks
+                     (e.g. current prices, live exchange rates, today's statistics).
 
-EXAMPLES of "no":
+EXAMPLES of "no/needs_live_data":
   - Document says "value equals 10× current gold price" but does not provide today's gold price.
   - Document mentions a formula that depends on live market data.
   - Document references an external source without reproducing the needed values.
 
-Be strict: partial relevance that still requires external data to complete the answer = "no".
+EXAMPLES of "no/irrelevant":
+  - Chunks discuss a completely different topic than the question.
+  - Chunks contain no information related to the question at all.
 
 Respond ONLY with valid JSON — no markdown fences, no extra text:
-{"relevant": "yes"}  or  {"relevant": "no"}\
+{"relevant": "yes"}
+{"relevant": "no", "reason": "irrelevant"}
+{"relevant": "no", "reason": "needs_live_data"}\
 """
 
 

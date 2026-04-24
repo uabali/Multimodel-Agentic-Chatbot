@@ -17,15 +17,50 @@ Tasarım kararları:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import secrets
 import time
 from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field, HttpUrl
 
 from src.middleware.rate_limiter import rate_limit_chat, rate_limit_config
+
+_basic_security = HTTPBasic(auto_error=False)
+
+
+def _hash_pw(password: str, salt: str) -> str:
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 210_000)
+    return dk.hex()
+
+
+async def require_admin(
+    credentials: Annotated[HTTPBasicCredentials | None, Depends(_basic_security)],
+) -> None:
+    """FastAPI dependency — rejects requests without valid admin credentials."""
+    from src.config import settings
+
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin authentication required.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    ok_user = secrets.compare_digest(credentials.username, settings.app_admin_username)
+    ok_pass = secrets.compare_digest(
+        _hash_pw(credentials.password, settings.app_password_salt),
+        _hash_pw(settings.app_admin_password, settings.app_password_salt),
+    )
+    if not (ok_user and ok_pass):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin credentials.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +207,7 @@ async def health_check() -> HealthResponse:
     response_model=LLMConfigResponse,
     summary="Mevcut LLM yapılandırması",
     description="Şu an aktif olan LLM backend/URL, model adı ve token parametrelerini döner.",
+    dependencies=[Depends(require_admin)],
 )
 async def get_config() -> LLMConfigResponse:
     from src.config import settings
@@ -191,7 +227,7 @@ async def get_config() -> LLMConfigResponse:
     "/config/llm",
     response_model=LLMConfigResponse,
     summary="LLM URL'sini güncelle",
-    dependencies=[Depends(rate_limit_config)],
+    dependencies=[Depends(require_admin), Depends(rate_limit_config)],
     description=(
         "LLM sunucu URL'sini ve opsiyonel olarak model adını runtime'da günceller. "
         "Güncelleme sonrası LLM istemci önbelleği temizlenir; bir sonraki sohbet "
@@ -251,7 +287,7 @@ async def update_llm_config(
 
 
 # Backward-compat alias endpoint (older UI/docs).
-@router.put("/config/vllm", response_model=LLMConfigResponse, include_in_schema=False)
+@router.put("/config/vllm", response_model=LLMConfigResponse, include_in_schema=False, dependencies=[Depends(require_admin)])
 async def update_vllm_config(payload: Annotated[LLMUrlUpdate, Body(embed=False)]) -> LLMConfigResponse:
     return await update_llm_config(payload)
 
@@ -260,7 +296,7 @@ async def update_vllm_config(payload: Annotated[LLMUrlUpdate, Body(embed=False)]
     "/llm/probe",
     response_model=ProbeResponse,
     summary="LLM bağlantısını test et",
-    dependencies=[Depends(rate_limit_chat)],
+    dependencies=[Depends(require_admin), Depends(rate_limit_chat)],
     description=(
         "Verilen URL'ye (veya mevcut ayara) bağlanmayı dener ve yanıt süresini ölçer. "
         "Ayarları değiştirmez — yalnızca bağlantı testi için kullanın."

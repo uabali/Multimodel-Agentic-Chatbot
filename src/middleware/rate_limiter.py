@@ -22,11 +22,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections import deque
 from typing import Deque
 
 from fastapi import Depends, HTTPException, Request, status
+
+# IPs whose X-Forwarded-For header is trusted (e.g. Cloudflare tunnel, nginx).
+# Set TRUSTED_PROXY_IPS=127.0.0.1,::1 in .env; leave empty to trust no proxy.
+_TRUSTED_PROXIES: frozenset[str] = frozenset(
+    ip.strip()
+    for ip in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",")
+    if ip.strip()
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,13 +87,13 @@ config_rate_limiter = SlidingWindowLimiter(max_requests=10, window_seconds=60)
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract real client IP, honouring X-Forwarded-For (Cloudflare tunnel)."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "unknown"
+    """Extract real client IP. X-Forwarded-For is only trusted from known proxy IPs."""
+    client_host = request.client.host if request.client else None
+    if client_host in _TRUSTED_PROXIES:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return client_host or "unknown"
 
 
 async def rate_limit_chat(request: Request) -> None:

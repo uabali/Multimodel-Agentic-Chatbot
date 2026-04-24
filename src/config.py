@@ -132,8 +132,17 @@ class Settings(BaseSettings):
 
     # ── Auth ──
     app_admin_username: str = "admin"
-    app_admin_password: str = "admin"
-    app_password_salt: str = "local-dev-salt"
+    # No defaults — startup fails loudly if these are missing from .env
+    app_admin_password: str = Field(
+        ...,
+        validation_alias=AliasChoices("APP_ADMIN_PASSWORD"),
+        description="Admin password. Must be set in .env — no insecure fallback.",
+    )
+    app_password_salt: str = Field(
+        ...,
+        validation_alias=AliasChoices("APP_PASSWORD_SALT"),
+        description="PBKDF2 salt. Must be set in .env — no insecure fallback.",
+    )
 
     # ── Paths ──
     upload_dir: Path = Path("uploads")

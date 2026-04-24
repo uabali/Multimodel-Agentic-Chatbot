@@ -204,10 +204,6 @@ async def router_node(state: AgentState) -> AgentState:
         )
         return {**state, "route": "vision"}
 
-    if state.get("input_type") == "audio":
-        logger.info("Router → direct [reason=audio, q_len=%d, t=0.00s]", q_len)
-        return {**state, "route": "direct"}
-
     # Dosya yüklendiyse: deterministik RAG — keyword/LLM routing atlanır.
     if state.get("source_filter"):
         logger.info(
@@ -496,6 +492,16 @@ def _parse_yes_no(text: str, default: str = "no") -> str:
     return default
 
 
+def _parse_grader_reason(text: str) -> str:
+    """Grader yanıtından 'reason' alanını çıkarır: 'needs_live_data' | 'irrelevant' | ''."""
+    text_lower = text.lower()
+    if "needs_live_data" in text_lower:
+        return "needs_live_data"
+    if "irrelevant" in text_lower:
+        return "irrelevant"
+    return ""
+
+
 async def grader_node(state: AgentState) -> AgentState:
     """Belge alaka değerlendirmesi — önce sıfır-maliyetli confidence skoru dener.
 
@@ -511,7 +517,7 @@ async def grader_node(state: AgentState) -> AgentState:
 
     if not documents:
         logger.info("Grader: no_docs → relevance=no [t=%.3fs]", time.perf_counter() - t0)
-        return {**state, "relevance": "no"}
+        return {**state, "relevance": "no", "grader_reason": "irrelevant"}
 
     if state.get("source_filter") or state.get("session_uploads"):
         top_docs = documents[:MAX_GRADER_DOCS]
@@ -525,15 +531,16 @@ async def grader_node(state: AgentState) -> AgentState:
                 HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
             ])
             relevance = _parse_yes_no(response.content)
+            reason = _parse_grader_reason(response.content) if relevance == "no" else ""
             logger.info(
-                "Grader: relevance=%s [mode=file_llm, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
-                relevance, len(top_docs), len(documents), doc_chars,
+                "Grader: relevance=%s reason=%s [mode=file_llm, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
+                relevance, reason or "-", len(top_docs), len(documents), doc_chars,
                 time.perf_counter() - t_llm, time.perf_counter() - t0,
             )
         except Exception as exc:
             logger.warning("Grader: llm_error → yes [err=%s, t=%.3fs]", exc, time.perf_counter() - t0)
-            relevance = "yes"
-        return {**state, "relevance": relevance}
+            relevance, reason = "yes", ""
+        return {**state, "relevance": relevance, "grader_reason": reason}
 
     confidence = estimate_confidence(question, documents)
 
@@ -542,14 +549,14 @@ async def grader_node(state: AgentState) -> AgentState:
             "Grader: relevance=yes [mode=high_conf, conf=%.3f>=%.3f, docs=%d, t=%.3fs]",
             confidence, _GRADER_CONF_HIGH, len(documents), time.perf_counter() - t0,
         )
-        return {**state, "relevance": "yes"}
+        return {**state, "relevance": "yes", "grader_reason": ""}
 
     if confidence < _GRADER_CONF_LOW:
         logger.info(
             "Grader: relevance=no [mode=low_conf, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
             confidence, _GRADER_CONF_LOW, len(documents), time.perf_counter() - t0,
         )
-        return {**state, "relevance": "no"}
+        return {**state, "relevance": "no", "grader_reason": "irrelevant"}
 
     top_docs = documents[:MAX_GRADER_DOCS]
     doc_texts = "\n---\n".join(doc.page_content for doc in top_docs)
@@ -562,16 +569,18 @@ async def grader_node(state: AgentState) -> AgentState:
             HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
         ])
         relevance = _parse_yes_no(response.content)
+        reason = _parse_grader_reason(response.content) if relevance == "no" else ""
         logger.info(
-            "Grader: relevance=%s [mode=mid_conf, conf=%.3f, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
-            relevance, confidence, len(top_docs), len(documents), doc_chars,
+            "Grader: relevance=%s reason=%s [mode=mid_conf, conf=%.3f, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
+            relevance, reason or "-", confidence, len(top_docs), len(documents), doc_chars,
             time.perf_counter() - t_llm, time.perf_counter() - t0,
         )
     except Exception as exc:
-        logger.warning("Grader: llm_error → yes [err=%s, t=%.3fs]", exc, time.perf_counter() - t0)
-        relevance = "yes"
+        # mid_conf hata: güvensiz belgeyle üretim yerine web fallback'e düş
+        logger.warning("Grader: llm_error → no [err=%s, t=%.3fs]", exc, time.perf_counter() - t0)
+        relevance, reason = "no", "irrelevant"
 
-    return {**state, "relevance": relevance}
+    return {**state, "relevance": relevance, "grader_reason": reason}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1028,7 +1037,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
         messages_to_send = [SystemMessage(content=system_prompt)]
         messages_to_send.extend(prior_messages)
         messages_to_send.append(HumanMessage(content=question))
-        response = llm.invoke(messages_to_send)
+        response = await llm.ainvoke(messages_to_send)
         generation = getattr(response, "content", "") or ""
         new_messages = [
             *prior_messages,
