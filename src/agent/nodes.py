@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 _router_llm_cache = None
 _rag_llm_cache: dict[tuple, object] = {}
+_RAG_LLM_CACHE_MAXSIZE = 32  # temperature×max_tokens combinations; prevents unbounded growth
 
 
 def _get_router_llm():
@@ -80,12 +81,15 @@ def _get_rag_llm(temperature: float = 0.0, max_tokens: int | None = None):
     temperature=0.0 ve max_tokens=None → DualLLM singleton (cached).
     Diğer değerler (temperature, max_tokens) tuple'ı ile önbelleklenir;
     per-session ayar değişikliklerinde TCP bağlantısı yeniden kullanılır.
+    Cache dolunca en eski girdi çıkarılır (LRU-like eviction).
     """
     if temperature == 0.0 and max_tokens is None:
         from src.rag.llm import get_rag_llm
         return get_rag_llm()
     key = (temperature, max_tokens)
     if key not in _rag_llm_cache:
+        if len(_rag_llm_cache) >= _RAG_LLM_CACHE_MAXSIZE:
+            _rag_llm_cache.pop(next(iter(_rag_llm_cache)))
         from src.rag.llm import create_vllm_llm
         _rag_llm_cache[key] = create_vllm_llm(
             temperature=temperature,
@@ -684,9 +688,8 @@ async def vision_rag_node(state: AgentState) -> AgentState:
     llm = _get_rag_llm(temperature=0.1)
 
     try:
-        response = await asyncio.to_thread(
-            llm.invoke,
-            [SystemMessage(content=system_prompt), HumanMessage(content=content_parts)],
+        response = await llm.ainvoke(
+            [SystemMessage(content=system_prompt), HumanMessage(content=content_parts)]
         )
         vision_context = (response.content or "").strip()
     except Exception as exc:
@@ -731,9 +734,8 @@ async def vision_search_node(state: AgentState) -> AgentState:
     llm = _get_rag_llm(temperature=0.1)
 
     try:
-        vision_response = await asyncio.to_thread(
-            llm.invoke,
-            [SystemMessage(content=system_prompt), HumanMessage(content=content_parts)],
+        vision_response = await llm.ainvoke(
+            [SystemMessage(content=system_prompt), HumanMessage(content=content_parts)]
         )
         vision_context = (vision_response.content or "").strip()
     except Exception as exc:
@@ -1051,7 +1053,21 @@ async def direct_response_node(state: AgentState) -> AgentState:
         len(all_tools), len(prior_messages), backend,
     )
     t_react = time.perf_counter()
-    agent = create_react_agent(llm, all_tools, prompt=system_prompt)
+
+    # Cache the compiled ReAct graph per-session (recompiling costs ~50-100ms each time).
+    agent_cache_key = (tuple(sorted(getattr(t, "name", "") for t in all_tools)), id(llm))
+    try:
+        _cached_agent = cl.user_session.get("_react_agent")
+        _cached_agent_key = cl.user_session.get("_react_agent_key")
+        if _cached_agent is not None and _cached_agent_key == agent_cache_key:
+            agent = _cached_agent
+        else:
+            agent = create_react_agent(llm, all_tools, prompt=system_prompt)
+            cl.user_session.set("_react_agent", agent)
+            cl.user_session.set("_react_agent_key", agent_cache_key)
+    except Exception:
+        agent = create_react_agent(llm, all_tools, prompt=system_prompt)
+
     result = await agent.ainvoke({"messages": prior_messages + [HumanMessage(content=question)]})
 
     generation = result["messages"][-1].content

@@ -134,7 +134,7 @@ _qdrant_client: Optional[QdrantClient] = None
 def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
     if _qdrant_client is None:
-        client = QdrantClient(url=settings.qdrant_url)
+        client = QdrantClient(url=settings.qdrant_url, prefer_grpc=settings.qdrant_prefer_grpc)
         _wait_for_qdrant(client)
         _qdrant_client = client
     return _qdrant_client

@@ -43,7 +43,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.config import settings
 from src.agent.graph import arun_agent, astream_agent
-from src.persistence.sqlite_data_layer import SQLiteDataLayer as _SQLiteDataLayer
 from src.mcp.mcp_client import get_mcp_tools, is_mcp_tools_cache_warm
 from src.rag.ingest import ingest_file
 from src.persistence.sqlite_data_layer import SQLiteDataLayer
@@ -88,12 +87,21 @@ def _constant_time_eq(a: str, b: str) -> bool:
 _ensure_auth_secret()
 
 
-# ── Data layer ──
+# ── Data layer — singleton shared between Chainlit and internal summarizer ──
+
+_dl_singleton: "SQLiteDataLayer | None" = None
+
+
+def _get_shared_data_layer() -> "SQLiteDataLayer":
+    global _dl_singleton
+    if _dl_singleton is None:
+        _dl_singleton = SQLiteDataLayer(Path("data") / "chainlit.db")
+    return _dl_singleton
 
 
 @cl.data_layer
 def data_layer():
-    return SQLiteDataLayer(Path("data") / "chainlit.db")
+    return _get_shared_data_layer()
 
 
 
@@ -195,6 +203,16 @@ async def _preload_reranker() -> None:
         logger.info("Reranker preloaded: %s", settings.reranker_model)
     except Exception as exc:
         logger.warning("Reranker preload failed (will retry on first use): %s", exc)
+
+
+async def _preload_embeddings() -> None:
+    """Embedding modelini background thread'de yukle — ilk RAG sorgusunda gecikme olmaz."""
+    try:
+        from src.rag.vectorstore import _cached_embed_query
+        await asyncio.to_thread(_cached_embed_query, "warmup")
+        logger.info("Embedding model preloaded: %s", settings.embedding_model)
+    except Exception as exc:
+        logger.warning("Embedding preload failed (will load on first use): %s", exc)
 
 
 def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sample_width: int = 2) -> bytes:
@@ -474,6 +492,9 @@ async def on_chat_start():
     # Reranker preload — ilk RAG sorgusunda HuggingFace gecikme olmasin
     asyncio.create_task(_preload_reranker())
 
+    # Embedding model preload — ilk RAG sorgusunda BGE-M3 yükleme gecikmesi olmasin
+    asyncio.create_task(_preload_embeddings())
+
 
 
 @cl.set_chat_profiles
@@ -680,17 +701,11 @@ _MAX_HISTORY_CHARS = 6000
 
 
 # Uzun süreli bellek: bu eşiği geçince eski mesajlar LLM ile özetlenir.
-_SUMMARY_TRIGGER = 40       # Kaç mesajdan sonra özetleme başlatılır
-_SUMMARY_KEEP_RECENT = 10   # Özetlemeden sonra canlı tutulan son mesaj sayısı
+# chat_history her turu 2 kayıtla temsil eder (user + assistant);
+# 40 mesaj = 20 konuşma turu.
+_SUMMARY_TRIGGER = 40       # Mesaj sayısı eşiği (2 × tur sayısı)
+_SUMMARY_KEEP_RECENT = 10   # Özetlemeden sonra canlı tutulan son mesaj sayısı (5 tur)
 
-_dl_instance: "_SQLiteDataLayer | None" = None
-
-
-def _get_data_layer() -> "_SQLiteDataLayer":
-    global _dl_instance
-    if _dl_instance is None:
-        _dl_instance = _SQLiteDataLayer(Path("data") / "chainlit.db")
-    return _dl_instance
 
 
 async def _summarize_and_compress_history(
@@ -736,7 +751,7 @@ async def _summarize_and_compress_history(
 
     if summary and thread_id:
         try:
-            await _get_data_layer().patch_thread_metadata(thread_id, {"summary": summary})
+            await _get_shared_data_layer().patch_thread_metadata(thread_id, {"summary": summary})
         except Exception as exc:
             logger.warning("Thread metadata güncellenemedi: %s", exc)
 
@@ -1041,8 +1056,10 @@ async def on_message(message: cl.Message):
         # ── /url command — URL'den belge ingest ──
 
         if cmd.lower().startswith("/url "):
+            import urllib.parse as _urlparse
             raw_url = cmd[5:].strip()
-            if not raw_url.startswith("http"):
+            _parsed = _urlparse.urlparse(raw_url)
+            if _parsed.scheme not in {"http", "https"} or not _parsed.netloc:
                 thinking_msg.content = "Gecersiz URL. Ornek: `/url https://example.com/makale`"
                 await thinking_msg.update()
                 return

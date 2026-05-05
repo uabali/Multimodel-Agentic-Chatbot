@@ -23,7 +23,7 @@ help: ## Show this help
 # ─────────────────────────────────────────────────────────────────────────────
 setup: ## Create venv, install deps, copy .env template
 	@echo "── setup ──────────────────────────────────────────"
-	@test -d .venv || python3 -m venv .venv
+	@test -d .venv || uv venv .venv
 	@. .venv/bin/activate && uv sync
 	@test -f .env || (cp .env.example .env && echo "Created .env from template — edit it now.")
 	@echo "Done. Activate with:  source .venv/bin/activate"

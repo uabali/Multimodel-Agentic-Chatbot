@@ -6,8 +6,7 @@ Akış:
   store(question, response) → embed → Qdrant upsert
 
 Mevcut altyapıdan yeniden kullanılanlar:
-  - get_qdrant_client() (vectorstore.py)
-  - get_embeddings()    (embeddings.py)
+  - get_qdrant_client(), _cached_embed_query() (vectorstore.py)
   - settings.semantic_cache_* (config.py)
 """
 
@@ -78,15 +77,14 @@ class SemanticCache:
             return None
         try:
             from qdrant_client import models
-            from src.rag.vectorstore import get_qdrant_client
-            from src.rag.embeddings import get_embeddings
+            from src.rag.vectorstore import get_qdrant_client, _cached_embed_query
 
             await asyncio.to_thread(self._ensure_collection)
             if not self._collection_ready:
                 return None
 
             normalized = _normalize(question)
-            embedding = await asyncio.to_thread(get_embeddings().embed_query, normalized)
+            embedding = await asyncio.to_thread(_cached_embed_query, normalized)
 
             cutoff = time.time() - settings.semantic_cache_ttl_hours * 3600
             client = get_qdrant_client()
@@ -127,15 +125,14 @@ class SemanticCache:
             return
         try:
             from qdrant_client import models
-            from src.rag.vectorstore import get_qdrant_client
-            from src.rag.embeddings import get_embeddings
+            from src.rag.vectorstore import get_qdrant_client, _cached_embed_query
 
             await asyncio.to_thread(self._ensure_collection)
             if not self._collection_ready:
                 return
 
             normalized = _normalize(question)
-            embedding = await asyncio.to_thread(get_embeddings().embed_query, normalized)
+            embedding = await asyncio.to_thread(_cached_embed_query, normalized)
             client = get_qdrant_client()
             await asyncio.to_thread(
                 client.upsert,

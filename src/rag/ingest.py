@@ -286,8 +286,9 @@ class VisualPageIngester:
     def ingest_pdf_visuals(self, pdf_path: Path, file_id: str) -> list[Document]:
         """PDF'in her sayfasını görsel analiz eder; chunk Document listesi döner.
 
-        Sayfalar concurrent.futures.ThreadPoolExecutor ile paralel işlenir;
-        sıra korunur, hatalı sayfalar atlanır.
+        Sayfalar sıralı olarak işlenir — LLM çağrıları IO-bound ve zaten LLM
+        sunucusunda serileştiği için ThreadPoolExecutor yerine sequential loop
+        hem daha güvenli (asyncio event loop çakışması yok) hem de eşdeğer hızda.
         """
         if not self.available():
             logger.warning(
@@ -302,26 +303,13 @@ class VisualPageIngester:
             logger.warning("PDF render hatası (%s): %s", pdf_path.name, exc)
             return []
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        results: dict[int, str] = {}
-        max_workers = min(4, len(pages))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_page = {
-                executor.submit(self._analyse_page, page_num, image_bytes): page_num
-                for page_num, image_bytes in pages
-            }
-            for future in as_completed(future_to_page):
-                page_num = future_to_page[future]
-                try:
-                    results[page_num] = future.result()
-                except Exception as exc:
-                    logger.warning("Sayfa %d işlenemedi: %s", page_num, exc)
-                    results[page_num] = ""
-
         docs: list[Document] = []
-        for page_num, _image_bytes in sorted(pages, key=lambda x: x[0]):
-            text = results.get(page_num, "")
+        for page_num, image_bytes in sorted(pages, key=lambda x: x[0]):
+            try:
+                text = self._analyse_page(page_num, image_bytes)
+            except Exception as exc:
+                logger.warning("Sayfa %d işlenemedi: %s", page_num, exc)
+                text = ""
             if not text:
                 continue
             docs.append(Document(
