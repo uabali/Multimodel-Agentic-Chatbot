@@ -106,6 +106,7 @@ _DIRECT_PATTERNS: list[str] = [
     # Gerçek zamanlı / web (tarihi hava sorguları dahil)
     r"(hava\s*d[uü]?r[uü]mu|havad[uü]?r[uü]?mu|hava\s+nas[ıi]ld[ıi]|hava\s+nas[ıi]l\b|weather|borsa|d[öo]viz|kur|exchange rate|g[üu]ncel|latest news)",
     r"(bug[üu]n|today|[şs]u an|right now|currently|son dakika|breaking)",
+    r"\b(namaz|ezan|imsak|iftar|sahur|prayer\s*time)",
     # Spor sonuçları — Türkçe ek varyasyonları dahil ("maci", "sonuclandi", "dun oynanan")
     r"(skor|ma[çc][ıi]?\s*sonucu?|kim\s+kazandı|who\s+won|puan\s+durumu|standings)",
     r"(ma[çc][ıi]?\s*(nas[ıi]l|kazan|oynan|sonu[çc]land)|d[üu]n\s+oynanan)",
@@ -130,6 +131,8 @@ _WEB_PATTERNS: list[str] = [
     r"(son\s+sürüm|yeni\s+sürüm|en\s+son\s+sürüm|latest\s+version|release\s+notes|changelog)",
     # Duyurular / haberler
     r"\b(duyurdu|açıkladı|released|launched|announced)\b",
+    # Namaz / ibadet vakitleri — konum ve güne göre değişir, canlı veri gerektirir
+    r"\b(namaz|ezan|imsak|iftar|sahur|prayer\s*time)",
     # Kullanıcı açıkça web araması istiyor — "web search yap", "internetten ara" vb.
     r"\b(web\s*[- ]?search\s*(yap|et)?|internett?en?\s+ara|internett?e?\s+bak|google'?[lL]a[yıi]?)\b",
     r"\b(online\s+ara|arama\s+yap|ara[tı]\s+internett?e?)\b",

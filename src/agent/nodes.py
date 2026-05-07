@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import datetime
 import operator
 import logging
 import re
@@ -129,6 +130,15 @@ _PLAIN_DIRECT_TOOL_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 _PLAIN_DIRECT_ARITH_RE = re.compile(r"^\s*[\d\s+\-*/().,^%]+\s*$")
+_DATE_QUERY_RE = re.compile(
+    r"(bug[üu]n(ün)?\s*(tarih|g[üu]n|g[üu]nl[üu]k|hangi|ne|kaç[ıi]nc[ıi])|"
+    r"tarih\s*(nedir|ne|kaç|bugün)|"
+    r"bug[üu]n\s*ne\s*g[üu]n[üu]?|"
+    r"hangi\s*g[üu]n[üu]?|"
+    r"g[üu]n[üu]n\s*tarihi|"
+    r"bu\s*g[üu]n\s*(g[üu]nlerden|ne\s*g[üu]n|hangi))",
+    re.IGNORECASE | re.UNICODE,
+)
 _MATH_WORD_RE = re.compile(
     r"(asal|prime|fibonacci|fakt[öo]riyel|factorial|mutlak\s+fark|"
     r"basamakl[ıi]|toplam[ıi]?|çarp[ıi]m[ıi]?|carp[ıi]m[ıi]?|kaç\s+eder|kac\s+eder)",
@@ -935,11 +945,7 @@ def _fallback_context_answer(question: str, documents: list[Document], vision_co
     if not snippets:
         return "Bu soruyu yanıtlayabilecek bir belge bağlamı bulunamadı."
 
-    return (
-        "Model bu turda boş yanıt döndürdü. Yüklenen belgeden gelen ilgili bağlam aşağıda; "
-        "cevabı bu metinden doğrulayabilirsiniz:\n\n"
-        + "\n\n---\n\n".join(snippets)
-    )
+    return "Belgeden bulunan içerik:\n\n" + "\n\n---\n\n".join(snippets)
 
 
 async def _retry_generator_with_compact_context(
@@ -967,7 +973,7 @@ async def _retry_generator_with_compact_context(
 
     compact_context = "\n\n---\n\n".join(compact_parts)
     system_content = (
-        "Sen Frappe adlı bir RAG asistanısın. Sadece verilen bağlama dayanarak "
+        "Adın Frappe, bir RAG asistanısın. Sadece verilen bağlama dayanarak "
         "kullanıcının sorusunu aynı dilde, kısa ve doğrudan yanıtla. "
         "Bağlamda cevap yoksa sadece 'Bu bilgi yüklenen belgelerde yer almamaktadır.' yaz.\n\n"
         f"Bağlam:\n{compact_context}"
@@ -1254,6 +1260,16 @@ async def direct_response_node(state: AgentState) -> AgentState:
             ]
             return {**state, "generation": answer, "messages": new_messages}
 
+    if _DATE_QUERY_RE.search(question):
+        _today = datetime.date.today()
+        _months_tr = {1:"Ocak",2:"Şubat",3:"Mart",4:"Nisan",5:"Mayıs",6:"Haziran",
+                      7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
+        _days_tr = {0:"Pazartesi",1:"Salı",2:"Çarşamba",3:"Perşembe",4:"Cuma",5:"Cumartesi",6:"Pazar"}
+        answer = f"{_today.day} {_months_tr[_today.month]} {_today.year}, {_days_tr[_today.weekday()]}."
+        logger.info("Direct: date_fast [ans='%s', total_t=%.3fs]", answer, time.perf_counter() - t0)
+        new_messages = [*prior_messages, HumanMessage(content=question), AIMessage(content=answer)]
+        return {**state, "generation": answer, "messages": new_messages}
+
     if _PLAIN_DIRECT_ARITH_RE.fullmatch(question.strip()):
         try:
             answer = _safe_eval_math_expr(question)
@@ -1297,11 +1313,17 @@ async def direct_response_node(state: AgentState) -> AgentState:
     # basit mesajlarda gereksiz gecikme yaratır.
     if _should_use_plain_direct_llm(question):
         logger.info("Direct: plain_chat [prior=%d, q_len=%d]", len(prior_messages), len(question))
+        _today = datetime.date.today()
+        _months_tr = {1:"Ocak",2:"Şubat",3:"Mart",4:"Nisan",5:"Mayıs",6:"Haziran",
+                      7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
+        _days_tr = {0:"Pazartesi",1:"Salı",2:"Çarşamba",3:"Perşembe",4:"Cuma",5:"Cumartesi",6:"Pazar"}
+        _date_str = f"{_today.day} {_months_tr[_today.month]} {_today.year}, {_days_tr[_today.weekday()]}"
         system_prompt = (
-            "Sen Frappe adlı kısa ve doğal yanıt veren iki dilli bir asistansın.\n"
-            "Kullanıcının diliyle yanıt ver. Türkçe soru veya selam → Türkçe yanıt.\n"
-            "Basit sohbetlerde kısa kal; soruyu başta tekrar etme; emoji kullanma.\n"
-            "Araçların veya canlı verinin gerektiği konularda bunu kısaca belirt."
+            f"GÜNCEL TARİH: {_date_str}.\n"
+            "Sen bir yapay zeka asistanısın. Adın Frappe'dir (başka ismin yok).\n"
+            "İsim sorulursa sadece 'Frappe' de; 'Sen Frappe' veya 'Ben Sen' yazma.\n"
+            "Kullanıcının diliyle yanıt ver. Türkçe soru → Türkçe yanıt.\n"
+            "Kısa kal; soruyu başta tekrar etme; emoji kullanma."
         )
         llm = _get_chat_llm()
         messages_to_send = [SystemMessage(content=system_prompt)]
