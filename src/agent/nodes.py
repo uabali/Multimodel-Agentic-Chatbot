@@ -30,6 +30,8 @@ Modern LangChain kullanımı:
 from __future__ import annotations
 
 import asyncio
+import ast
+import operator
 import logging
 import re
 import time
@@ -98,6 +100,12 @@ def _get_rag_llm(temperature: float = 0.0, max_tokens: int | None = None):
     return _rag_llm_cache[key]
 
 
+def _get_chat_llm():
+    """Basit sohbet için araçsız, küçük prompt'lu LLM."""
+    from src.rag.llm import get_chat_llm
+    return get_chat_llm()
+
+
 def reset_nodes_llm_cache() -> None:
     """LLM ayarları runtime'da değiştiğinde (api/router.py) çağrılır."""
     global _router_llm_cache
@@ -109,6 +117,92 @@ def _get_agent_llm():
     """ReAct agent için tool-call uyumlu LLM (düşük sıcaklık, yüksek bütçe)."""
     from src.rag.llm import get_agent_llm
     return get_agent_llm()
+
+
+_PLAIN_DIRECT_TOOL_RE = re.compile(
+    r"("
+    r"hesapla|calculate|kaç eder|yüzde|percent|kdv|vat|"
+    r"dosya|belge|pdf|upload|yüklediğim|oku|read_uploaded_file|"
+    r"github|gitlab|repo|repository|commit|pull request|branch|issue|gist|"
+    r"takvim|calendar|email gönder|send email|toplantı ayarla|schedule meeting"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+_PLAIN_DIRECT_ARITH_RE = re.compile(r"^\s*[\d\s+\-*/().,^%]+\s*$")
+_MATH_WORD_RE = re.compile(
+    r"(asal|prime|fibonacci|fakt[öo]riyel|factorial|mutlak\s+fark|"
+    r"basamakl[ıi]|toplam[ıi]?|çarp[ıi]m[ıi]?|carp[ıi]m[ıi]?|kaç\s+eder|kac\s+eder)",
+    re.IGNORECASE | re.UNICODE,
+)
+_PLAIN_DIRECT_CHAT_RE = re.compile(
+    r"^\s*("
+    r"merhaba|selam|hey|hi|hello|"
+    r"nas[ıi]ls[ıi]n|naber|g[üu]nayd[ıi]n|iyi\s+(g[üu]nler|ak[şs]amlar)|"
+    r"te[şs]ekk[üu]r|sa[ğg]ol|tamam|ok|eyvallah|"
+    r"sen\s+kimsin|ad[ıi]n\s+ne|ne\s+yapabilirsin"
+    r")\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+_SAFE_MATH_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.Mod: operator.mod,
+    ast.FloorDiv: operator.floordiv,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+
+def _safe_eval_math_expr(expression: str) -> str:
+    """Saf aritmetik ifadeleri LLM/ReAct'e gitmeden hesapla."""
+    def _eval(node):
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.BinOp):
+            op = type(node.op)
+            if op not in _SAFE_MATH_OPS:
+                raise ValueError(f"Unsupported operator: {op.__name__}")
+            return _SAFE_MATH_OPS[op](_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.UnaryOp):
+            op = type(node.op)
+            if op not in _SAFE_MATH_OPS:
+                raise ValueError(f"Unsupported operator: {op.__name__}")
+            return _SAFE_MATH_OPS[op](_eval(node.operand))
+        raise ValueError(f"Unsupported expression: {type(node).__name__}")
+
+    normalized = expression.replace("^", "**").replace(",", ".")
+    result = _eval(ast.parse(normalized, mode="eval"))
+    if isinstance(result, float) and result.is_integer():
+        result = int(result)
+    return f"{expression.strip()} = {result}"
+
+
+def _should_use_plain_direct_llm(question: str) -> bool:
+    """Kısa sohbetlerde ReAct/tool prompt maliyetini atla."""
+    q = question.strip()
+    if not q:
+        return True
+    if is_web_query(q) or needs_mcp_tools(q):
+        return False
+    if _PLAIN_DIRECT_ARITH_RE.fullmatch(q) or _PLAIN_DIRECT_TOOL_RE.search(q):
+        return False
+    if _PLAIN_DIRECT_CHAT_RE.search(q):
+        return True
+    # Kısa, araç gerektirmeyen sohbetler ("Eymen??", "devam", "peki") için hızlı yol.
+    return len(q) <= 80 and "\n" not in q
+
+
+def _should_use_math_direct_llm(question: str) -> bool:
+    """Kelime problemi matematikte ReAct/tool şemasını atla; küçük model düz çözer."""
+    q = question.strip()
+    return bool(_MATH_WORD_RE.search(q)) and not is_web_query(q) and not needs_mcp_tools(q)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -403,7 +497,7 @@ async def retriever_node(state: AgentState) -> AgentState:
 
     try:
         from src.rag.vectorstore import get_hybrid_store
-        from src.rag.retriever import create_retriever, run_retriever
+        from src.rag.retriever import create_retriever, deduplicate_documents, run_retriever
 
         store = get_hybrid_store()
         qdrant_filter = _build_source_filter(source_filter, session_uploads)
@@ -448,13 +542,14 @@ async def retriever_node(state: AgentState) -> AgentState:
         )
         t_fetch = time.perf_counter()
         documents = await asyncio.to_thread(run_retriever, retriever, question)
+        documents = deduplicate_documents(documents, max_docs=settings.top_k)
         t_fetch_elapsed = time.perf_counter() - t_fetch
 
         # Kaynak dağılımını özetle
         sources: dict[str, int] = {}
         for doc in documents:
             meta = getattr(doc, "metadata", {}) or {}
-            src = meta.get("source_file", meta.get("source", "?"))
+            src = meta.get("display_name") or meta.get("source_file", meta.get("source", "?"))
             sources[src] = sources.get(src, 0) + 1
         src_summary = ", ".join(f"{s}×{n}" for s, n in sources.items())
 
@@ -524,6 +619,22 @@ async def grader_node(state: AgentState) -> AgentState:
         return {**state, "relevance": "no", "grader_reason": "irrelevant"}
 
     if state.get("source_filter") or state.get("session_uploads"):
+        # Kullanıcı belirli bir yüklenen dosyayı işaret ettiyse amaç çoğunlukla
+        # "bu bağlamdan cevapla"dır. Bu durumda Grader LLM'i hem pahalı hem de
+        # gereksiz; canlı veri gerekmedikçe generator bağlam dışı bilgiyi zaten
+        # reddedecek şekilde promptlanır.
+        from src.agent.routing import is_web_query
+        from src.rag.retriever import estimate_confidence
+
+        original_q = state.get("original_question") or question
+        if not is_web_query(original_q):
+            confidence = estimate_confidence(question, documents)
+            logger.info(
+                "Grader: relevance=yes [mode=file_fast, conf=%.3f, docs=%d, t=%.3fs]",
+                confidence, len(documents), time.perf_counter() - t0,
+            )
+            return {**state, "relevance": "yes", "grader_reason": ""}
+
         top_docs = documents[:MAX_GRADER_DOCS]
         doc_texts = "\n---\n".join(doc.page_content for doc in top_docs)
         doc_chars = sum(len(d.page_content) for d in top_docs)
@@ -534,8 +645,9 @@ async def grader_node(state: AgentState) -> AgentState:
                 SystemMessage(content=GRADER_SYSTEM_PROMPT),
                 HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
             ])
-            relevance = _parse_yes_no(response.content)
-            reason = _parse_grader_reason(response.content) if relevance == "no" else ""
+            response_text = _coerce_llm_text(response)
+            relevance = _parse_yes_no(response_text)
+            reason = _parse_grader_reason(response_text) if relevance == "no" else ""
             logger.info(
                 "Grader: relevance=%s reason=%s [mode=file_llm, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
                 relevance, reason or "-", len(top_docs), len(documents), doc_chars,
@@ -572,8 +684,9 @@ async def grader_node(state: AgentState) -> AgentState:
             SystemMessage(content=GRADER_SYSTEM_PROMPT),
             HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
         ])
-        relevance = _parse_yes_no(response.content)
-        reason = _parse_grader_reason(response.content) if relevance == "no" else ""
+        response_text = _coerce_llm_text(response)
+        relevance = _parse_yes_no(response_text)
+        reason = _parse_grader_reason(response_text) if relevance == "no" else ""
         logger.info(
             "Grader: relevance=%s reason=%s [mode=mid_conf, conf=%.3f, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
             relevance, reason or "-", confidence, len(top_docs), len(documents), doc_chars,
@@ -773,6 +886,101 @@ async def vision_search_node(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _coerce_llm_text(response) -> str:
+    """OpenAI-compatible backends sometimes place text outside `content`."""
+    content = getattr(response, "content", "")
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                val = item.get("text") or item.get("content")
+                if isinstance(val, str):
+                    parts.append(val)
+        text = "".join(parts)
+    else:
+        text = str(content or "")
+
+    if text.strip():
+        return text.strip()
+
+    for attr in ("additional_kwargs", "response_metadata"):
+        data = getattr(response, attr, None) or {}
+        if not isinstance(data, dict):
+            continue
+        for key in ("reasoning_content", "reasoning", "content", "text"):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _fallback_context_answer(question: str, documents: list[Document], vision_context: str = "") -> str:
+    """Son çare: boş LLM çıktısı yerine dürüst ve kaynaklı kısa yanıt."""
+    snippets: list[str] = []
+    if vision_context.strip():
+        snippets.append(f"[Görsel Analizi]\n{vision_context.strip()[:900]}")
+    for i, doc in enumerate(documents[:3], 1):
+        meta = getattr(doc, "metadata", {}) or {}
+        src = meta.get("display_name") or meta.get("source_file", meta.get("source", "belge"))
+        page = meta.get("page", "")
+        label = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page else "") + "]"
+        body = (doc.page_content or "").strip()
+        if body:
+            snippets.append(f"{label}\n{body[:900]}")
+
+    if not snippets:
+        return "Bu soruyu yanıtlayabilecek bir belge bağlamı bulunamadı."
+
+    return (
+        "Model bu turda boş yanıt döndürdü. Yüklenen belgeden gelen ilgili bağlam aşağıda; "
+        "cevabı bu metinden doğrulayabilirsiniz:\n\n"
+        + "\n\n---\n\n".join(snippets)
+    )
+
+
+async def _retry_generator_with_compact_context(
+    question: str,
+    documents: list[Document],
+    prior_messages: list,
+    vision_context: str,
+) -> str:
+    """Boş üretimde daha küçük ve daha direkt bir RAG promptuyla tekrar dene."""
+    compact_parts: list[str] = []
+    if vision_context.strip():
+        compact_parts.append(f"[Görsel Analizi]\n{vision_context.strip()[:1200]}")
+
+    for i, doc in enumerate(documents[:3], 1):
+        meta = getattr(doc, "metadata", {}) or {}
+        src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
+        page = meta.get("page", "")
+        header = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
+        content = (doc.page_content or "").strip()
+        if content:
+            compact_parts.append(f"{header}\n{content[:1000]}")
+
+    if not compact_parts:
+        return ""
+
+    compact_context = "\n\n---\n\n".join(compact_parts)
+    system_content = (
+        "Sen Frappe adlı bir RAG asistanısın. Sadece verilen bağlama dayanarak "
+        "kullanıcının sorusunu aynı dilde, kısa ve doğrudan yanıtla. "
+        "Bağlamda cevap yoksa sadece 'Bu bilgi yüklenen belgelerde yer almamaktadır.' yaz.\n\n"
+        f"Bağlam:\n{compact_context}"
+    )
+    llm = _get_rag_llm(temperature=0.0, max_tokens=min(settings.rag_max_tokens, 384))
+    response = await llm.ainvoke([
+        SystemMessage(content=system_content),
+        *prior_messages[-1:],
+        HumanMessage(content=question),
+    ])
+    return _coerce_llm_text(response)
+
+
 async def generator_node(state: AgentState) -> AgentState:
     """Belgeler ve/veya görsel bağlam varsa RAG ile, yoksa bağlamsız modda yanıt üretir.
 
@@ -780,6 +988,7 @@ async def generator_node(state: AgentState) -> AgentState:
     """
     t0 = time.perf_counter()
     question = state["question"]
+    answer_question = state.get("original_question") or question
     documents = state.get("documents", [])
     prior_messages = list(state.get("messages", []))
     vision_context = state.get("vision_context", "")
@@ -806,7 +1015,7 @@ async def generator_node(state: AgentState) -> AgentState:
 
         for i, doc in enumerate(documents, 1):
             meta = getattr(doc, "metadata", {}) or {}
-            src = meta.get("source_file", meta.get("source", ""))
+            src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
             page = meta.get("page", "")
             header = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
             is_web = meta.get("type") == "web_search"
@@ -838,16 +1047,39 @@ async def generator_node(state: AgentState) -> AgentState:
         )
 
     session_temp = state.get("temperature") or 0.0
+    if documents or vision_context:
+        session_temp = min(float(session_temp), 0.2)
     session_max_tok = state.get("max_tokens") or None
     llm = _get_rag_llm(temperature=session_temp, max_tokens=session_max_tok)
 
     messages_to_send = [SystemMessage(content=system_content)]
     messages_to_send.extend(prior_messages[-2:])
-    messages_to_send.append(HumanMessage(content=question))
+    messages_to_send.append(HumanMessage(content=answer_question))
 
     t_llm = time.perf_counter()
     response = await llm.ainvoke(messages_to_send)
-    generation = response.content or ""
+    generation = _coerce_llm_text(response)
+
+    if not generation.strip() and (documents or vision_context):
+        logger.warning("Generator: empty_response → compact retry")
+        t_retry = time.perf_counter()
+        try:
+            generation = await _retry_generator_with_compact_context(
+                question=answer_question,
+                documents=documents,
+                prior_messages=prior_messages,
+                vision_context=vision_context,
+            )
+            logger.info(
+                "Generator: compact_retry done [ans_len=%dch, t=%.3fs]",
+                len(generation), time.perf_counter() - t_retry,
+            )
+        except Exception as exc:
+            logger.warning("Generator: compact_retry failed: %s", exc)
+            generation = ""
+
+    if not generation.strip() and (documents or vision_context):
+        generation = _fallback_context_answer(answer_question, documents, vision_context)
 
     logger.info(
         "Generator: done [ans_len=%dch, temp=%.2f, llm_t=%.3fs, total_t=%.3fs]",
@@ -857,7 +1089,7 @@ async def generator_node(state: AgentState) -> AgentState:
 
     new_messages = [
         *prior_messages,
-        HumanMessage(content=state["question"]),
+        HumanMessage(content=answer_question),
         AIMessage(content=generation),
     ]
     return {**state, "generation": generation, "messages": new_messages}
@@ -1004,6 +1236,90 @@ async def direct_response_node(state: AgentState) -> AgentState:
             return {**state, "generation": answer, "messages": new_messages}
         else:
             logger.warning("Direct: web_no_result [search_t=%.3fs]", time.perf_counter() - t_search)
+            if service is None:
+                answer = (
+                    "Canlı web araması şu anda devre dışı çünkü `TAVILY_API_KEY` ayarlanmamış. "
+                    "Bu yüzden güncel hava durumu verisini güvenilir şekilde çekemiyorum. "
+                    "Web araması için `.env` içine `TAVILY_API_KEY` ekleyip uygulamayı yeniden başlatmalısın."
+                )
+            else:
+                answer = (
+                    "Web araması sonuç döndürmedi. Canlı hava durumu gibi güncel bilgiler için "
+                    "web sağlayıcısını kontrol edip tekrar deneyebilirsin."
+                )
+            new_messages = [
+                *prior_messages,
+                HumanMessage(content=question),
+                AIMessage(content=answer),
+            ]
+            return {**state, "generation": answer, "messages": new_messages}
+
+    if _PLAIN_DIRECT_ARITH_RE.fullmatch(question.strip()):
+        try:
+            answer = _safe_eval_math_expr(question)
+        except Exception as exc:
+            answer = f"Hesaplama hatası: {exc}"
+        logger.info("Direct: calc_fast [q_len=%d, total_t=%.3fs]", len(question), time.perf_counter() - t0)
+        new_messages = [
+            *prior_messages,
+            HumanMessage(content=question),
+            AIMessage(content=answer),
+        ]
+        return {**state, "generation": answer, "messages": new_messages}
+
+    if _should_use_math_direct_llm(question):
+        logger.info("Direct: math_chat [prior=%d, q_len=%d]", len(prior_messages), len(question))
+        system_prompt = (
+            "Sen kısa ve doğru matematik çözen bir asistansın.\n"
+            "Kullanıcının dilinde yanıt ver. Gereken ara adımları kısa göster.\n"
+            "Sonucu net biçimde yaz. Görsel, web veya belge bağlamı yoksa bunlardan bahsetme."
+        )
+        llm = _get_chat_llm()
+        t_math = time.perf_counter()
+        response = await llm.ainvoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=question),
+        ])
+        generation = getattr(response, "content", "") or ""
+        logger.info(
+            "Direct: math_done [ans_len=%dch, llm_t=%.3fs, total_t=%.3fs]",
+            len(generation), time.perf_counter() - t_math, time.perf_counter() - t0,
+        )
+        new_messages = [
+            *prior_messages,
+            HumanMessage(content=question),
+            AIMessage(content=generation),
+        ]
+        return {**state, "generation": generation, "messages": new_messages}
+
+    # Hızlı yol — araç gerektirmeyen kısa sohbet/genel direct yanıtlar.
+    # ReAct agent tool şemalarını prompt'a eklediği için küçük yerel modellerde
+    # basit mesajlarda gereksiz gecikme yaratır.
+    if _should_use_plain_direct_llm(question):
+        logger.info("Direct: plain_chat [prior=%d, q_len=%d]", len(prior_messages), len(question))
+        system_prompt = (
+            "Sen Frappe adlı kısa ve doğal yanıt veren iki dilli bir asistansın.\n"
+            "Kullanıcının diliyle yanıt ver. Türkçe soru veya selam → Türkçe yanıt.\n"
+            "Basit sohbetlerde kısa kal; soruyu başta tekrar etme; emoji kullanma.\n"
+            "Araçların veya canlı verinin gerektiği konularda bunu kısaca belirt."
+        )
+        llm = _get_chat_llm()
+        messages_to_send = [SystemMessage(content=system_prompt)]
+        messages_to_send.extend(prior_messages[-4:])
+        messages_to_send.append(HumanMessage(content=question))
+        t_plain = time.perf_counter()
+        response = await llm.ainvoke(messages_to_send)
+        generation = getattr(response, "content", "") or ""
+        logger.info(
+            "Direct: plain_done [ans_len=%dch, llm_t=%.3fs, total_t=%.3fs]",
+            len(generation), time.perf_counter() - t_plain, time.perf_counter() - t0,
+        )
+        new_messages = [
+            *prior_messages,
+            HumanMessage(content=question),
+            AIMessage(content=generation),
+        ]
+        return {**state, "generation": generation, "messages": new_messages}
 
     # Normal yol — araçlı ReAct agent (backend capability dependent)
     from langgraph.prebuilt import create_react_agent

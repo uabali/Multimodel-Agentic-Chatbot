@@ -134,7 +134,7 @@ _qdrant_client: Optional[QdrantClient] = None
 def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
     if _qdrant_client is None:
-        client = QdrantClient(url=settings.qdrant_url, prefer_grpc=settings.qdrant_prefer_grpc)
+        client = QdrantClient(url=settings.qdrant_url, prefer_grpc=settings.qdrant_prefer_grpc, check_compatibility=False)
         _wait_for_qdrant(client)
         _qdrant_client = client
     return _qdrant_client
@@ -328,14 +328,16 @@ class HybridVectorStore:
             k = settings.rag_dense_gate_k
         try:
             query_vector = _cached_embed_query(query)
-            results = self.client.search(
+            query_response = self.client.query_points(
                 collection_name=settings.qdrant_collection,
-                query_vector=(DENSE_VECTOR, query_vector),
+                query=query_vector,
+                using=DENSE_VECTOR,
                 limit=k,
                 query_filter=qdrant_filter,
                 with_payload=False,
                 with_vectors=False,
             )
+            results = query_response.points
         except Exception as exc:
             logger.warning("max_dense_similarity search failed: %s", exc)
             return 0.0

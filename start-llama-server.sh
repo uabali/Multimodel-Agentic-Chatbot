@@ -133,7 +133,7 @@ fi
 
 exec "$LLAMA_SERVER_BIN" \
   -hf "$LLAMA_HF_REPO" \
-  "${MMPROJ_ARGS[@]}" \
+  ${MMPROJ_ARGS[@]+"${MMPROJ_ARGS[@]}"} \
   -c "$LLAMA_CTX_SIZE" \
   -ngl "$LLAMA_GPU_LAYERS" \
   --parallel "$LLAMA_PARALLEL" \

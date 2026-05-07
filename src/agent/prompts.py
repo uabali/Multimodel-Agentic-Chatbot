@@ -234,6 +234,8 @@ KURALLAR:
 - Kullanıcının dilinde yanıt ver (Türkçe soru → Türkçe, İngilizce → İngilizce).
 - Gorselde ne gördüğünü açıkla.
 - Kullanıcı bir soru sorduysa, gorsele dayanarak yanıtla.
+- Kişinin cinsiyeti/yaşı/kimliği sorulursa kesin hüküm verme; yalnızca görünüşe dayalı
+  dikkatli ifade kullan ("erkek gibi görünüyor", "kadın gibi görünüyor", "emin değilim").
 - Bağlamda bilgi yoksa dürüstçe söyle.
 - KISA ve ÖZ: en fazla 4-5 cümle veya madde.
 - Kendini tekrar etme; soruyu yanıtın başında tekrar etme.\
@@ -318,5 +320,4 @@ def select_vision_prompt(question: str, image_names: list[str] | None = None) ->
         return VISION_DIAGRAM_PROMPT
 
     return VISION_SYSTEM_PROMPT
-
 

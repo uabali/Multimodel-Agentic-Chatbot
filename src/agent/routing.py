@@ -86,6 +86,8 @@ _DIRECT_PATTERNS: list[str] = [
     r"(sana bir|sana [şs]imdi|birazdan|[şs]imdi sana)",
     r"(te[şs]ekk[üu]r|sa[ğg]ol|\btamamd[ıi]r\b|\btamam\b|ok\b|anlad[ıi]m|eyvallah|\bg[üu]zel\b|\bharika\b)",
     r"(evet|hay[ıi]r|yes|no)\s*$",
+    r"^(hmm+|hımm+|hmmm+|peki|devam|neyse)\b",
+    r"(nerdesin|neredesin|burada\s*m[ıi]s[ıi]n|or(a)?da\s*m[ıi]s[ıi]n)",
     # Matematik / kod
     r"^[\d\s\+\-\*\/\(\)\^\.]+$",
     r"(hesapla|calculate|asal|prime|fibonacci|factorial|s[ıi]rala|sort|reverse)",

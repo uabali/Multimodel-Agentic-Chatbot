@@ -55,16 +55,16 @@ class Settings(BaseSettings):
     # ── Dual LLM profile (Gemma 4 E4B — liberalleştirildi) ──
     chat_temperature: float = 0.7
     chat_num_predict: int = 1024
-    chat_max_tokens: int = 1024
+    chat_max_tokens: int = 512
     rag_temperature: float = 0.0
     rag_num_predict: int = 1536
-    rag_max_tokens: int = 1536
+    rag_max_tokens: int = 1024
     router_max_tokens: int = 64
 
     # ── Agentic RAG profile (tool calls, multi-turn reasoning) ──
     # Gemma 4 E4B tool calling için yüksek token budget
     agent_temperature: float = 0.1
-    agent_max_tokens: int = 2048
+    agent_max_tokens: int = 1024
 
     # ── Embedding (HuggingFace) ──
     # vLLM GPU'yu yönettiğinden default cpu. docker-compose'da app'a GPU eklenirse cuda.
@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     # ── Qdrant ──
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "user_documents"
-    qdrant_prefer_grpc: bool = True
+    qdrant_prefer_grpc: bool = False
     qdrant_auto_reindex: str = "smart"
     qdrant_auto_recreate_on_mismatch: bool = True
 
@@ -90,6 +90,14 @@ class Settings(BaseSettings):
     chunk_size: int = 1200
     chunk_overlap: int = 200
     top_k: int = 6
+
+    # PDF sayfalarını vision ile OCR/analiz etme limiti. Küçük belgelerde tüm
+    # sayfalar işlenir; büyük belgelerde ilk N sayfa işlenerek chat akışı
+    # dakikalarca bloklanmaz. 0 veya negatif değer görsel PDF ingestion'ı kapatır.
+    pdf_visual_ingest_max_pages: int = Field(
+        default=8,
+        validation_alias=AliasChoices("PDF_VISUAL_INGEST_MAX_PAGES"),
+    )
 
     # ── Hybrid Retrieval ──
     retrieval_strategy: str = "hybrid"

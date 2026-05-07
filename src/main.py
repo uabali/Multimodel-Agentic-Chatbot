@@ -64,6 +64,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+_VISION_FOLLOWUP_RE = re.compile(
+    r"("
+    r"resim|g[öo]rsel|foto|foto[ğg]raf|image|picture|"
+    r"bu\s+(ki[şs]i|adam|kad[ıi]n|nesne|şey|renk|kıyafet|yüz|arka\s*plan)|"
+    r"g[öo]rselde|resimde|foto[ğg]rafta|bunda|bundaki|burada|"
+    r"ne\s+var|kim\s+var|adam\s+m[ıi]|kad[ıi]n\s+m[ıi]"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_vision_followup(question: str) -> bool:
+    """Önceki görseli yalnızca soru gerçekten görsele atıf yapıyorsa yeniden kullan."""
+    return bool(_VISION_FOLLOWUP_RE.search((question or "").strip()))
+
+
 # ── Auth helpers ──
 
 
@@ -362,6 +378,15 @@ def _track_session_upload(filename: str) -> None:
         cl.user_session.set("session_uploads", uploads)
 
 
+def _session_scoped_filename(name: str) -> str:
+    """Qdrant source_file çakışmalarını önlemek için dosya adını oturuma bağla."""
+    safe_name = Path(name).name
+    stem = Path(safe_name).stem[:80] or "upload"
+    suffix = Path(safe_name).suffix
+    sid = str(cl.user_session.get("id") or uuid.uuid4().hex)[:8]
+    return f"{sid}_{uuid.uuid4().hex[:8]}_{stem}{suffix}"
+
+
 # ── URL ingest helper ──
 
 
@@ -450,9 +475,9 @@ async def on_chat_start():
                 label="Max Token",
                 initial=float(settings.chat_max_tokens),
                 min=256,
-                max=4096,
+                max=1536,
                 step=128,
-                description="Yanit uzunlugu limiti.",
+                description="Yanit uzunlugu limiti. MacBook local profilinde 1536 ustu onerilmez.",
             ),
             Select(
                 id="retrieval_strategy",
@@ -513,12 +538,14 @@ async def set_chat_profiles():
 
 @cl.set_starters
 async def set_starters():
-    return [
+    starters = [
         cl.Starter(label="📎 Dosya yükle (PDF/DOCX/XLSX/ses/görsel...)", message="/upload"),
         cl.Starter(label="🌐 URL'den belge ingest et", message="/url https://"),
         cl.Starter(label="Aktif modelleri göster", message="/models"),
-        cl.Starter(label="☀️ Hava durumu", message="Istanbul hava durumu bugun nasil?"),
     ]
+    if settings.tavily_api_key:
+        starters.append(cl.Starter(label="☀️ Hava durumu", message="Istanbul hava durumu bugun nasil?"))
+    return starters
 
 
 # ── Audio hooks ──
@@ -818,7 +845,7 @@ def _build_source_elements(docs) -> list[cl.Text]:
     elements: list[cl.Text] = []
     for doc in docs:
         meta = getattr(doc, "metadata", None) or {}
-        src = meta.get("source_file", meta.get("source", ""))
+        src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
         page = meta.get("page", "")
 
         src_short = Path(src).name if src and ("/" in src or "\\" in src) else (src or "Bilinmeyen kaynak")
@@ -980,12 +1007,18 @@ async def on_message(message: cl.Message):
                 except OSError:
                     pass
 
-                dest = sess_dir / name
+                mime_val = getattr(f, "mime", None) or (f.get("mime") if isinstance(f, dict) else None) or ""
+                mime_str = str(mime_val)
+                original_name = Path(name).name
+                dest_name = (
+                    original_name
+                    if (mime_str.startswith("image/") or Path(original_name).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"})
+                    else _session_scoped_filename(original_name)
+                )
+                dest = sess_dir / dest_name
                 sess_dir.mkdir(parents=True, exist_ok=True)
                 await asyncio.to_thread(dest.write_bytes, src.read_bytes())
 
-                mime_val = getattr(f, "mime", None) or (f.get("mime") if isinstance(f, dict) else None) or ""
-                mime_str = str(mime_val)
                 suffix_lower = dest.suffix.lower()
 
                 if mime_str.startswith("image/") or suffix_lower in {".png", ".jpg", ".jpeg", ".webp"}:
@@ -1002,11 +1035,11 @@ async def on_message(message: cl.Message):
                         if transcript:
                             txt_path = dest.with_suffix(".txt")
                             txt_path.write_text(transcript, encoding="utf-8")
-                            result = await cl.make_async(ingest_file)(txt_path)
+                            result = await cl.make_async(ingest_file)(txt_path, display_name=f"{original_name}.txt")
                             ingested_filenames.append(txt_path.name)
                             _track_session_upload(txt_path.name)
                             status_lines.append(
-                                f"**{dest.name}** → transcribe + indekslendi (**{result['chunk_count']}** chunk)."
+                                f"**{original_name}** → transcribe + indekslendi (**{result['chunk_count']}** chunk)."
                             )
                         else:
                             status_lines.append(f"**{dest.name}** → transcribe edilemedi.")
@@ -1014,10 +1047,10 @@ async def on_message(message: cl.Message):
                         status_lines.append(f"**{dest.name}** → STT hatasi: {exc}")
                     continue
 
-                result = await cl.make_async(ingest_file)(dest)
+                result = await cl.make_async(ingest_file)(dest, display_name=original_name)
                 ingested_filenames.append(dest.name)
                 _track_session_upload(dest.name)
-                status_lines.append(f"**{result['file_name']}** indekslendi — **{result['chunk_count']}** chunk.")
+                status_lines.append(f"**{result.get('display_name', original_name)}** indekslendi — **{result['chunk_count']}** chunk.")
 
         if image_paths:
             elements = [cl.Image(path=str(p), name=p.name, display="inline") for p in image_paths]
@@ -1099,7 +1132,8 @@ async def on_message(message: cl.Message):
             results_text = []
             for f in files:
                 src = Path(getattr(f, "path"))
-                dest = sess_dir / (getattr(f, "name", src.name) or src.name)
+                original_name = Path(getattr(f, "name", src.name) or src.name).name
+                dest = sess_dir / _session_scoped_filename(original_name)
                 sess_dir.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(src.read_bytes())
                 suffix = dest.suffix.lower()
@@ -1112,10 +1146,10 @@ async def on_message(message: cl.Message):
                         if transcript:
                             txt_path = dest.with_suffix(".txt")
                             txt_path.write_text(transcript, encoding="utf-8")
-                            result = await cl.make_async(ingest_file)(txt_path)
+                            result = await cl.make_async(ingest_file)(txt_path, display_name=f"{original_name}.txt")
                             _track_session_upload(txt_path.name)
                             results_text.append(
-                                f"**{dest.name}** → transcribe edildi + indekslendi "
+                                f"**{original_name}** → transcribe edildi + indekslendi "
                                 f"(**{result['chunk_count']}** chunk, {len(transcript)} karakter)."
                             )
                         else:
@@ -1123,9 +1157,9 @@ async def on_message(message: cl.Message):
                     except Exception as exc:
                         results_text.append(f"**{dest.name}** → STT hatasi: {exc}")
                 else:
-                    result = await cl.make_async(ingest_file)(dest)
+                    result = await cl.make_async(ingest_file)(dest, display_name=original_name)
                     _track_session_upload(result.get("file_name", dest.name))
-                    results_text.append(f"**{result['file_name']}** — **{result['chunk_count']}** chunk.")
+                    results_text.append(f"**{result.get('display_name', original_name)}** — **{result['chunk_count']}** chunk.")
             thinking_msg.content = "\n".join(results_text) + "\n\nBelgeler hakkinda soru sorabilirsin."
             await thinking_msg.update()
             return
@@ -1166,9 +1200,10 @@ async def on_message(message: cl.Message):
         if image_paths:
             cl.user_session.set("_vision_reuse_left", 4)
         elif not agent_image_data:
-            # Yeni görsel yok — önceki görsel follow-up turlar için yeniden kullan
+            # Yeni görsel yok — önceki görseli yalnızca görsele açıkça atıf varsa kullan.
+            # Aksi halde alakasız matematik/sohbet soruları vision yoluna sapıyor.
             reuse_left = cl.user_session.get("_vision_reuse_left", 0)
-            if reuse_left > 0:
+            if reuse_left > 0 and _is_vision_followup(question):
                 last_imgs = cl.user_session.get("last_vision_images") or []
                 valid_imgs = [Path(p) for p in last_imgs if Path(p).exists()]
                 if valid_imgs:
@@ -1176,6 +1211,8 @@ async def on_message(message: cl.Message):
                     cl.user_session.set("_vision_reuse_left", reuse_left - 1)
                 else:
                     cl.user_session.set("_vision_reuse_left", 0)
+            elif reuse_left > 0:
+                logger.info("Vision follow-up değil; önceki görsel bu turda kullanılmadı [q=%.60s]", question)
             else:
                 cl.user_session.set("last_vision_images", [])
 
@@ -1185,6 +1222,7 @@ async def on_message(message: cl.Message):
         await thinking_msg.update()
 
         final_parts: list[str] = []
+        latest_full_generation = ""
         last_route: str | None = None
         last_documents: list = []
         tts_streamer = _TtsStreamer.make(cl.user_session.get("tts_enabled", False))
@@ -1220,8 +1258,8 @@ async def on_message(message: cl.Message):
                                 if delta.get("documents") is not None:
                                     last_documents = list(delta["documents"])
                                 gen = delta.get("generation")
-                                if isinstance(gen, str) and gen.strip() and not final_parts:
-                                    final_parts = [gen]
+                                if isinstance(gen, str) and gen.strip():
+                                    latest_full_generation = gen
                                 if _node_name == "grader" and delta.get("relevance") == "no":
                                     async with cl.Step(name="Belgeler yetersiz — web araması devreye giriyor", type="tool") as _step:
                                         _step.output = "RAG sonuçları soruyu yanıtlamıyor, web araması başlatılıyor."
@@ -1257,8 +1295,8 @@ async def on_message(message: cl.Message):
 
                 if isinstance(ev, dict):
                     gen = ev.get("generation")
-                    if isinstance(gen, str) and gen.strip() and not final_parts:
-                        final_parts = [gen]
+                    if isinstance(gen, str) and gen.strip():
+                        latest_full_generation = gen
                     continue
         except Exception:
             answer = await arun_agent(
@@ -1280,7 +1318,7 @@ async def on_message(message: cl.Message):
             if tts_streamer:
                 tts_streamer.feed(answer)
 
-        answer = "".join(final_parts).strip()
+        answer = "".join(final_parts).strip() or latest_full_generation.strip()
 
         # Streaming boş geldiyse ainvoke fallback
         if not answer:

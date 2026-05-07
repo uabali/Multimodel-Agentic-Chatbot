@@ -55,13 +55,47 @@ Fully local, GPU-accelerated conversational AI system built as a graduation proj
 
 ## Prerequisites
 
-- **OS**: Linux (Ubuntu 22.04 / WSL2)
-- **GPU**: NVIDIA ≥ 8 GB VRAM (16 GB recommended)
-- **Python**: 3.12
-- **Tools**: `uv`, Docker, `llama.cpp` compiled with CUDA
+| | Linux (Ubuntu 22.04 / WSL2) | macOS (Apple Silicon) |
+|---|---|---|
+| **GPU** | NVIDIA ≥ 8 GB VRAM (16 GB recommended) | M1/M2/M3/M4 — Metal GPU |
+| **RAM** | ≥ 16 GB | ≥ 16 GB (32 GB recommended) |
+| **Python** | 3.12 | 3.12 |
+| **Tools** | `uv`, Docker, `llama.cpp` (CUDA) | `uv`, Docker Desktop, `llama.cpp` (Metal) |
+
+### System dependencies
+
+<details>
+<summary><strong>Linux (Ubuntu / WSL2)</strong></summary>
 
 ```bash
-sudo apt install -y poppler-utils ffmpeg tesseract-ocr
+sudo apt install -y poppler-utils ffmpeg tesseract-ocr libmagic1 build-essential
+```
+</details>
+
+<details>
+<summary><strong>macOS (Homebrew)</strong></summary>
+
+```bash
+# Install Homebrew if not present
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+brew install git cmake ninja python@3.12 libmagic poppler tesseract ffmpeg node
+```
+</details>
+
+### Build llama.cpp
+
+```bash
+git clone https://github.com/ggerganov/llama.cpp ~/llama.cpp
+cd ~/llama.cpp
+
+# Linux (NVIDIA CUDA)
+cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+
+# macOS (Apple Metal)
+cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build --config Release -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
 ```
 
 ## Quick Start
@@ -75,18 +109,21 @@ make setup        # creates .venv, generates .env template
 Edit `.env` — mandatory fields:
 
 ```env
-LLAMA_SERVER_BIN=/absolute/path/to/llama-server
+LLAMA_SERVER_BIN=/absolute/path/to/llama-server   # ~/llama.cpp/build/bin/llama-server
 LLM_MODEL_NAME=gemma-4-e4b
 APP_ADMIN_PASSWORD=<strong-password>
 APP_PASSWORD_SALT=<random-hex-32>
 CHAINLIT_AUTH_SECRET=<random-hex-64>
+
+# macOS Apple Silicon: set embedding device to mps
+EMBEDDING_DEVICE=mps   # or cpu for Linux without GPU
 ```
 
 Start the stack:
 
 ```bash
 make qdrant   # start Qdrant in Docker
-make llm      # start llama-server
+make llm      # start llama-server (downloads ~8 GB model on first run)
 make app      # start Chainlit UI at http://localhost:7860
 make check    # health check
 ```

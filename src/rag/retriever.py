@@ -13,9 +13,9 @@ Modern LangChain:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
-from typing import Callable
 
 from langchain_core.documents import Document
 
@@ -26,9 +26,22 @@ logger = logging.getLogger(__name__)
 # Güven hesabında göz ardı edilen yaygın kelimeler
 _STOPWORDS: frozenset[str] = frozenset({
     "ve", "ile", "icin", "için", "bu", "şu", "su", "bir", "o", "da", "de", "mi", "mu",
-    "ne", "nedir", "ama", "fakat", "ancak", "yani", "olan", "olan",
+    "ne", "nedir", "nerede", "nereden", "nereye", "hangi", "kaç", "kac", "kim",
+    "dosya", "belge", "pdf", "içindeki", "icindeki", "bulunan", "yer", "alan",
+    "ama", "fakat", "ancak", "yani", "olan", "olarak",
     "the", "is", "are", "what", "who", "where", "when", "how", "in", "on", "of",
+    "this", "that", "file", "document", "uploaded",
 })
+
+_TR_TRANSLATION = str.maketrans({
+    "ç": "c", "ğ": "g", "ı": "i", "ö": "o", "ş": "s", "ü": "u",
+    "Ç": "c", "Ğ": "g", "İ": "i", "I": "i", "Ö": "o", "Ş": "s", "Ü": "u",
+})
+
+
+def normalize_query_text(text: str) -> str:
+    """Türkçe karakterleri ve fazla boşlukları arama heuristics için normalize eder."""
+    return re.sub(r"\s+", " ", (text or "").translate(_TR_TRANSLATION).lower()).strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,16 +49,18 @@ _STOPWORDS: frozenset[str] = frozenset({
 # ─────────────────────────────────────────────────────────────────────────────
 
 _COMPLEXITY_KEYWORDS: list[str] = [
-    "ve", "neden", "nasil", "hangi", "ne zaman", "kim",
-    "arasindaki fark", "karsilastir",
-    "and", "how", "why", "which",
+    "ve", "neden", "nasil", "hangi", "ne zaman", "kim", "karsilastir",
+    "arasindaki fark", "avantaj", "dezavantaj", "ozetle", "acikla",
+    "and", "how", "why", "which", "compare", "summarize", "explain",
 ]
 
 
 def calculate_dynamic_k(question: str, base_k: int = 8, max_k: int = 15) -> int:
     """Soru karmaşıklığına göre dinamik k değeri döner."""
-    q = question.lower()
+    q = normalize_query_text(question)
     score = sum(1 for kw in _COMPLEXITY_KEYWORDS if kw in q)
+    if len(q.split()) >= 18:
+        score += 1
     if score >= 2:
         return min(base_k + 4, max_k)
     if score == 1:
@@ -59,19 +74,27 @@ def calculate_dynamic_k(question: str, base_k: int = 8, max_k: int = 15) -> int:
 
 # Yeni strateji eklemek → bu dict'e satır eklemek yeterli; başka yer değişmez.
 _STRATEGY_MAP: list[tuple[list[str], str]] = [
-    (["kac", "sure", "ne zaman", "dakika"], "hybrid"),
-    (["neden", "nasil"], "mmr"),
+    (["nereden", "nereye", "kalkis", "varis", "pnr", "bilet", "ticket"], "hybrid"),
+    (["kac", "sure", "ne zaman", "dakika", "tarih", "saat"], "hybrid"),
+    (["neden", "nasil", "karsilastir", "fark"], "mmr"),
     (["kullanim alanlari", "hangi projelerde", "nerelerde kullanilir"], "threshold"),
 ]
 
 
 def auto_select_strategy(question: str) -> str:
     """Soruya göre en uygun retrieval stratejisini seçer."""
-    q = question.lower()
+    q = normalize_query_text(question)
     for keywords, strategy in _STRATEGY_MAP:
         if any(kw in q for kw in keywords):
             return strategy
     return "similarity"
+
+
+def _tokenize_for_overlap(text: str) -> list[str]:
+    return [
+        t for t in re.findall(r"[\w]+", normalize_query_text(text), re.UNICODE)
+        if len(t) >= 3 and t not in _STOPWORDS
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,20 +122,43 @@ def estimate_confidence(query: str, docs: list[Document]) -> float:
         return max(0.0, 0.5 * best / max(thresh, 1e-6))
 
     # Fallback: term overlap — re.UNICODE Türkçe/Arapça/vb. karakterleri kapsar
-    terms = [
-        t for t in re.findall(r"[\w]+", query.lower(), re.UNICODE)
-        if len(t) >= 3 and t not in _STOPWORDS
-    ]
+    terms = _tokenize_for_overlap(query)
     if not terms:
         return 0.0
 
-    joined = " ".join((doc.page_content or "").lower() for doc in docs[:3])
+    joined = normalize_query_text(" ".join((doc.page_content or "") for doc in docs[:3]))
     if not joined.strip():
         return 0.0
 
     overlap = sum(1 for t in terms if t in joined)
     coverage = overlap / max(len(terms), 1)
     return min(1.0, coverage * 1.15) if len(terms) > 4 else coverage
+
+
+def deduplicate_documents(documents: list[Document], max_docs: int | None = None) -> list[Document]:
+    """Aynı chunk'ın dense/sparse/rerank yollarından tekrar gelmesini engeller."""
+    unique: list[Document] = []
+    seen: set[str] = set()
+
+    for doc in documents:
+        meta = getattr(doc, "metadata", {}) or {}
+        content = (doc.page_content or "").strip()
+        if not content:
+            continue
+        source = meta.get("source_file") or meta.get("source") or ""
+        page = str(meta.get("page", ""))
+        chunk_index = str(meta.get("chunk_index", ""))
+        if source or page or chunk_index:
+            key = f"{source}|{page}|{chunk_index}|{hashlib.sha1(content[:240].encode()).hexdigest()}"
+        else:
+            key = hashlib.sha1(content[:500].encode()).hexdigest()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(doc)
+        if max_docs is not None and len(unique) >= max_docs:
+            break
+    return unique
 
 
 # ─────────────────────────────────────────────────────────────────────────────

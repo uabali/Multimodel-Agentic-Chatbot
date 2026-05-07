@@ -303,8 +303,18 @@ async def astream_agent(
         }, sort_keys=True)
         return _hashlib.sha256(payload.encode()).hexdigest()[:16]
 
+    def _should_use_semantic_cache() -> bool:
+        if not (_s.semantic_cache_enabled and not image_data and input_type == "text"):
+            return False
+        # Lokal sohbetlerde cache embedding maliyeti cevabın kendisinden pahalı.
+        # Cache'i belge/RAG bağlamı veya daha uzun, tekrar etmesi muhtemel sorular için tut.
+        if source_filter or session_uploads:
+            return True
+        return len((question or "").strip()) >= 80
+
     # Semantic cache kontrolü — görsel/ses sorguları cache'e alınmaz
-    if _s.semantic_cache_enabled and not image_data and input_type == "text":
+    use_semantic_cache = _should_use_semantic_cache()
+    if use_semantic_cache:
         from src.rag.semantic_cache import SemanticCache
         from langchain_core.messages import AIMessageChunk
 
@@ -335,8 +345,9 @@ async def astream_agent(
                         collected_generation = gen
         yield event
 
-    # Cache'e yaz (görsel/ses sorgular hariç)
-    if (_s.semantic_cache_enabled and collected_generation
-            and not image_data and input_type == "text"):
+    # Cache'e yaz (görsel/ses sorgular hariç). Tanısal fallback cevapları cache'leme;
+    # aksi halde geçici bir boş-LLM durumu sonraki iyi denemeleri de kirletir.
+    is_diagnostic_fallback = collected_generation.startswith("Model bu turda boş yanıt döndürdü.")
+    if use_semantic_cache and collected_generation and not is_diagnostic_fallback:
         from src.rag.semantic_cache import SemanticCache
         await SemanticCache.get().store(question, collected_generation, cache_ctx=cache_ctx)

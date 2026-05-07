@@ -158,7 +158,7 @@ class DocumentIngester:
             vectorstore=get_hybrid_store(),
         )
 
-    def ingest_file(self, file_path: str | Path) -> dict:
+    def ingest_file(self, file_path: str | Path, display_name: str | None = None) -> dict:
         """Tek bir dosyayı yükler, böler ve Qdrant'a ekler.
 
         Aynı dosya daha önce yüklendiyse eski chunk'lar silinir — duplicate önlenir.
@@ -167,6 +167,7 @@ class DocumentIngester:
             {"file_name": str, "file_id": str, "chunk_count": int, "status": str}
         """
         file_path = Path(file_path)
+        display_name = display_name or file_path.name
 
         # Önceki indekslemeden kalan chunk'ları temizle (idempotent upsert davranışı).
         if hasattr(self._vectorstore, "delete_by_source"):
@@ -178,6 +179,7 @@ class DocumentIngester:
         for doc in documents:
             doc.metadata.update({
                 "source_file": file_path.name,
+                "display_name": display_name,
                 "file_id": file_id,
                 "file_type": file_path.suffix.lower(),
             })
@@ -192,6 +194,7 @@ class DocumentIngester:
 
         result: dict = {
             "file_name": file_path.name,
+            "display_name": display_name,
             "file_id": file_id,
             "chunk_count": len(chunks),
             "status": "success",
@@ -200,7 +203,7 @@ class DocumentIngester:
         # Multimodal ingestion: PDF sayfaları Gemma 4 vision ile de analiz edilir
         if file_path.suffix.lower() == ".pdf":
             visual_ingester = VisualPageIngester()
-            visual_docs = visual_ingester.ingest_pdf_visuals(file_path, file_id)
+            visual_docs = visual_ingester.ingest_pdf_visuals(file_path, file_id, display_name)
             if visual_docs:
                 self._vectorstore.add_documents(visual_docs)
                 logger.info(
@@ -251,17 +254,23 @@ class VisualPageIngester:
         except ImportError:
             return False
 
-    def _render_pages(self, pdf_path: Path) -> list[tuple[int, bytes]]:
+    def _render_pages(self, pdf_path: Path, max_pages: int | None = None) -> tuple[list[tuple[int, bytes]], int | None]:
         """PDF sayfalarını sırayla PNG baytlarına çevirir."""
-        from pdf2image import convert_from_path
+        from pdf2image import convert_from_path, pdfinfo_from_path
 
-        images = convert_from_path(str(pdf_path), dpi=self._dpi, fmt="png")
+        total_pages = None
+        try:
+            total_pages = int(pdfinfo_from_path(str(pdf_path)).get("Pages", 0)) or None
+        except Exception:
+            total_pages = None
+        kwargs = {"last_page": max_pages} if max_pages and max_pages > 0 else {}
+        images = convert_from_path(str(pdf_path), dpi=self._dpi, fmt="png", **kwargs)
         result = []
         for i, img in enumerate(images, 1):
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             result.append((i, buf.getvalue()))
-        return result
+        return result, total_pages
 
     def _analyse_page(self, page_num: int, image_bytes: bytes) -> str:
         """Tek sayfayı Gemma 4 vision ile analiz eder; ham metin döner."""
@@ -283,7 +292,12 @@ class VisualPageIngester:
             logger.warning("Sayfa %d görsel analizi başarısız: %s", page_num, exc)
             return ""
 
-    def ingest_pdf_visuals(self, pdf_path: Path, file_id: str) -> list[Document]:
+    def ingest_pdf_visuals(
+        self,
+        pdf_path: Path,
+        file_id: str,
+        display_name: str | None = None,
+    ) -> list[Document]:
         """PDF'in her sayfasını görsel analiz eder; chunk Document listesi döner.
 
         Sayfalar sıralı olarak işlenir — LLM çağrıları IO-bound ve zaten LLM
@@ -297,11 +311,22 @@ class VisualPageIngester:
             )
             return []
 
+        max_pages = settings.pdf_visual_ingest_max_pages
+        if max_pages <= 0:
+            logger.info("PDF görsel ingestion kapalı: %s", pdf_path.name)
+            return []
+
         try:
-            pages = self._render_pages(pdf_path)
+            pages, total_pages = self._render_pages(pdf_path, max_pages=max_pages)
         except Exception as exc:
             logger.warning("PDF render hatası (%s): %s", pdf_path.name, exc)
             return []
+
+        if total_pages and total_pages > len(pages):
+            logger.info(
+                "PDF görsel ingestion ilk %d/%d sayfayla sınırlandı: %s",
+                len(pages), total_pages, pdf_path.name,
+            )
 
         docs: list[Document] = []
         for page_num, image_bytes in sorted(pages, key=lambda x: x[0]):
@@ -316,6 +341,7 @@ class VisualPageIngester:
                 page_content=text,
                 metadata={
                     "source_file": pdf_path.name,
+                    "display_name": display_name or pdf_path.name,
                     "file_id": file_id,
                     "file_type": ".pdf",
                     "chunk_type": "visual_description",
@@ -336,9 +362,9 @@ class VisualPageIngester:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def ingest_file(file_path: str | Path) -> dict:
+def ingest_file(file_path: str | Path, display_name: str | None = None) -> dict:
     """Tek bir dosyayı varsayılan ingester ile indeksler (geriye dönük uyumluluk)."""
-    return DocumentIngester.default().ingest_file(file_path)
+    return DocumentIngester.default().ingest_file(file_path, display_name=display_name)
 
 
 def load_directory(data_dir: str = "data") -> list[Document]:

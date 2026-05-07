@@ -36,6 +36,9 @@ class SemanticCache:
 
     _instance: Optional["SemanticCache"] = None
     _collection_ready = False
+    _disabled_until = 0.0
+    _warned_unavailable = False
+    _cooldown_s = 60.0
 
     @classmethod
     def get(cls) -> "SemanticCache":
@@ -43,15 +46,38 @@ class SemanticCache:
             cls._instance = cls()
         return cls._instance
 
+    def _is_temporarily_disabled(self) -> bool:
+        return time.monotonic() < self._disabled_until
+
+    def _mark_unavailable(self, exc: Exception) -> None:
+        self._collection_ready = False
+        self._disabled_until = time.monotonic() + self._cooldown_s
+        if not self._warned_unavailable:
+            logger.warning(
+                "SemanticCache: Qdrant kullanılamıyor, %.0fs boyunca cache atlanacak: %s",
+                self._cooldown_s, exc,
+            )
+            self._warned_unavailable = True
+        else:
+            logger.debug("SemanticCache: Qdrant hâlâ kullanılamıyor: %s", exc)
+
     def _ensure_collection(self) -> None:
         if self._collection_ready:
             return
+        if self._is_temporarily_disabled():
+            return
         try:
             from qdrant_client import models
-            from src.rag.vectorstore import get_qdrant_client
+            from qdrant_client import QdrantClient
             from src.rag.embeddings import get_embedding_dim
 
-            client = get_qdrant_client()
+            client = QdrantClient(
+                url=settings.qdrant_url,
+                prefer_grpc=settings.qdrant_prefer_grpc,
+                check_compatibility=False,
+                timeout=1,
+            )
+            client.get_collections()
             if not client.collection_exists(_COLLECTION):
                 dim = get_embedding_dim()
                 client.create_collection(
@@ -63,8 +89,9 @@ class SemanticCache:
                 )
                 logger.info("SemanticCache: koleksiyon oluşturuldu (dim=%d)", dim)
             self._collection_ready = True
+            self._warned_unavailable = False
         except Exception as exc:
-            logger.warning("SemanticCache: koleksiyon hazırlama başarısız: %s", exc)
+            self._mark_unavailable(exc)
 
     async def lookup(self, question: str, cache_ctx: str = "") -> Optional[str]:
         """Benzer soru cache'te varsa yanıtı döner, yoksa None.
@@ -74,6 +101,8 @@ class SemanticCache:
         dönmesini engeller.
         """
         if not settings.semantic_cache_enabled:
+            return None
+        if self._is_temporarily_disabled():
             return None
         try:
             from qdrant_client import models
@@ -88,10 +117,10 @@ class SemanticCache:
 
             cutoff = time.time() - settings.semantic_cache_ttl_hours * 3600
             client = get_qdrant_client()
-            results = await asyncio.to_thread(
-                client.search,
+            query_response = await asyncio.to_thread(
+                client.query_points,
                 collection_name=_COLLECTION,
-                query_vector=embedding,
+                query=embedding,
                 limit=1,
                 score_threshold=settings.semantic_cache_threshold,
                 query_filter=models.Filter(
@@ -107,6 +136,7 @@ class SemanticCache:
                     ]
                 ),
             )
+            results = query_response.points
             if results:
                 score = results[0].score
                 cached = results[0].payload.get("response", "")
@@ -122,6 +152,8 @@ class SemanticCache:
     async def store(self, question: str, response: str, cache_ctx: str = "") -> None:
         """Soru–yanıt çiftini cache'e kaydeder."""
         if not settings.semantic_cache_enabled:
+            return
+        if self._is_temporarily_disabled():
             return
         try:
             from qdrant_client import models
