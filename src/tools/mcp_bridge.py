@@ -19,10 +19,14 @@ async def mcp_call(tool_name: str, tool_input_json: str, connection_name: Option
     """
     import chainlit as cl
 
+    if tool_input_json and len(tool_input_json) > 65536:
+        return "Tool input too large (max 64KB)"
     try:
         tool_input: Any = json.loads(tool_input_json) if tool_input_json else {}
     except Exception as e:
         return f"Invalid JSON input: {e}"
+    if not isinstance(tool_input, dict):
+        return f"Tool input must be a JSON object, got {type(tool_input).__name__}"
 
     ctx_session = getattr(cl.context, "session", None)
     mcp_sessions = getattr(ctx_session, "mcp_sessions", None)

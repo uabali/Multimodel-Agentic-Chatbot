@@ -854,9 +854,8 @@ def _build_source_elements(docs) -> list[cl.Text]:
             continue
         seen.add(dedup_key)
 
-        page_str = f" · Sayfa {page}" if page and str(page) not in {"", "?"} else ""
-        num = len(elements) + 1
-        label = f"[{num}] {src_short}{page_str}"
+        page_str = f" s.{page}" if page and str(page) not in {"", "?"} else ""
+        label = f"{src_short}{page_str}"
         elements.append(cl.Text(name=label, content=src_short + page_str, display="side"))
 
     return elements
@@ -1229,7 +1228,10 @@ async def on_message(message: cl.Message):
 
         _sess_temp = float(cl.user_session.get("temperature", settings.chat_temperature))
         _sess_max_tok = int(cl.user_session.get("max_tokens", settings.chat_max_tokens))
+        _allowed_strategies = {"hybrid", "similarity", "mmr", "threshold"}
         _sess_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
+        if _sess_strategy not in _allowed_strategies:
+            _sess_strategy = settings.retrieval_strategy
         _sess_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
 
         try:

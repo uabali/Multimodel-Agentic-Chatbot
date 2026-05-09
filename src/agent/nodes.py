@@ -35,6 +35,7 @@ import datetime
 import operator
 import logging
 import re
+import threading
 import time
 
 import chainlit as cl
@@ -224,29 +225,26 @@ class _RerankerRegistry:
     """Reranker instance'ını lazy olarak yükler ve önbellekte tutar."""
 
     _instance = None
-    _loading = False
+    _lock = threading.Lock()
 
     @classmethod
     def get(cls):
         if cls._instance is not None:
             return cls._instance
-        if cls._loading:
-            # Another thread is loading; return None so caller skips rerank this request
-            return None
         if not settings.use_rerank:
             return None
-        cls._loading = True
-        try:
-            from src.rag.reranker import create_reranker
-            cls._instance = create_reranker(
-                model_name=settings.reranker_model,
-                device=settings.reranker_device,
-            )
-        except Exception as exc:
-            logger.warning("Reranker yüklenemedi (devre dışı): %s", exc)
-            cls._instance = None
-        finally:
-            cls._loading = False
+        with cls._lock:
+            if cls._instance is not None:
+                return cls._instance
+            try:
+                from src.rag.reranker import create_reranker
+                cls._instance = create_reranker(
+                    model_name=settings.reranker_model,
+                    device=settings.reranker_device,
+                )
+            except Exception as exc:
+                logger.warning("Reranker yüklenemedi (devre dışı): %s", exc)
+                cls._instance = None
         return cls._instance
 
 
@@ -351,7 +349,7 @@ async def router_node(state: AgentState) -> AgentState:
     try:
         messages_to_send = [SystemMessage(content=ROUTER_SYSTEM_PROMPT)]
         if prior_messages:
-            messages_to_send.extend(prior_messages[-2:])
+            messages_to_send.extend(prior_messages[-4:])
         messages_to_send.append(HumanMessage(content=question))
         response = await llm.ainvoke(messages_to_send)
         route = _parse_route(response.content)
@@ -385,18 +383,37 @@ _QUESTION_WORDS: frozenset[str] = frozenset({
     "what", "how", "why", "who", "which", "when", "where",
 })
 
+_TECHNICAL_ENTITY_RE = re.compile(
+    r"\b("
+    r"PostgreSQL|Milvus|Qdrant|Elasticsearch|MongoDB|Redis|Cassandra|"
+    r"BM25|TF-?IDF|HNSW|IVF|PQ|"
+    r"BERT|GPT|Gemma|LLaMA|Mistral|"
+    r"bge-m3|bge-reranker|e5-large|"
+    r"Atlas-\d+|Orion|Aurora|"
+    r"re-?rank|embedding|vector|chunk|retrieval|latency|inference|"
+    r"\d+\s*(?:boyut|dimension|parametre|parameter|milyon|million|petabyte|TB|GB|MB|ms)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _should_skip_rewrite(question: str, prior_messages: list) -> bool:
     """True döndürürse rewriter LLM çağrısı (~6s) atlanır.
 
     Atla  → kısa (≤8 kelime) + soru kelimesi var + follow-up değil.
+    Atla  → teknik named entity içeriyor (rewrite semantic yönü kaydırır).
     Devam → çok-turlu follow-up'lar (referans çözümlemesi gerektirir).
     """
     words = question.split()
     q_lower = question.lower()
 
-    if prior_messages and any(m in q_lower for m in _FOLLOW_UP_MARKERS):
-        return False
+    if prior_messages:
+        q_words = set(re.findall(r"\b\w+\b", q_lower))
+        if q_words & _FOLLOW_UP_MARKERS:
+            return False
+
+    if _TECHNICAL_ENTITY_RE.search(question):
+        return True
 
     if len(words) <= 8:
         tokens = set(re.findall(r"[a-zA-ZÜüÖöÇçŞşİıĞğ]+", q_lower))
@@ -507,7 +524,7 @@ async def retriever_node(state: AgentState) -> AgentState:
 
     try:
         from src.rag.vectorstore import get_hybrid_store
-        from src.rag.retriever import create_retriever, deduplicate_documents, run_retriever
+        from src.rag.retriever import create_retriever, deduplicate_documents, run_retriever, chunk_id
 
         store = get_hybrid_store()
         qdrant_filter = _build_source_filter(source_filter, session_uploads)
@@ -518,9 +535,13 @@ async def retriever_node(state: AgentState) -> AgentState:
             logger.info("Retriever: dense_gate=skip [%s]", filter_desc)
         else:
             t_gate = time.perf_counter()
-            dense_score = await asyncio.to_thread(
-                store.max_dense_similarity, question, qdrant_filter=qdrant_filter
-            )
+            try:
+                dense_score = await asyncio.to_thread(
+                    store.max_dense_similarity, question, qdrant_filter=qdrant_filter
+                )
+            except Exception as exc:
+                logger.warning("Dense gate failed: %s — skipping gate", exc)
+                dense_score = settings.rag_min_dense_similarity
             logger.info(
                 "Retriever: dense_gate=%.3f [threshold=%.3f, t=%.3fs]",
                 dense_score, settings.rag_min_dense_similarity,
@@ -555,6 +576,34 @@ async def retriever_node(state: AgentState) -> AgentState:
         documents = deduplicate_documents(documents, max_docs=settings.top_k)
         t_fetch_elapsed = time.perf_counter() - t_fetch
 
+        # Hybrid (fused) skorları paralel similarity_search_with_score ile çek
+        # ve chunk_id üzerinden eşle. Mevcut retriever score'u yutuyor; bu ekstra
+        # sorgu Qdrant'ta hızlıdır (~30-100ms).
+        hybrid_scores: dict[str, float] = {}
+        try:
+            search_k = max(settings.rerank_top_n, settings.top_k * 2)
+            scored_pairs = await asyncio.to_thread(
+                _score_lookup_with_filter, store.store, question, search_k, qdrant_filter,
+            )
+            for d, s in scored_pairs:
+                hybrid_scores[chunk_id(d)] = float(s)
+        except Exception as exc:
+            logger.debug("hybrid score lookup failed: %s", exc)
+
+        # Trace inşası — her dökümana hybrid skorunu metadata'ya yaz
+        retrieval_trace: list[dict] = []
+        for doc in documents:
+            cid = chunk_id(doc)
+            h_score = hybrid_scores.get(cid)
+            if h_score is not None:
+                doc.metadata["retrieval_score"] = h_score
+            retrieval_trace.append({
+                "chunk_id": cid,
+                "hybrid_score": h_score,
+                "rerank_score": doc.metadata.get("rerank_score"),
+                "used_in_context": False,
+            })
+
         # Kaynak dağılımını özetle
         sources: dict[str, int] = {}
         for doc in documents:
@@ -568,11 +617,33 @@ async def retriever_node(state: AgentState) -> AgentState:
             len(documents), strategy, use_rerank_val, dense_score,
             t_fetch_elapsed, time.perf_counter() - t0, src_summary,
         )
+        if retrieval_trace:
+            trace_parts = [
+                f"{t['chunk_id']} hybrid={_fmt_score(t['hybrid_score'])} rerank={_fmt_score(t['rerank_score'])}"
+                for t in retrieval_trace
+            ]
+            logger.info("Retriever: trace [%s]", " | ".join(trace_parts))
     except Exception as exc:
         logger.warning("Retriever: error [%s, t=%.3fs]", exc, time.perf_counter() - t0)
         documents = []
+        retrieval_trace = []
 
-    return {**state, "documents": documents}
+    return {**state, "documents": documents, "retrieval_trace": retrieval_trace}
+
+
+def _fmt_score(s) -> str:
+    return f"{s:.3f}" if isinstance(s, (int, float)) else "?"
+
+
+def _score_lookup_with_filter(vectorstore, query: str, k: int, qdrant_filter):
+    """vectorstore.similarity_search_with_score wrapper — filter desteğiyle."""
+    kwargs = {}
+    if qdrant_filter is not None:
+        kwargs["filter"] = qdrant_filter
+    try:
+        return vectorstore.similarity_search_with_score(query, k=k, **kwargs)
+    except TypeError:
+        return vectorstore.similarity_search_with_score(query, k=k)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -584,7 +655,7 @@ MAX_GRADER_DOCS = 5
 
 # Confidence eşikleri: yüksek/düşük durumda LLM atlanır (~3s kazanç).
 _GRADER_CONF_HIGH = 0.75  # Bu eşiğin üstünde → doğrudan "yes" (LLM atlanır)
-_GRADER_CONF_LOW  = 0.15  # Bu eşiğin altında  → doğrudan "no"  (LLM atlanır)
+_GRADER_CONF_LOW  = 0.08  # Bu eşiğin altında  → doğrudan "no"  (LLM atlanır)
 
 
 def _parse_yes_no(text: str, default: str = "no") -> str:
@@ -629,16 +700,20 @@ async def grader_node(state: AgentState) -> AgentState:
         return {**state, "relevance": "no", "grader_reason": "irrelevant"}
 
     if state.get("source_filter") or state.get("session_uploads"):
-        # Kullanıcı belirli bir yüklenen dosyayı işaret ettiyse amaç çoğunlukla
-        # "bu bağlamdan cevapla"dır. Bu durumda Grader LLM'i hem pahalı hem de
-        # gereksiz; canlı veri gerekmedikçe generator bağlam dışı bilgiyi zaten
-        # reddedecek şekilde promptlanır.
         from src.agent.routing import is_web_query
         from src.rag.retriever import estimate_confidence
 
         original_q = state.get("original_question") or question
-        if not is_web_query(original_q):
+        if is_web_query(original_q):
+            pass  # Web sorguları için grader LLM'i çalıştır — needs_live_data döndürebilir
+        else:
             confidence = estimate_confidence(question, documents)
+            if confidence < _GRADER_CONF_LOW:
+                logger.info(
+                    "Grader: relevance=no [mode=file_low_conf, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
+                    confidence, _GRADER_CONF_LOW, len(documents), time.perf_counter() - t0,
+                )
+                return {**state, "relevance": "no", "grader_reason": "irrelevant"}
             logger.info(
                 "Grader: relevance=yes [mode=file_fast, conf=%.3f, docs=%d, t=%.3fs]",
                 confidence, len(documents), time.perf_counter() - t0,
@@ -929,23 +1004,15 @@ def _coerce_llm_text(response) -> str:
 
 
 def _fallback_context_answer(question: str, documents: list[Document], vision_context: str = "") -> str:
-    """Son çare: boş LLM çıktısı yerine dürüst ve kaynaklı kısa yanıt."""
-    snippets: list[str] = []
+    """Son çare: boş LLM çıktısı yerine belgeden tek ilgili bölüm göster."""
     if vision_context.strip():
-        snippets.append(f"[Görsel Analizi]\n{vision_context.strip()[:900]}")
-    for i, doc in enumerate(documents[:3], 1):
-        meta = getattr(doc, "metadata", {}) or {}
-        src = meta.get("display_name") or meta.get("source_file", meta.get("source", "belge"))
-        page = meta.get("page", "")
-        label = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page else "") + "]"
-        body = (doc.page_content or "").strip()
-        if body:
-            snippets.append(f"{label}\n{body[:900]}")
-
-    if not snippets:
-        return "Bu soruyu yanıtlayabilecek bir belge bağlamı bulunamadı."
-
-    return "Belgeden bulunan içerik:\n\n" + "\n\n---\n\n".join(snippets)
+        return f"Görsel analizden bulunan bilgi:\n\n{vision_context.strip()[:600]}"
+    if documents:
+        meta = getattr(documents[0], "metadata", {}) or {}
+        src = meta.get("display_name") or meta.get("source_file", "belge")
+        body = (documents[0].page_content or "").strip()[:600]
+        return f"Belgeden ({src}) ilgili bölüm:\n\n{body}"
+    return "Bu soruyu yanıtlayabilecek bir belge bağlamı bulunamadı."
 
 
 async def _retry_generator_with_compact_context(
@@ -959,14 +1026,14 @@ async def _retry_generator_with_compact_context(
     if vision_context.strip():
         compact_parts.append(f"[Görsel Analizi]\n{vision_context.strip()[:1200]}")
 
-    for i, doc in enumerate(documents[:3], 1):
+    for i, doc in enumerate(documents[:4], 1):
         meta = getattr(doc, "metadata", {}) or {}
         src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
         page = meta.get("page", "")
         header = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
         content = (doc.page_content or "").strip()
         if content:
-            compact_parts.append(f"{header}\n{content[:1000]}")
+            compact_parts.append(f"{header}\n{content[:400]}")
 
     if not compact_parts:
         return ""
@@ -978,11 +1045,31 @@ async def _retry_generator_with_compact_context(
         "Bağlamda cevap yoksa sadece 'Bu bilgi yüklenen belgelerde yer almamaktadır.' yaz.\n\n"
         f"Bağlam:\n{compact_context}"
     )
-    llm = _get_rag_llm(temperature=0.0, max_tokens=min(settings.rag_max_tokens, 384))
+    llm = _get_rag_llm(temperature=0.0, max_tokens=min(settings.rag_max_tokens, 512))
     response = await llm.ainvoke([
         SystemMessage(content=system_content),
         *prior_messages[-1:],
         HumanMessage(content=question),
+    ])
+    return _coerce_llm_text(response)
+
+
+async def _micro_answer_retry(question: str, documents: list[Document]) -> str:
+    """Top 3 belge, minimal prompt, kısa yanıt — son LLM denemesi."""
+    if not documents:
+        return ""
+    chunks = []
+    for doc in documents[:3]:
+        chunk = (doc.page_content or "").strip()[:300]
+        if chunk:
+            chunks.append(chunk)
+    if not chunks:
+        return ""
+    combined = "\n---\n".join(chunks)
+    llm = _get_rag_llm(temperature=0.0, max_tokens=128)
+    response = await llm.ainvoke([
+        SystemMessage(content="Bu metinden soruya tek cümleyle yanıt ver. Cevap yoksa 'Bilgi bulunamadı.' yaz."),
+        HumanMessage(content=f"Soru: {question}\n\nMetin: {combined}"),
     ])
     return _coerce_llm_text(response)
 
@@ -999,6 +1086,9 @@ async def generator_node(state: AgentState) -> AgentState:
     prior_messages = list(state.get("messages", []))
     vision_context = state.get("vision_context", "")
 
+    retrieval_trace = list(state.get("retrieval_trace") or [])
+    used_chunk_ids: list[str] = []
+
     if documents or vision_context:
         context_parts = []
 
@@ -1010,15 +1100,16 @@ async def generator_node(state: AgentState) -> AgentState:
         # geri kalandan sistem şablonu, soru ve geçmiş için güvenlik payı düşülür.
         # Türkçe için muhafazakâr: 1 token ≈ 2.5 karakter.
         n_ctx = settings.llm_context_size
-        output_tokens = state.get("max_tokens") or settings.rag_max_tokens
+        output_tokens = settings.rag_max_tokens
         # prior_messages[-2:] yaklaşık token maliyetini hesaba kat
         prior_chars = sum(len(getattr(m, "content", "") or "") for m in prior_messages[-2:])
         prior_tokens_est = max(0, prior_chars // 4)
-        overhead_tokens = 800 + prior_tokens_est  # sistem şablonu + soru + geçmiş + pay
+        overhead_tokens = 600 + prior_tokens_est  # sistem şablonu + soru + geçmiş + pay
         input_budget_tokens = max(256, n_ctx - output_tokens - overhead_tokens)
         budget_chars = int(input_budget_tokens * 2.5)
         used_chars = sum(len(p) for p in context_parts)
 
+        from src.rag.retriever import chunk_id as _chunk_id
         for i, doc in enumerate(documents, 1):
             meta = getattr(doc, "metadata", {}) or {}
             src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
@@ -1028,15 +1119,28 @@ async def generator_node(state: AgentState) -> AgentState:
             remaining = budget_chars - used_chars
             if remaining <= len(header) + 50:
                 break
-            max_chars = min(2000 if is_web else 1500, remaining - len(header) - 10)
+            max_chars = min(2500 if is_web else 2000, remaining - len(header) - 10)
             content = doc.page_content[:max_chars]
             context_parts.append(f"{header}\n{content}")
             used_chars += len(header) + len(content) + 10
+            used_chunk_ids.append(_chunk_id(doc))
 
         docs_included = len(context_parts) - (1 if vision_context else 0)
         context = "\n\n---\n\n".join(context_parts)
         # .replace() yerine .format() kullanılmaz — PDF/kod içindeki { } format() çökertiyor
         system_content = RAG_WITH_CONTEXT_SYSTEM_PROMPT.replace("{context}", context)
+
+        total_prompt_chars = len(system_content) + prior_chars + len(answer_question)
+        max_input_chars = int((n_ctx - output_tokens - 50) * 2.5)
+        if total_prompt_chars > max_input_chars:
+            safe_ctx_len = max(500, max_input_chars - prior_chars - len(answer_question) - 800)
+            context = context[:safe_ctx_len]
+            system_content = RAG_WITH_CONTEXT_SYSTEM_PROMPT.replace("{context}", context)
+            logger.warning(
+                "Generator: context truncated to %dch to fit n_ctx=%d",
+                len(context), n_ctx,
+            )
+
         logger.info(
             "Generator: ctx_budget=%dtok/%dch, used=%dch, docs=%d/%d, vision=%s, prior=%d, "
             "n_ctx=%d, output_max=%dtok, overhead=%dtok",
@@ -1044,6 +1148,25 @@ async def generator_node(state: AgentState) -> AgentState:
             docs_included, len(documents), bool(vision_context),
             len(prior_messages[-2:]), n_ctx, output_tokens, overhead_tokens,
         )
+
+        # Trace'te used_in_context flag'ini işaretle ve final_used log'unu yaz
+        used_set = set(used_chunk_ids)
+        for entry in retrieval_trace:
+            if entry.get("chunk_id") in used_set:
+                entry["used_in_context"] = True
+        if used_chunk_ids:
+            id_to_entry = {e["chunk_id"]: e for e in retrieval_trace}
+            final_parts = []
+            for cid in used_chunk_ids:
+                e = id_to_entry.get(cid)
+                if e:
+                    final_parts.append(
+                        f"{cid} (hybrid={_fmt_score(e.get('hybrid_score'))},"
+                        f"rerank={_fmt_score(e.get('rerank_score'))})"
+                    )
+                else:
+                    final_parts.append(cid)
+            logger.info("Generator: final_used [n=%d] [%s]", len(used_chunk_ids), ", ".join(final_parts))
     else:
         system_content = RAG_NO_CONTEXT_SYSTEM_PROMPT
         logger.info(
@@ -1084,6 +1207,14 @@ async def generator_node(state: AgentState) -> AgentState:
             logger.warning("Generator: compact_retry failed: %s", exc)
             generation = ""
 
+    if not generation.strip() and documents:
+        try:
+            generation = await _micro_answer_retry(answer_question, documents)
+            logger.info("Generator: micro_retry done [ans_len=%dch]", len(generation))
+        except Exception as exc:
+            logger.warning("Generator: micro_retry failed: %s", exc)
+            generation = ""
+
     if not generation.strip() and (documents or vision_context):
         generation = _fallback_context_answer(answer_question, documents, vision_context)
 
@@ -1098,7 +1229,12 @@ async def generator_node(state: AgentState) -> AgentState:
         HumanMessage(content=answer_question),
         AIMessage(content=generation),
     ]
-    return {**state, "generation": generation, "messages": new_messages}
+    return {
+        **state,
+        "generation": generation,
+        "messages": new_messages,
+        "retrieval_trace": retrieval_trace,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1323,7 +1459,8 @@ async def direct_response_node(state: AgentState) -> AgentState:
             "Sen bir yapay zeka asistanısın. Adın Frappe'dir (başka ismin yok).\n"
             "İsim sorulursa sadece 'Frappe' de; 'Sen Frappe' veya 'Ben Sen' yazma.\n"
             "Kullanıcının diliyle yanıt ver. Türkçe soru → Türkçe yanıt.\n"
-            "Kısa kal; soruyu başta tekrar etme; emoji kullanma."
+            "Kısa ama samimi ol. Selamlamalara sıcak ve doğal yanıt ver (1-2 cümle).\n"
+            "Soruyu başta tekrar etme; emoji kullanma."
         )
         llm = _get_chat_llm()
         messages_to_send = [SystemMessage(content=system_prompt)]
@@ -1393,7 +1530,8 @@ async def direct_response_node(state: AgentState) -> AgentState:
     t_react = time.perf_counter()
 
     # Cache the compiled ReAct graph per-session (recompiling costs ~50-100ms each time).
-    agent_cache_key = (tuple(sorted(getattr(t, "name", "") for t in all_tools)), id(llm))
+    llm_key = f"{type(llm).__name__}_{getattr(llm, 'model_name', getattr(llm, 'model', ''))}"
+    agent_cache_key = (tuple(sorted(getattr(t, "name", "") for t in all_tools)), llm_key)
     try:
         _cached_agent = cl.user_session.get("_react_agent")
         _cached_agent_key = cl.user_session.get("_react_agent_key")

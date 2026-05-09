@@ -18,8 +18,10 @@ def read_uploaded_file(filename: str) -> str:
     """
     upload_root = settings.upload_dir.resolve()
     file_path = (upload_root / filename).resolve()
-    if not file_path.is_relative_to(upload_root):
+    if not str(file_path).startswith(str(upload_root)):
         return "Access denied: path outside upload directory"
+    if file_path.is_symlink():
+        return "Access denied: symlinks not allowed"
     if not file_path.exists():
         return f"File not found: {filename}"
 

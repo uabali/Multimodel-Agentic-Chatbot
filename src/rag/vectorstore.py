@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -129,11 +130,16 @@ def _wait_for_qdrant(client: QdrantClient, timeout_s: float = 20.0, retry_s: flo
 
 
 _qdrant_client: Optional[QdrantClient] = None
+_qdrant_lock = threading.Lock()
 
 
 def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
-    if _qdrant_client is None:
+    if _qdrant_client is not None:
+        return _qdrant_client
+    with _qdrant_lock:
+        if _qdrant_client is not None:
+            return _qdrant_client
         client = QdrantClient(url=settings.qdrant_url, prefer_grpc=settings.qdrant_prefer_grpc, check_compatibility=False)
         _wait_for_qdrant(client)
         _qdrant_client = client
@@ -400,10 +406,15 @@ class HybridVectorStore:
 
 
 _hybrid_store: Optional[HybridVectorStore] = None
+_hybrid_store_lock = threading.Lock()
 
 
 def get_hybrid_store() -> HybridVectorStore:
     global _hybrid_store
-    if _hybrid_store is None:
+    if _hybrid_store is not None:
+        return _hybrid_store
+    with _hybrid_store_lock:
+        if _hybrid_store is not None:
+            return _hybrid_store
         _hybrid_store = HybridVectorStore()
     return _hybrid_store

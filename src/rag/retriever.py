@@ -179,6 +179,17 @@ def run_retriever(retriever, query: str) -> list[Document]:
     return docs if isinstance(docs, list) else []
 
 
+def chunk_id(doc: Document) -> str:
+    """Stable chunk identifier: 'source_file#chunk_index' (görsel chunk'lar dahil)."""
+    meta = getattr(doc, "metadata", {}) or {}
+    src = meta.get("source_file") or meta.get("source") or "?"
+    idx = meta.get("chunk_index")
+    if idx is None:
+        page = meta.get("page")
+        idx = f"p{page}" if page is not None else "?"
+    return f"{src}#{idx}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # create_retriever — ana fabrika fonksiyonu
 # ─────────────────────────────────────────────────────────────────────────────

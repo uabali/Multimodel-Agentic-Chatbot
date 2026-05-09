@@ -38,21 +38,30 @@ def _detect_voice(text: str) -> str:
 
 def _strip_markdown(text: str) -> str:
     """Remove common markdown so TTS reads clean prose."""
-    # Remove code blocks
-    text = re.sub(r"```[\s\S]*?```", "", text)
-    text = re.sub(r"`[^`]+`", "", text)
-    # Remove headers, bold, italic
-    text = re.sub(r"#{1,6}\s", "", text)
-    text = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
-    text = re.sub(r"_{1,2}([^_]+)_{1,2}", r"\1", text)
-    # Remove URLs
-    text = re.sub(r"https?://\S+", "", text)
-    # Remove markdown links [text](url) → text
+    # YAML front matter
+    text = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.DOTALL)
+    # Code blocks (triple backticks — handles incomplete blocks too)
+    text = re.sub(r"```[\s\S]*?```", " ", text)
+    text = re.sub(r"```[\s\S]*$", " ", text)
+    # Inline code
+    text = re.sub(r"`[^`\n]+`", " ", text)
+    # Markdown tables (lines with pipes)
+    text = re.sub(r"^\|.*\|$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[-|: ]+$", "", text, flags=re.MULTILINE)
+    # Headers, bold, italic
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\*{1,2}([^*\n]+?)\*{1,2}", r"\1", text)
+    text = re.sub(r"_{1,2}([^_\n]+?)_{1,2}", r"\1", text)
+    # Horizontal rules
+    text = re.sub(r"^[-*_]{3,}$", "", text, flags=re.MULTILINE)
+    # Markdown links [text](url) → text
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-    # Remove HTML tags
+    # URLs
+    text = re.sub(r"https?://\S+", "", text)
+    # HTML tags
     text = re.sub(r"<[^>]+>", "", text)
     # Collapse blank lines
-    text = re.sub(r"\n{2,}", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 

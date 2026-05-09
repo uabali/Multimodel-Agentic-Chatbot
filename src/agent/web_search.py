@@ -140,7 +140,7 @@ class WebResultFormatter:
         if not sources:
             return answer.strip()
         header = "Kaynaklar:" if is_turkish_query(question) else "Sources:"
-        lines = [header] + [f"- {title}: {url}" for title, url in sources]
+        lines = [header] + [f"- [{title}]({url})" for title, url in sources]
         return f"{answer.strip()}\n\n" + "\n".join(lines)
 
     @staticmethod

@@ -92,10 +92,9 @@ def _grader_decision(state: AgentState) -> str:
     """
     if state.get("relevance") == "yes":
         return "sufficient"
+    reason = state.get("grader_reason", "")
     if state.get("source_filter"):
-        # Yalnızca canlı veri gerekiyorsa web fallback'e izin ver; diğer durumlarda
-        # generator "bu bilgi belgede yok" diye yanıt vermeli.
-        if state.get("grader_reason") == "needs_live_data":
+        if reason in ("needs_live_data", "irrelevant"):
             return "insufficient"
         return "sufficient"
     return "insufficient"

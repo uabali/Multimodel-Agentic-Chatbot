@@ -136,6 +136,10 @@ _WEB_PATTERNS: list[str] = [
     # Kullanıcı açıkça web araması istiyor — "web search yap", "internetten ara" vb.
     r"\b(web\s*[- ]?search\s*(yap|et)?|internett?en?\s+ara|internett?e?\s+bak|google'?[lL]a[yıi]?)\b",
     r"\b(online\s+ara|arama\s+yap|ara[tı]\s+internett?e?)\b",
+    # Kuruluş/çıkış tarihi — doğrulama gerektiren sorular
+    r"\b(ne zaman kuruldu|ne zaman [çc][ıi]kt[ıi]|ne zaman piyasaya)\b",
+    # Şampiyon/kazanan soruları — güncel sonuç gerektirir
+    r"\b([şs]ampiyonu?|kazanan[ıi]?|birincisi?)\s+(kim|hangi|ne)\b",
 ]
 
 _MCP_PATTERNS: list[str] = [
@@ -184,6 +188,8 @@ def keyword_route(question: str, *, has_uploads: bool = False) -> str | None:
         "rag", "direct", ya da eşleşme yoksa None (LLM fallback tetiklenir).
     """
     q = question.strip()
+    if len(q) > 2000:
+        return None
     for rx in _DOCUMENT_PRONOUN_RE:
         if rx.search(q):
             return "rag"

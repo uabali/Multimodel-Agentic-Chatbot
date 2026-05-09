@@ -39,10 +39,9 @@ class Settings(BaseSettings):
 
     # Sunucunun gerçek context penceresi (llama-server -c / vLLM max-model-len).
     # Generator bütçesi bu değerden max_tokens çıkarılarak hesaplanır.
-    # Varsayılan 4096 — llama-server genellikle bu değerle başlatılır.
-    # Daha büyük context için .env'de LLM_CONTEXT_SIZE=8192 ayarlayın.
+    # Varsayılan 8192 — llama-server LLAMA_CTX_SIZE ile eşleşmeli.
     llm_context_size: int = Field(
-        default=4096,
+        default=8192,
         validation_alias=AliasChoices("LLM_CONTEXT_SIZE", "LLM_N_CTX"),
     )
 
@@ -58,7 +57,7 @@ class Settings(BaseSettings):
     chat_max_tokens: int = 512
     rag_temperature: float = 0.0
     rag_num_predict: int = 1536
-    rag_max_tokens: int = 1024
+    rag_max_tokens: int = 768
     router_max_tokens: int = 64
 
     # ── Agentic RAG profile (tool calls, multi-turn reasoning) ──
@@ -86,10 +85,10 @@ class Settings(BaseSettings):
     qdrant_auto_recreate_on_mismatch: bool = True
 
     # ── RAG Settings ──
-    # Gemma 4 E4B büyük context destekler — chunk boyutu buna göre ayarlandı
-    chunk_size: int = 1200
-    chunk_overlap: int = 200
-    top_k: int = 6
+    # Küçük chunk → daha yüksek retrieval precision, daha az irrelevant context
+    chunk_size: int = 500
+    chunk_overlap: int = 80
+    top_k: int = 4
 
     # PDF sayfalarını vision ile OCR/analiz etme limiti. Küçük belgelerde tüm
     # sayfalar işlenir; büyük belgelerde ilk N sayfa işlenerek chat akışı
@@ -117,7 +116,7 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-base"
     # vLLM GPU'yu yönettiğinden default cpu
     reranker_device: str = "cpu"
-    rerank_top_n: int = 10
+    rerank_top_n: int = 8
     rerank_fast_mode: bool = False
 
     # ── Web Search ──
