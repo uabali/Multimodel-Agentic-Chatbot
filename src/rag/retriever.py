@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 
 from langchain_core.documents import Document
@@ -107,13 +108,18 @@ def estimate_confidence(query: str, docs: list[Document]) -> float:
     if not docs:
         return 0.0
 
-    # Rerank skoru varsa kullan
-    top_scores = [
+    # Rerank skoru varsa kullan — sigmoid ile normalize et (logit → [0,1])
+    raw_scores = [
         doc.metadata.get("rerank_score")
         for doc in docs[:3]
         if doc.metadata.get("rerank_score") is not None
     ]
-    if top_scores:
+    if raw_scores:
+        def _sigmoid(x: float) -> float:
+            x = max(-500.0, min(500.0, x))
+            return 1.0 / (1.0 + math.exp(-x))
+
+        top_scores = [_sigmoid(s) for s in raw_scores]
         best = max(top_scores)
         thresh = settings.local_search_conf_threshold
         # best >= thresh → confidence [0.5, 1.0]; best < thresh → confidence [0.0, 0.5)

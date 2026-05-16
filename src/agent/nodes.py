@@ -323,6 +323,9 @@ def _should_use_math_direct_llm(question: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+_RERANKER_FAILED = object()
+
+
 class _RerankerRegistry:
     """Reranker instance'ını lazy olarak yükler ve önbellekte tutar."""
 
@@ -331,11 +334,15 @@ class _RerankerRegistry:
 
     @classmethod
     def get(cls):
+        if cls._instance is _RERANKER_FAILED:
+            return None
         if cls._instance is not None:
             return cls._instance
         if not settings.use_rerank:
             return None
         with cls._lock:
+            if cls._instance is _RERANKER_FAILED:
+                return None
             if cls._instance is not None:
                 return cls._instance
             try:
@@ -346,8 +353,8 @@ class _RerankerRegistry:
                 )
             except Exception as exc:
                 logger.warning("Reranker yüklenemedi (devre dışı): %s", exc)
-                cls._instance = None
-        return cls._instance
+                cls._instance = _RERANKER_FAILED
+        return cls._instance if cls._instance is not _RERANKER_FAILED else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1066,36 +1073,11 @@ async def grader_node(state: AgentState) -> AgentState:
         if is_web_query(original_q):
             pass  # Web sorguları için grader LLM'i çalıştır — needs_live_data döndürebilir
         else:
+            # source_filter aktif → kullanıcı dosyayı açıkça belirtti, doğrudan kabul et
             confidence = estimate_confidence(question, documents)
-            if confidence < _grader_conf_low():
-                elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-                logger.info(
-                    "Grader: relevance=no [mode=file_low_conf, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
-                    confidence, _grader_conf_low(), len(documents), time.perf_counter() - t0,
-                )
-                _observe_node(
-                    "frappe.grader_decision",
-                    state,
-                    outputs={
-                        "relevance": "no",
-                        "grader_reason": "insufficient_context",
-                        "mode": "file_low_conf",
-                        "confidence": confidence,
-                        "low_threshold": _grader_conf_low(),
-                        "document_count": len(documents),
-                        "latency_ms_by_stage": {"total": elapsed_ms},
-                    },
-                    metadata={
-                        "grader_mode": "file_low_conf",
-                        "grader_confidence": confidence,
-                        "grader_low_threshold": _grader_conf_low(),
-                    },
-                    tags=["frappe", "grader", "no"],
-                )
-                return {**state, "relevance": "no", "grader_reason": "insufficient_context", "refusal_mode": True}
             elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
             logger.info(
-                "Grader: relevance=yes [mode=file_fast, conf=%.3f, docs=%d, t=%.3fs]",
+                "Grader: relevance=yes [mode=file_direct, conf=%.3f, docs=%d, t=%.3fs]",
                 confidence, len(documents), time.perf_counter() - t0,
             )
             _observe_node(
@@ -1104,12 +1086,12 @@ async def grader_node(state: AgentState) -> AgentState:
                 outputs={
                     "relevance": "yes",
                     "grader_reason": "sufficient",
-                    "mode": "file_fast",
+                    "mode": "file_direct",
                     "confidence": confidence,
                     "document_count": len(documents),
                     "latency_ms_by_stage": {"total": elapsed_ms},
                 },
-                metadata={"grader_mode": "file_fast", "grader_confidence": confidence},
+                metadata={"grader_mode": "file_direct", "grader_confidence": confidence},
                 tags=["frappe", "grader", "yes"],
             )
             return {**state, "relevance": "yes", "grader_reason": "sufficient"}
