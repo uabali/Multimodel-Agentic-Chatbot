@@ -159,7 +159,12 @@ class DocumentIngester:
             vectorstore=get_hybrid_store(),
         )
 
-    def ingest_file(self, file_path: str | Path, display_name: str | None = None) -> dict:
+    def ingest_file(
+        self,
+        file_path: str | Path,
+        display_name: str | None = None,
+        extra_metadata: dict | None = None,
+    ) -> dict:
         """Tek bir dosyayı yükler, böler ve Qdrant'a ekler.
 
         Aynı dosya daha önce yüklendiyse eski chunk'lar silinir — duplicate önlenir.
@@ -170,7 +175,11 @@ class DocumentIngester:
         file_path = Path(file_path)
         t0 = time.perf_counter()
         try:
-            result = self._ingest_file_impl(file_path, display_name=display_name)
+            result = self._ingest_file_impl(
+                file_path,
+                display_name=display_name,
+                extra_metadata=extra_metadata,
+            )
         except Exception as exc:
             from src.observability.langsmith import record_ingest_observation
 
@@ -191,7 +200,12 @@ class DocumentIngester:
         )
         return result
 
-    def _ingest_file_impl(self, file_path: str | Path, display_name: str | None = None) -> dict:
+    def _ingest_file_impl(
+        self,
+        file_path: str | Path,
+        display_name: str | None = None,
+        extra_metadata: dict | None = None,
+    ) -> dict:
         """Implementation body for ingest_file; separated to keep observation isolated."""
         file_path = Path(file_path)
         display_name = display_name or file_path.name
@@ -203,12 +217,17 @@ class DocumentIngester:
         documents = self._loader.load(file_path)
 
         file_id = str(uuid.uuid4())
+        safe_extra_metadata = {
+            str(k): v for k, v in (extra_metadata or {}).items()
+            if v is not None and str(k) not in {"source_file", "display_name", "file_id", "file_type"}
+        }
         for doc in documents:
             doc.metadata.update({
                 "source_file": file_path.name,
                 "display_name": display_name,
                 "file_id": file_id,
                 "file_type": file_path.suffix.lower(),
+                **safe_extra_metadata,
             })
 
         chunks = self._splitter.split(documents)
@@ -234,6 +253,8 @@ class DocumentIngester:
                 visual_ingester = VisualPageIngester()
                 visual_docs = visual_ingester.ingest_pdf_visuals(file_path, file_id, display_name)
                 if visual_docs:
+                    for doc in visual_docs:
+                        doc.metadata.update(safe_extra_metadata)
                     self._vectorstore.add_documents(visual_docs)
                     logger.info(
                         "%s → %d görsel açıklama chunk'ı indekslendi",
@@ -393,9 +414,17 @@ class VisualPageIngester:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def ingest_file(file_path: str | Path, display_name: str | None = None) -> dict:
+def ingest_file(
+    file_path: str | Path,
+    display_name: str | None = None,
+    extra_metadata: dict | None = None,
+) -> dict:
     """Tek bir dosyayı varsayılan ingester ile indeksler (geriye dönük uyumluluk)."""
-    return DocumentIngester.default().ingest_file(file_path, display_name=display_name)
+    return DocumentIngester.default().ingest_file(
+        file_path,
+        display_name=display_name,
+        extra_metadata=extra_metadata,
+    )
 
 
 def load_directory(data_dir: str = "data") -> list[Document]:

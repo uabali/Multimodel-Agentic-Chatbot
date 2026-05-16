@@ -37,7 +37,7 @@ Fully local, GPU-accelerated conversational AI system built as a graduation proj
 | Frontend | Chainlit 2.x — streaming, audio, file upload |
 | STT | faster-whisper (CPU int8) |
 | TTS | edge-tts (Microsoft Azure Neural) |
-| Web search | Tavily API + DuckDuckGo fallback |
+| Web search | Tavily API with zero-result quality gate |
 | External tools | MCP servers via `langchain-mcp-adapters` |
 | Persistence | SQLite — thread history, session resume |
 | Semantic cache | Qdrant collection with TTL + context-key filter |
@@ -171,7 +171,7 @@ src/
 │   ├── mcp_client.py         # MultiServerMCPClient
 │   └── mcp_config.json       # Server definitions
 ├── tools/
-│   ├── search.py             # Tavily + DuckDuckGo
+│   ├── search.py             # Tavily tool
 │   ├── calculator.py         # AST-based safe eval
 │   ├── file_reader.py        # Upload sandbox (path traversal protected)
 │   └── mcp_bridge.py         # LangChain ↔ MCP adapter

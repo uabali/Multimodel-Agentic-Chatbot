@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from src.agent.routing import is_turkish_query, normalize_web_query
@@ -26,11 +27,13 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class WebSearchResult(NamedTuple):
+@dataclass(frozen=True)
+class WebSearchResult:
     """Ham web arama sonucu."""
 
     text: str
     provider: str  # "tavily"
+    records: list["WebSourceRecord"] = field(default_factory=list)
 
 
 class WebSourceRecord(NamedTuple):
@@ -73,13 +76,39 @@ class WebSearchService:
             self._client = TavilyClient(api_key=self._api_key)
         return self._client
 
+    @staticmethod
+    def _is_low_quality_result(result: dict) -> bool:
+        title = re.sub(r"\s+", " ", str(result.get("title") or "")).strip().lower()
+        content = re.sub(r"\s+", " ", str(result.get("content") or "")).strip()
+        published = str(result.get("published_date") or "").strip().lower()
+        generic_title = (
+            not title
+            or title in {"search results", "web results", "result", "untitled"}
+            or title.startswith("results for")
+        )
+        return len(content) < 30 or (published in {"", "unknown", "none"} and generic_title)
+
+    @staticmethod
+    def _format_records(query: str, records: list[WebSourceRecord]) -> str:
+        if not records:
+            return ""
+        parts = [f"Web search results for: {query}"]
+        for record in records:
+            parts.append(
+                f"[Result {record.index}] {record.title}\n"
+                f"Published: {record.published or 'unknown'}\n"
+                f"Snippet: {record.content[:900]}\n"
+                f"Source: {record.url}"
+            )
+        return "\n\n".join(parts)
+
     async def search(self, query: str) -> WebSearchResult | None:
         """Tavily API ile arama yapar; başarısız olursa None döner."""
         normalized = normalize_web_query(query)
         try:
             import datetime
 
-            def _call() -> str:
+            def _call() -> list[WebSourceRecord]:
                 client = self._get_client()
                 # Zaman duyarlı sorgular için güncel tarih bilgisi eklenir.
                 today = datetime.date.today().isoformat()
@@ -92,26 +121,35 @@ class WebSearchService:
                 )
                 results = resp.get("results", [])
                 if not results:
-                    return ""
-                parts = [f"Web search results for: {normalized}"]
+                    return []
+                if all(self._is_low_quality_result(r) for r in results):
+                    logger.info("Tavily web search zero-result quality gate triggered")
+                    return []
+                records: list[WebSourceRecord] = []
                 for idx, r in enumerate(results, 1):
                     title = r.get("title", "")
                     published = r.get("published_date", "")
                     content = re.sub(r"\s+", " ", r.get("content") or "").strip()[:900]
                     url = r.get("url", "")
-                    parts.append(
-                        f"[Result {idx}] {title}\n"
-                        f"Published: {published or 'unknown'}\n"
-                        f"Snippet: {content}\n"
-                        f"Source: {url}"
+                    if not url or self._is_low_quality_result(r):
+                        continue
+                    records.append(
+                        WebSourceRecord(
+                            index=len(records) + 1,
+                            title=title or url,
+                            url=url,
+                            content=content,
+                            published=published or "",
+                        )
                     )
-                return "\n\n".join(parts)
+                return records
 
-            text = await asyncio.to_thread(_call)
+            records = await asyncio.to_thread(_call)
+            text = self._format_records(normalized, records)
             if not text or "ERROR" in text[:80].upper():
                 return None
             logger.info("Tavily web search: %d chars", len(text))
-            return WebSearchResult(text=text, provider="tavily")
+            return WebSearchResult(text=text, provider="tavily", records=records)
         except Exception as exc:
             logger.warning("Tavily search failed: %s", exc)
             return None
@@ -127,7 +165,7 @@ class WebResultFormatter:
 
     @staticmethod
     def extract_source_records(web_text: str, limit: int = 5) -> list[WebSourceRecord]:
-        """Structured source records çıkarır; eski `[Result]...Source:` formatıyla uyumludur."""
+        """Source records çıkarır; eski `[Result]...Source:` formatıyla uyumludur."""
         records: list[WebSourceRecord] = []
         current: dict[str, str | int] | None = None
         snippet_lines: list[str] = []

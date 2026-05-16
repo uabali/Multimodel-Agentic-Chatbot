@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from pathlib import Path
 
 from langgraph.graph import END, StateGraph
 
@@ -50,7 +51,11 @@ from src.agent.nodes import (
     direct_response_node,
 )
 from src.memory.thread_memory import is_memory_command
-from src.observability.langsmith import build_graph_config, record_semantic_cache_hit
+from src.observability.langsmith import (
+    build_graph_config,
+    record_semantic_cache_hit,
+    record_semantic_cache_miss,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +68,14 @@ def build_semantic_cache_context(
     memory_hash: str = "",
 ) -> str:
     """Stable cache context; memory changes must invalidate cached answers."""
+    from src.config import settings
+
     payload = json.dumps({
         "sf": source_filter or "",
         "su": sorted(session_uploads or []),
         "rs": retrieval_strategy or "",
         "mh": memory_hash or "",
+        "pv": settings.rag_prompt_version,
     }, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -114,10 +122,17 @@ def _grader_decision(state: AgentState) -> str:
     if state.get("relevance") == "yes":
         return "sufficient"
     reason = state.get("grader_reason", "")
+    would_loop = reason in {"partial", "needs_live_data"}
+    if int(state.get("retry_count") or 0) >= 1 and would_loop:
+        return "sufficient"
     if state.get("source_filter"):
         if reason == "needs_live_data":
             return "insufficient"
         return "sufficient"
+    if reason == "insufficient_context":
+        return "refuse"
+    if reason == "partial":
+        return "insufficient"
     return "insufficient"
 
 
@@ -126,7 +141,7 @@ def _grader_decision(state: AgentState) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     """LangGraph workflow'unu derler ve döner."""
     workflow = StateGraph(AgentState)
 
@@ -152,6 +167,7 @@ def build_graph():
         {
             "rag": "rewriter",
             "direct": "direct_response",
+            "web": "web_search",
             "vision": "vision",
             "vision_rag": "vision_rag",
             "vision_search": "vision_search",
@@ -174,7 +190,7 @@ def build_graph():
     workflow.add_conditional_edges(
         "grader",
         _grader_decision,
-        {"sufficient": "generator", "insufficient": "web_search"},
+        {"sufficient": "generator", "insufficient": "web_search", "refuse": "generator"},
     )
 
     # Web search sonrası direkt generate (grader'a geri dönülmez — sonsuz döngü önlemi)
@@ -182,7 +198,7 @@ def build_graph():
     workflow.add_edge("generator", END)
     workflow.add_edge("direct_response", END)
 
-    app = workflow.compile()
+    app = workflow.compile(checkpointer=checkpointer) if checkpointer is not None else workflow.compile()
     logger.info("LangGraph agent graph derlendi.")
     return app
 
@@ -192,6 +208,9 @@ def build_graph():
 # ─────────────────────────────────────────────────────────────────────────────
 
 _graph = None
+_async_graph = None
+_checkpoint_cm = None
+_checkpointer = None
 
 
 def get_graph():
@@ -205,6 +224,35 @@ def get_graph():
     if _graph is None:
         _graph = build_graph()
     return _graph
+
+
+async def get_checkpointer():
+    """AsyncSqliteSaver singleton backed by data/checkpoint.db."""
+    global _checkpoint_cm, _checkpointer
+    if _checkpointer is not None:
+        return _checkpointer
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except Exception as exc:
+        logger.warning("LangGraph SQLite checkpointer unavailable: %s", exc)
+        return None
+    Path("data").mkdir(parents=True, exist_ok=True)
+    _checkpoint_cm = AsyncSqliteSaver.from_conn_string("data/checkpoint.db")
+    _checkpointer = await _checkpoint_cm.__aenter__()
+    setup = getattr(_checkpointer, "setup", None)
+    if setup:
+        await setup()
+    return _checkpointer
+
+
+async def get_graph_async():
+    """Async graph singleton with SQLite checkpointing when available."""
+    global _async_graph
+    if getattr(get_graph, "__name__", "") == "<lambda>":
+        return get_graph()
+    if _async_graph is None:
+        _async_graph = build_graph(checkpointer=await get_checkpointer())
+    return _async_graph
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,6 +292,10 @@ def _init_state(
         "retrieval_strategy": retrieval_strategy or _s.retrieval_strategy,
         "use_rerank": use_rerank if use_rerank is not None else _s.use_rerank,
         "retrieval_trace": [],
+        "retrieval_gate": "",
+        "refusal_mode": False,
+        "retry_count": 0,
+        "web_search_error": "",
         "answer_preview": "",
         "answer_chars": 0,
         "document_count": 0,
@@ -299,7 +351,7 @@ def _graph_config(
     use_rerank: bool | None,
     trace_context: dict | None,
 ) -> dict | None:
-    return build_graph_config(
+    config = build_graph_config(
         run_name=run_name,
         question=question,
         source_filter=source_filter,
@@ -312,6 +364,13 @@ def _graph_config(
         max_tokens=max_tokens,
         trace_context=trace_context,
     )
+    thread_id = str((trace_context or {}).get("session_id") or "").strip()
+    if not thread_id:
+        thread_id = hashlib.sha256(question.encode("utf-8")).hexdigest()[:16]
+    thread_config = {"configurable": {"thread_id": thread_id}}
+    if config is None:
+        return thread_config
+    return {**config, "configurable": {**config.get("configurable", {}), "thread_id": thread_id}}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -389,7 +448,8 @@ async def arun_agent(
         use_rerank=use_rerank,
         trace_context=trace_context,
     )
-    result = await get_graph().ainvoke(state, config=config) if config else await get_graph().ainvoke(state)
+    graph = await get_graph_async()
+    result = await graph.ainvoke(state, config=config) if config else await graph.ainvoke(state)
     return result.get("generation", "Bir hata oluştu, lütfen tekrar deneyin.")
 
 
@@ -458,6 +518,11 @@ async def astream_agent(
                 yield ("messages", (AIMessageChunk(content=cached[i:i + chunk_size]),
                                     {"langgraph_node": "generator"}))
             return
+        record_semantic_cache_miss(
+            question=question,
+            cache_ctx=cache_ctx,
+            trace_context=trace_context,
+        )
     else:
         cache_ctx = ""
 
@@ -482,7 +547,8 @@ async def astream_agent(
     kwargs = {"stream_mode": ["messages", "updates"]}
     if config:
         kwargs["config"] = config
-    async for event in get_graph().astream(state, **kwargs):
+    graph = await get_graph_async()
+    async for event in graph.astream(state, **kwargs):
         # Yanıtı cache için topla (generator / direct_response / vision)
         if isinstance(event, tuple) and event[0] == "updates":
             for node_name, delta in (event[1] or {}).items():

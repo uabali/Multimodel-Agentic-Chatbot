@@ -1,8 +1,8 @@
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  06 — WEB ARAMA TESTLERİ  (Tavily / DuckDuckGo)
+  06 — WEB ARAMA TESTLERİ  (Tavily)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  NOT: TAVILY_API_KEY yoksa bazı testler DuckDuckGo'ya fallback yapar.
-  Bu durumda ⏭️ ATLA yerine ⚠️ KISMI olarak işaretle.
+  NOT: TAVILY_API_KEY yoksa web araması graceful refusal vermelidir.
+  Bu durumda fallback sağlayıcı beklenmez.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [T06-01] Hava durumu — bugün

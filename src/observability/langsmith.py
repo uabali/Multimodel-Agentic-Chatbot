@@ -425,6 +425,29 @@ def record_semantic_cache_hit(
     )
 
 
+def record_semantic_cache_miss(
+    *,
+    question: str,
+    cache_ctx: str,
+    trace_context: dict[str, Any] | None = None,
+) -> str | None:
+    metadata = build_common_metadata(
+        question=question,
+        trace_context={**(trace_context or {}), "cache": "miss"},
+    )
+    return record_observation(
+        "frappe.semantic_cache_miss",
+        inputs={
+            "question_hash": stable_hash(question),
+            "question_chars": len((question or "").strip()),
+            "cache_ctx_hash": stable_hash(cache_ctx),
+        },
+        outputs={"cache_hit": False},
+        metadata=metadata,
+        tags=["frappe", "semantic-cache", "cache-miss"],
+    )
+
+
 def record_ingest_observation(
     *,
     file_path: Path,

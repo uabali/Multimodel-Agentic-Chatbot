@@ -91,6 +91,13 @@ def main() -> int:
         os.getenv("VISION_MODEL"),
         file_env.get("VISION_MODEL"),
     ])
+    configured_n_ctx = int(_first_nonempty([
+        os.getenv("LLM_CONTEXT_SIZE"),
+        file_env.get("LLM_CONTEXT_SIZE"),
+        os.getenv("LLM_N_CTX"),
+        file_env.get("LLM_N_CTX"),
+        "8192",
+    ]))
 
     base = (llm_server_url or "").rstrip("/")
     if not base:
@@ -103,6 +110,7 @@ def main() -> int:
     print(f"- llm_server_url  : {base!r}")
     print(f"- llm_model_name  : {llm_model_name!r}")
     print(f"- vision_model    : {vision_model!r}")
+    print(f"- configured n_ctx: {configured_n_ctx}")
     print(f"- GET {models_url}")
     if llm_backend.lower().startswith("llama") and ":8000" in base:
         print("WARN: llm_backend is llama.cpp but URL looks like a vLLM default (port 8000).")
@@ -158,9 +166,30 @@ def main() -> int:
     if len(model_ids) > 20:
         print(f"  ... (+{len(model_ids) - 20} more)")
 
+    props_base = base[:-3] if base.endswith("/v1") else base
+    props_url = f"{props_base}/props"
+    try:
+        req = Request(props_url, headers={"Accept": "application/json"}, method="GET")
+        with urlopen(req, timeout=1.0) as resp:
+            props_payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        runtime_n_ctx = (
+            props_payload.get("default_generation_settings", {}).get("n_ctx")
+            or props_payload.get("n_ctx")
+        )
+        if runtime_n_ctx is not None:
+            runtime_n_ctx = int(runtime_n_ctx)
+            delta = abs(runtime_n_ctx - configured_n_ctx)
+            print(f"- runtime n_ctx   : {runtime_n_ctx} (delta={delta})")
+            if delta > 1024:
+                print("ERROR: configured and runtime n_ctx differ by more than 1024.")
+                ok = False
+        else:
+            print("- runtime n_ctx   : unavailable from /props")
+    except Exception as exc:
+        print(f"- runtime n_ctx   : /props unavailable ({exc})")
+
     return 0 if ok else 6
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

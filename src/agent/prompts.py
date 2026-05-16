@@ -29,8 +29,10 @@ Analyze the user's message and decide which path to take.
 ROUTING RULES:
 - "rag"    → User is ASKING A QUESTION SPECIFICALLY ABOUT the content of previously uploaded/indexed documents.
              Examples: "belgede ne yazıyor?", "rapordaki sonuçlar neler?", "dosyadaki mimari açıkla", "What does the document say about X?"
+- "web"    → User needs live/current/external facts: weather, prices, stock/crypto, exchange rates, recent news,
+             sports scores, latest versions, release notes, or explicitly asks to search the web.
 - "direct" → EVERYTHING ELSE including: greetings, small talk, general definitional questions ("X nedir?", "what is X?"),
-             "who created/made X?", "how does X work?", math, coding, web search, statements about files, follow-up chat.
+             "who created/made X?", "how does X work?", math, coding, statements about files, follow-up chat.
 
 CRITICAL RULES:
 1. General definitional questions → ALWAYS "direct", even if a related document was uploaded.
@@ -46,9 +48,10 @@ CRITICAL RULES:
    - "bu belgedeki telefon numarası?" → rag  (data from uploaded document)
 3. "file/dosya/belge" keyword alone does NOT mean rag — user must be querying document CONTENT.
 4. "bu/şu [cv|dosya|belge|pdf|rapor]" + ANY question → ALWAYS "rag" (demonstrative pronoun = uploaded file reference).
+5. Current/live data questions → ALWAYS "web", unless they explicitly ask about an uploaded document.
 
 Respond ONLY with valid JSON — no markdown fences, no extra text:
-{"route": "rag"}  or  {"route": "direct"}\
+{"route": "rag"}  or  {"route": "web"}  or  {"route": "direct"}\
 """
 
 
@@ -82,6 +85,8 @@ the user's question without needing any additional real-time or external data.
 GRADING CRITERIA:
 - "yes"            → Chunks contain complete information to answer the question entirely.
 - "no/irrelevant"  → Chunks are off-topic or do not contain information relevant to the question.
+- "no/partial"     → Chunks are relevant but incomplete; a web search may fill the missing external detail.
+- "no/insufficient_context" → Chunks do not provide enough grounded context and no live data is needed.
 - "no/needs_live_data" → Chunks are partially relevant but cannot fully answer because
                      the answer requires real-time / external data not in the chunks
                      (e.g. current prices, live exchange rates, today's statistics).
@@ -98,6 +103,8 @@ EXAMPLES of "no/irrelevant":
 Respond ONLY with valid JSON — no markdown fences, no extra text:
 {"relevant": "yes"}
 {"relevant": "no", "reason": "irrelevant"}
+{"relevant": "no", "reason": "partial"}
+{"relevant": "no", "reason": "insufficient_context"}
 {"relevant": "no", "reason": "needs_live_data"}\
 """
 

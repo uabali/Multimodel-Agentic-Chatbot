@@ -147,11 +147,8 @@ def deduplicate_documents(documents: list[Document], max_docs: int | None = None
             continue
         source = meta.get("source_file") or meta.get("source") or ""
         page = str(meta.get("page", ""))
-        chunk_index = str(meta.get("chunk_index", ""))
-        if source or page or chunk_index:
-            key = f"{source}|{page}|{chunk_index}|{hashlib.sha1(content[:240].encode()).hexdigest()}"
-        else:
-            key = hashlib.sha1(content[:500].encode()).hexdigest()
+        key_payload = f"{source}|{page}|{content}"
+        key = hashlib.sha1(key_payload.encode("utf-8")).hexdigest()
         if key in seen:
             continue
         seen.add(key)

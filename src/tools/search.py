@@ -7,8 +7,7 @@ Tasarım kararları:
  - Senkron `@tool` dekoratörü: LangGraph tool executor ile uyumlu
    (`cl.Step` buraya taşınmaz; web_search_node'da zaten var).
 
-Not: Brave MCP aracı nodes.py üzerinden kullanılır; burada tanımlı değildir.
-     Bu dosya yalnızca HTTP tabanlı fallback araçları içerir.
+Not: Proje web sağlayıcısı olarak yalnızca Tavily kullanır.
 """
 
 from __future__ import annotations
@@ -19,41 +18,9 @@ from src.config import settings
 
 
 @tool
-def search_web(query: str) -> str:
-    """Search the internet using DuckDuckGo for real-time or up-to-date information.
-
-    Use this when:
-    - The uploaded documents do not contain the answer.
-    - The question requires current, live data (news, weather, prices).
-
-    Args:
-        query: Search query text. Be specific for better results.
-
-    Returns:
-        Formatted search results or an error message.
-    """
-    from duckduckgo_search import DDGS
-
-    try:
-        with DDGS() as ddgs:
-            results = ddgs.text(query, max_results=5)
-        if not results:
-            return "No web results found."
-
-        lines = [
-            f"{i}. {r['title']}\n   {r['body']}\n   Source: {r['href']}"
-            for i, r in enumerate(results, 1)
-        ]
-        return "\n\n".join(lines)
-    except Exception as exc:
-        return f"Web search error: {exc}"
-
-
-@tool
 def tavily_search(query: str) -> str:
     """Search the internet via Tavily API for high-quality real-time information.
 
-    Preferred over `search_web` (DuckDuckGo) when Tavily API key is configured.
     Use for: weather, news, stock prices, current events.
 
     Args:

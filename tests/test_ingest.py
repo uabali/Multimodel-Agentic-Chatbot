@@ -88,3 +88,24 @@ def test_pdf_visual_ingest_enabled_indexes_visual_chunks(monkeypatch, tmp_path):
     assert result["visual_chunk_count"] == 1
     assert len(vectorstore.added_batches) == 2
     assert vectorstore.added_batches[1][0].metadata["chunk_type"] == "visual_description"
+
+
+def test_ingest_adds_thread_resume_metadata(tmp_path):
+    pdf_path = tmp_path / "sample.txt"
+    pdf_path.write_text("hello", encoding="utf-8")
+    vectorstore = _FakeVectorStore()
+
+    result = DocumentIngester(
+        loader=_FakeLoader(),
+        splitter=_FakeSplitter(),
+        vectorstore=vectorstore,
+    ).ingest_file(
+        pdf_path,
+        display_name="sample.txt",
+        extra_metadata={"thread_id": "thread-1", "uploaded_at": "2026-05-16T00:00:00Z"},
+    )
+
+    assert result["status"] == "success"
+    meta = vectorstore.added_batches[0][0].metadata
+    assert meta["thread_id"] == "thread-1"
+    assert meta["uploaded_at"] == "2026-05-16T00:00:00Z"

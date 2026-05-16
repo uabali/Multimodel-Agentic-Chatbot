@@ -12,6 +12,7 @@ dependencies = [
     "langchain-huggingface>=0.1",
     "langchain-text-splitters>=0.3",
     "langgraph>=0.4",
+    "langgraph-checkpoint-sqlite>=2.0",
     "langsmith>=0.7",
     # Vector store
     "langchain-qdrant>=0.2",
@@ -32,7 +33,6 @@ dependencies = [
     # Embeddings & Reranking
     "sentence-transformers>=2.6",
     # Web search
-    "duckduckgo-search>=7.0",
     "tavily-python>=0.5",
     # MCP
     "langchain-mcp-adapters>=0.1",

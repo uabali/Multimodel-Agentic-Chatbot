@@ -33,13 +33,13 @@ class AgentState(TypedDict):
     # Üretilen yanıt metni
     generation: str
 
-    # Router kararı: "rag" | "direct"
+    # Router kararı: "rag" | "direct" | "web" | "vision"
     route: str
 
     # Grader kararı: "yes" | "no"
     relevance: str
 
-    # Grader "no" sebep kodu: "irrelevant" | "needs_live_data" | ""
+    # Grader reason: "sufficient" | "partial" | "insufficient_context" | "needs_live_data" | "irrelevant" | ""
     # source_filter aktifken yalnızca "needs_live_data" web fallback'e izin verir.
     grader_reason: str
 
@@ -72,8 +72,12 @@ class AgentState(TypedDict):
     # Her eleman: {chunk_id, hybrid_score, rerank_score, used_in_context}
     # retriever_node doldurur, generator_node used_in_context=True işaretler.
     retrieval_trace: list[dict]
+    retrieval_gate: str
+    refusal_mode: bool
+    retry_count: int
 
     # LangSmith/CSV okunabilirliği için sanitize edilmiş özet alanları.
+    web_search_error: str
     answer_preview: str
     answer_chars: int
     document_count: int

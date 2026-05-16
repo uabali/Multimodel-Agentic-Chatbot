@@ -53,12 +53,12 @@ class Settings(BaseSettings):
 
     # ── Dual LLM profile (Gemma 4 E4B — liberalleştirildi) ──
     chat_temperature: float = 0.7
-    chat_num_predict: int = 1024
     chat_max_tokens: int = 512
     rag_temperature: float = 0.0
-    rag_num_predict: int = 1536
     rag_max_tokens: int = 768
     router_max_tokens: int = 64
+    rag_prompt_version: str = "rag-v2"
+    rag_context_safety_margin_tokens: int = 700
 
     # ── Agentic RAG profile (tool calls, multi-turn reasoning) ──
     # Gemma 4 E4B tool calling için yüksek token budget
@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     # bge-m3 cosine: ilgisiz belgeler ~0.3-0.45 aralığında; 0.45 makul minimum
     # source_filter varsa dense gate tamamen atlanır (retriever_node'a bakın)
     rag_min_dense_similarity: float = 0.45
+    rag_dense_pass_similarity: float = 0.62
     rag_dense_gate_k: int = 12
 
     # ── Reranker ──
@@ -123,6 +124,7 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     brave_api_key: str = ""
     web_search_max_results: int = 5
+    weather_specialization_enabled: bool = True
 
     # ── MCP ──
     mcp_filesystem_root: str = ""
@@ -136,6 +138,9 @@ class Settings(BaseSettings):
 
     # ── Confidence ──
     local_search_conf_threshold: float = 0.35
+    grader_conf_high: float = 0.75
+    grader_conf_low: float = 0.08
+    grader_max_docs: int = 5
 
     # ── Observability (LangSmith, opt-in) ──
     app_env: str = Field(default="local", validation_alias=AliasChoices("APP_ENV"))
@@ -217,6 +222,8 @@ class Settings(BaseSettings):
             raise ValueError("APP_ADMIN_PASSWORD must be changed from the example placeholder.")
         if self.app_password_salt.strip() in placeholders:
             raise ValueError("APP_PASSWORD_SALT must be changed from the example placeholder.")
+        if self.langsmith_api_key.strip() and not self.app_langsmith_enabled:
+            self.app_langsmith_enabled = True
         return self
 
     @property

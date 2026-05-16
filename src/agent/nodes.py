@@ -37,13 +37,22 @@ import logging
 import re
 import threading
 import time
+from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import chainlit as cl
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from src.agent.state import AgentState
-from src.agent.routing import keyword_route, is_web_query, needs_mcp_tools, is_weather_query, normalize_web_query
+from src.agent.routing import (
+    keyword_route,
+    is_turkish_query,
+    is_web_query,
+    needs_mcp_tools,
+    is_weather_query,
+    normalize_web_query,
+)
 from src.agent.web_search import WebSearchService, WebResultFormatter
 from src.agent.prompts import (
     ROUTER_SYSTEM_PROMPT,
@@ -55,6 +64,7 @@ from src.agent.prompts import (
     select_vision_prompt,
 )
 from src.config import settings
+from src.rag.llm import count_message_tokens, count_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -108,17 +118,14 @@ def _observe_node(
 def select_recent_history(messages: list, *, mode: str = "rag") -> list:
     """Select bounded recent chat history while preserving memory SystemMessage."""
     max_messages = 6 if mode == "rag" else 8
-    char_budget = 2500 if mode == "rag" else 3500
+    token_budget = 900 if mode == "rag" else 1300
 
     system_messages = [m for m in messages if isinstance(m, SystemMessage)]
     chat_messages = [m for m in messages if not isinstance(m, SystemMessage)]
     selected = list(chat_messages[-max_messages:])
 
-    def _chars(items: list) -> int:
-        return sum(len(getattr(m, "content", "") or "") for m in items)
-
-    total = _chars(selected)
-    while total > char_budget and len(selected) > 2:
+    total = count_message_tokens(selected)
+    while total > token_budget and len(selected) > 2:
         drop_count = (
             2
             if len(selected) >= 2
@@ -127,11 +134,11 @@ def select_recent_history(messages: list, *, mode: str = "rag") -> list:
             else 1
         )
         for _ in range(drop_count):
-            removed = selected.pop(0)
-            total -= len(getattr(removed, "content", "") or "")
-    while total > char_budget and selected:
-        removed = selected.pop(0)
-        total -= len(getattr(removed, "content", "") or "")
+            selected.pop(0)
+        total = count_message_tokens(selected)
+    while total > token_budget and selected:
+        selected.pop(0)
+        total = count_message_tokens(selected)
     while selected and isinstance(selected[0], AIMessage):
         selected.pop(0)
 
@@ -349,17 +356,21 @@ def _get_web_search_service():
 
 
 def _parse_route(text: str, default: str = "direct") -> str:
-    """LLM yanıtından 'rag', 'direct' veya 'vision' çıkarır (regex tabanlı)."""
+    """LLM yanıtından 'rag', 'web', 'direct' veya 'vision' çıkarır (regex tabanlı)."""
     import re
     text_lower = text.lower().strip()
     if re.search(r'\brag\b', text_lower):
         return "rag"
+    if re.search(r'\bweb\b', text_lower):
+        return "web"
     if re.search(r'\bdirect\b', text_lower):
         return "direct"
     if re.search(r'\bvision\b', text_lower):
         return "vision"
     if re.search(r'"route"\s*:\s*"rag"', text_lower):
         return "rag"
+    if re.search(r'"route"\s*:\s*"web"', text_lower):
+        return "web"
     if re.search(r'"route"\s*:\s*"direct"', text_lower):
         return "direct"
     if re.search(r'"route"\s*:\s*"vision"', text_lower):
@@ -449,22 +460,22 @@ async def router_node(state: AgentState) -> AgentState:
         if is_web_query(question):
             elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
             logger.info(
-                "Router → direct [reason=web_override+uploads, uploads=%d, q_len=%d, t=%.3fs]",
+                "Router → web [reason=web_override+uploads, uploads=%d, q_len=%d, t=%.3fs]",
                 len(session_uploads), q_len, time.perf_counter() - t0,
             )
             _observe_node(
                 "frappe.router_decision",
                 state,
-                outputs={"route": "direct", "route_reason": "web_override+uploads", "elapsed_ms": elapsed_ms},
+                outputs={"route": "web", "route_reason": "web_override+uploads", "elapsed_ms": elapsed_ms},
                 metadata={
                     "route_reason": "web_override+uploads",
                     "query_chars": q_len,
                     "image_count": 0,
                     "upload_count": len(session_uploads),
                 },
-                tags=["frappe", "router", "direct"],
+                tags=["frappe", "router", "web"],
             )
-            return {**state, "route": "direct"}
+            return {**state, "route": "web"}
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Router → rag [reason=uploads_bias, uploads=%d, q_len=%d, t=%.3fs]",
@@ -687,6 +698,7 @@ async def retriever_node(state: AgentState) -> AgentState:
     session_uploads = state.get("session_uploads") or []
     latency_ms: dict[str, float] = {}
     dense_score = None
+    retrieval_gate = "skip"
     strategy = state.get("retrieval_strategy") or settings.retrieval_strategy
     use_rerank_val = state.get("use_rerank")
     if use_rerank_val is None:
@@ -701,6 +713,7 @@ async def retriever_node(state: AgentState) -> AgentState:
 
         if source_filter or session_uploads:
             dense_score = 1.0
+            retrieval_gate = "skip"
             filter_desc = f"source_filter='{source_filter}'" if source_filter else f"uploads={session_uploads}"
             logger.info("Retriever: dense_gate=skip [%s]", filter_desc)
         else:
@@ -714,37 +727,17 @@ async def retriever_node(state: AgentState) -> AgentState:
                 dense_score = settings.rag_min_dense_similarity
             latency_ms["dense_gate"] = round((time.perf_counter() - t_gate) * 1000, 2)
             logger.info(
-                "Retriever: dense_gate=%.3f [threshold=%.3f, t=%.3fs]",
-                dense_score, settings.rag_min_dense_similarity,
+                "Retriever: dense_gate=%.3f [weak=%.3f, pass=%.3f, t=%.3fs]",
+                dense_score, settings.rag_min_dense_similarity, settings.rag_dense_pass_similarity,
                 time.perf_counter() - t_gate,
             )
-            if dense_score < settings.rag_min_dense_similarity:
-                elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-                logger.info(
-                    "Retriever: gate_reject [score=%.3f < %.3f, t=%.3fs]",
-                    dense_score, settings.rag_min_dense_similarity,
-                    time.perf_counter() - t0,
-                )
-                _observe_node(
-                    "frappe.retriever_result",
-                    state,
-                    outputs={
-                        "status": "gate_reject",
-                        "document_count": 0,
-                        "dense_score": dense_score,
-                        "dense_threshold": settings.rag_min_dense_similarity,
-                        "latency_ms_by_stage": {**latency_ms, "total": elapsed_ms},
-                    },
-                    metadata={
-                        "retrieval_strategy": strategy,
-                        "use_rerank": bool(use_rerank_val),
-                        "dense_gate_rejected": True,
-                        "dense_score": dense_score,
-                        "dense_threshold": settings.rag_min_dense_similarity,
-                    },
-                    tags=["frappe", "retriever", "gate-reject"],
-                )
-                return {**state, "documents": [], "retrieval_trace": []}
+            if dense_score >= settings.rag_dense_pass_similarity:
+                retrieval_gate = "pass"
+            elif dense_score >= settings.rag_min_dense_similarity:
+                retrieval_gate = "soft"
+            else:
+                retrieval_gate = "weak"
+            logger.info("Retriever: dense_gate=%s [score=%.3f]", retrieval_gate, dense_score)
 
         retriever = create_retriever(
             vectorstore=store.store,
@@ -838,9 +831,11 @@ async def retriever_node(state: AgentState) -> AgentState:
                 "use_rerank": bool(use_rerank_val),
                 "dense_score": dense_score,
                 "dense_threshold": settings.rag_min_dense_similarity,
+                "dense_pass_threshold": settings.rag_dense_pass_similarity,
+                "retrieval_gate": retrieval_gate,
                 "top_sources": summarize_source_distribution(documents),
             },
-            tags=["frappe", "retriever", "success"],
+            tags=["frappe", "retriever", "success", f"gate:{retrieval_gate}"],
         )
     except Exception as exc:
         logger.warning("Retriever: error [%s, t=%.3fs]", exc, time.perf_counter() - t0)
@@ -862,7 +857,7 @@ async def retriever_node(state: AgentState) -> AgentState:
             error=str(exc),
         )
 
-    return {**state, "documents": documents, "retrieval_trace": retrieval_trace}
+    return {**state, "documents": documents, "retrieval_trace": retrieval_trace, "retrieval_gate": retrieval_gate}
 
 
 def _fmt_score(s) -> str:
@@ -880,16 +875,110 @@ def _score_lookup_with_filter(vectorstore, query: str, k: int, qdrant_filter):
         return vectorstore.similarity_search_with_score(query, k=k)
 
 
+def _record_to_web_document(record, *, provider: str, query: str, retrieved_at: str) -> Document:
+    """Convert a structured web result record into a RAG document."""
+    return Document(
+        page_content=(
+            f"Title: {record.title}\n"
+            f"Published: {record.published or 'unknown'}\n"
+            f"URL: {record.url}\n"
+            f"Snippet: {record.content}"
+        )[:2500],
+        metadata={
+            "display_name": record.title,
+            "source": record.url,
+            "url": record.url,
+            "title": record.title,
+            "published": record.published,
+            "provider": provider,
+            "result_index": record.index,
+            "chunk_index": record.index,
+            "retrieved_at": retrieved_at,
+            "query": query,
+            "type": "web_search",
+        },
+    )
+
+
+def _published_sort_key(published: str) -> tuple[int, str]:
+    """Best-effort freshness key: explicit ISO-ish dates sort above unknown dates."""
+    text = (published or "").strip()
+    if not text:
+        return (0, "")
+    match = re.search(r"\d{4}-\d{2}-\d{2}", text)
+    if match:
+        return (2, match.group(0))
+    match = re.search(r"\d{4}", text)
+    if match:
+        return (1, match.group(0))
+    return (0, text)
+
+
+def _web_domain(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+
+
+def _hash_text(text: str) -> str:
+    try:
+        from src.observability.langsmith import stable_hash
+        return stable_hash(text)
+    except Exception:
+        return ""
+
+
+def _web_docs_from_result(result, *, query: str, limit: int | None = None) -> list[Document]:
+    retrieved_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    records = list(getattr(result, "records", None) or [])
+    if not records:
+        records = WebResultFormatter.extract_source_records(
+            result.text,
+            limit=limit or settings.web_search_max_results,
+        )
+    records = sorted(records, key=lambda r: _published_sort_key(r.published), reverse=True)
+    if records:
+        return [
+            _record_to_web_document(
+                record,
+                provider=result.provider,
+                query=query,
+                retrieved_at=retrieved_at,
+            )
+            for record in records
+        ]
+    return [
+        Document(
+            page_content=result.text[:8000],
+            metadata={
+                "source": result.provider,
+                "display_name": result.provider,
+                "provider": result.provider,
+                "retrieved_at": retrieved_at,
+                "query": query,
+                "type": "web_search",
+            },
+        )
+    ]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Node 4 — Grader (CRAG-style belge alaka değerlendirmesi)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-MAX_GRADER_DOCS = 5
-
 # Confidence eşikleri: yüksek/düşük durumda LLM atlanır (~3s kazanç).
-_GRADER_CONF_HIGH = 0.75  # Bu eşiğin üstünde → doğrudan "yes" (LLM atlanır)
-_GRADER_CONF_LOW  = 0.08  # Bu eşiğin altında  → doğrudan "no"  (LLM atlanır)
+def _grader_conf_high() -> float:
+    return float(settings.grader_conf_high)
+
+
+def _grader_conf_low() -> float:
+    return float(settings.grader_conf_low)
+
+
+def _grader_max_docs() -> int:
+    return int(settings.grader_max_docs)
 
 
 def _parse_yes_no(text: str, default: str = "no") -> str:
@@ -907,8 +996,14 @@ def _parse_yes_no(text: str, default: str = "no") -> str:
 
 
 def _parse_grader_reason(text: str) -> str:
-    """Grader yanıtından 'reason' alanını çıkarır: 'needs_live_data' | 'irrelevant' | ''."""
+    """Grader yanıtından reason alanını çıkarır."""
     text_lower = text.lower()
+    if "insufficient_context" in text_lower:
+        return "insufficient_context"
+    if "sufficient" in text_lower:
+        return "sufficient"
+    if "partial" in text_lower:
+        return "partial"
     if "needs_live_data" in text_lower:
         return "needs_live_data"
     if "irrelevant" in text_lower:
@@ -937,7 +1032,7 @@ async def grader_node(state: AgentState) -> AgentState:
             state,
             outputs={
                 "relevance": "no",
-                "grader_reason": "irrelevant",
+                "grader_reason": "insufficient_context",
                 "mode": "no_docs",
                 "document_count": 0,
                 "latency_ms_by_stage": {"total": elapsed_ms},
@@ -945,7 +1040,7 @@ async def grader_node(state: AgentState) -> AgentState:
             metadata={"grader_mode": "no_docs", "grader_confidence": None},
             tags=["frappe", "grader", "no"],
         )
-        return {**state, "relevance": "no", "grader_reason": "irrelevant"}
+        return {**state, "relevance": "no", "grader_reason": "insufficient_context", "refusal_mode": True}
 
     if state.get("source_filter") or state.get("session_uploads"):
         from src.agent.routing import is_web_query
@@ -956,32 +1051,32 @@ async def grader_node(state: AgentState) -> AgentState:
             pass  # Web sorguları için grader LLM'i çalıştır — needs_live_data döndürebilir
         else:
             confidence = estimate_confidence(question, documents)
-            if confidence < _GRADER_CONF_LOW:
+            if confidence < _grader_conf_low():
                 elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
                 logger.info(
                     "Grader: relevance=no [mode=file_low_conf, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
-                    confidence, _GRADER_CONF_LOW, len(documents), time.perf_counter() - t0,
+                    confidence, _grader_conf_low(), len(documents), time.perf_counter() - t0,
                 )
                 _observe_node(
                     "frappe.grader_decision",
                     state,
                     outputs={
                         "relevance": "no",
-                        "grader_reason": "irrelevant",
+                        "grader_reason": "insufficient_context",
                         "mode": "file_low_conf",
                         "confidence": confidence,
-                        "low_threshold": _GRADER_CONF_LOW,
+                        "low_threshold": _grader_conf_low(),
                         "document_count": len(documents),
                         "latency_ms_by_stage": {"total": elapsed_ms},
                     },
                     metadata={
                         "grader_mode": "file_low_conf",
                         "grader_confidence": confidence,
-                        "grader_low_threshold": _GRADER_CONF_LOW,
+                        "grader_low_threshold": _grader_conf_low(),
                     },
                     tags=["frappe", "grader", "no"],
                 )
-                return {**state, "relevance": "no", "grader_reason": "irrelevant"}
+                return {**state, "relevance": "no", "grader_reason": "insufficient_context", "refusal_mode": True}
             elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
             logger.info(
                 "Grader: relevance=yes [mode=file_fast, conf=%.3f, docs=%d, t=%.3fs]",
@@ -992,7 +1087,7 @@ async def grader_node(state: AgentState) -> AgentState:
                 state,
                 outputs={
                     "relevance": "yes",
-                    "grader_reason": "",
+                    "grader_reason": "sufficient",
                     "mode": "file_fast",
                     "confidence": confidence,
                     "document_count": len(documents),
@@ -1001,9 +1096,9 @@ async def grader_node(state: AgentState) -> AgentState:
                 metadata={"grader_mode": "file_fast", "grader_confidence": confidence},
                 tags=["frappe", "grader", "yes"],
             )
-            return {**state, "relevance": "yes", "grader_reason": ""}
+            return {**state, "relevance": "yes", "grader_reason": "sufficient"}
 
-        top_docs = documents[:MAX_GRADER_DOCS]
+        top_docs = documents[:_grader_max_docs()]
         doc_texts = "\n---\n".join(doc.page_content for doc in top_docs)
         doc_chars = sum(len(d.page_content) for d in top_docs)
         llm = _get_rag_llm(temperature=0.0)
@@ -1048,61 +1143,61 @@ async def grader_node(state: AgentState) -> AgentState:
 
     confidence = estimate_confidence(question, documents)
 
-    if confidence >= _GRADER_CONF_HIGH:
+    if confidence >= _grader_conf_high():
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Grader: relevance=yes [mode=high_conf, conf=%.3f>=%.3f, docs=%d, t=%.3fs]",
-            confidence, _GRADER_CONF_HIGH, len(documents), time.perf_counter() - t0,
+            confidence, _grader_conf_high(), len(documents), time.perf_counter() - t0,
         )
         _observe_node(
             "frappe.grader_decision",
             state,
             outputs={
                 "relevance": "yes",
-                "grader_reason": "",
+                "grader_reason": "sufficient",
                 "mode": "high_conf",
                 "confidence": confidence,
-                "high_threshold": _GRADER_CONF_HIGH,
+                "high_threshold": _grader_conf_high(),
                 "document_count": len(documents),
                 "latency_ms_by_stage": {"total": elapsed_ms},
             },
             metadata={
                 "grader_mode": "high_conf",
                 "grader_confidence": confidence,
-                "grader_high_threshold": _GRADER_CONF_HIGH,
+                "grader_high_threshold": _grader_conf_high(),
             },
             tags=["frappe", "grader", "yes"],
         )
-        return {**state, "relevance": "yes", "grader_reason": ""}
+        return {**state, "relevance": "yes", "grader_reason": "sufficient"}
 
-    if confidence < _GRADER_CONF_LOW:
+    if confidence < _grader_conf_low():
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Grader: relevance=no [mode=low_conf, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
-            confidence, _GRADER_CONF_LOW, len(documents), time.perf_counter() - t0,
+            confidence, _grader_conf_low(), len(documents), time.perf_counter() - t0,
         )
         _observe_node(
             "frappe.grader_decision",
             state,
             outputs={
                 "relevance": "no",
-                "grader_reason": "irrelevant",
+                "grader_reason": "insufficient_context",
                 "mode": "low_conf",
                 "confidence": confidence,
-                "low_threshold": _GRADER_CONF_LOW,
+                "low_threshold": _grader_conf_low(),
                 "document_count": len(documents),
                 "latency_ms_by_stage": {"total": elapsed_ms},
             },
             metadata={
                 "grader_mode": "low_conf",
                 "grader_confidence": confidence,
-                "grader_low_threshold": _GRADER_CONF_LOW,
+                "grader_low_threshold": _grader_conf_low(),
             },
             tags=["frappe", "grader", "no"],
         )
-        return {**state, "relevance": "no", "grader_reason": "irrelevant"}
+        return {**state, "relevance": "no", "grader_reason": "insufficient_context", "refusal_mode": True}
 
-    top_docs = documents[:MAX_GRADER_DOCS]
+    top_docs = documents[:_grader_max_docs()]
     doc_texts = "\n---\n".join(doc.page_content for doc in top_docs)
     doc_chars = sum(len(d.page_content) for d in top_docs)
     llm = _get_rag_llm(temperature=0.0)
@@ -1124,7 +1219,7 @@ async def grader_node(state: AgentState) -> AgentState:
     except Exception as exc:
         # mid_conf hata: güvensiz belgeyle üretim yerine web fallback'e düş
         logger.warning("Grader: llm_error → no [err=%s, t=%.3fs]", exc, time.perf_counter() - t0)
-        relevance, reason = "no", "irrelevant"
+        relevance, reason = "no", "insufficient_context"
         llm_ms = None
 
     _observe_node(
@@ -1316,30 +1411,7 @@ async def vision_search_node(state: AgentState) -> AgentState:
         if service:
             web_result = await service.search(original_q)
             if web_result:
-                records = WebResultFormatter.extract_source_records(web_result.text, limit=settings.web_search_max_results)
-                if records:
-                    for record in records:
-                        web_docs.append(Document(
-                            page_content=(
-                                f"Title: {record.title}\n"
-                                f"Published: {record.published or 'unknown'}\n"
-                                f"URL: {record.url}\n"
-                                f"Snippet: {record.content}"
-                            )[:2500],
-                            metadata={
-                                "display_name": record.title,
-                                "source": record.url,
-                                "url": record.url,
-                                "published": record.published,
-                                "chunk_index": record.index,
-                                "type": "web_search",
-                            },
-                        ))
-                else:
-                    web_docs.append(Document(
-                        page_content=web_result.text[:8000],
-                        metadata={"source": web_result.provider, "display_name": web_result.provider, "type": "web_search"},
-                    ))
+                web_docs = _web_docs_from_result(web_result, query=original_q)
                 step.output = f"Found via {web_result.provider} ({len(web_result.text)} chars)."
             else:
                 logger.warning("Vision-Search: web araması sonuç döndürmedi")
@@ -1397,6 +1469,161 @@ def _fallback_context_answer(question: str, documents: list[Document], vision_co
         body = (documents[0].page_content or "").strip()[:600]
         return f"Belgeden ({src}) ilgili bölüm:\n\n{body}"
     return "Bu soruyu yanıtlayabilecek bir belge bağlamı bulunamadı."
+
+
+@dataclass
+class RAGContextAssembly:
+    system_content: str
+    context: str
+    used_chunk_ids: list[str] = field(default_factory=list)
+    docs_included: int = 0
+    input_budget_tokens: int = 0
+    budget_chars: int = 0
+    used_chars: int = 0
+    overhead_tokens: int = 0
+    truncated: bool = False
+    max_input_chars: int = 0
+
+
+def _estimate_history_tokens(messages: list) -> int:
+    return count_message_tokens(messages)
+
+
+def _source_header(index: int, doc: Document) -> str:
+    meta = getattr(doc, "metadata", {}) or {}
+    src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
+    page = meta.get("page", "")
+    if meta.get("type") == "web_search":
+        url = meta.get("url") or meta.get("source", "")
+        published = meta.get("published", "")
+        header = f"[Kaynak {index}: {src or url}, Web"
+        if published:
+            header += f", Tarih: {published}"
+        if url:
+            header += f", URL: {url}"
+        header += "]"
+        return header
+    return f"[Kaynak {index}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
+
+
+def assemble_rag_context(
+    *,
+    documents: list[Document],
+    vision_context: str,
+    rag_history: list,
+    answer_question: str,
+    retrieval_trace: list[dict],
+    output_tokens: int,
+) -> RAGContextAssembly:
+    """Build bounded RAG context and mark retrieval_trace entries used in prompt."""
+    context_parts: list[str] = []
+    used_chunk_ids: list[str] = []
+
+    if vision_context:
+        context_parts.append(f"[Görsel Analizi]\n{vision_context}")
+
+    n_ctx = settings.llm_context_size
+    history_tokens = _estimate_history_tokens(rag_history)
+    overhead_tokens = settings.rag_context_safety_margin_tokens + history_tokens
+    input_budget_tokens = max(256, n_ctx - output_tokens - overhead_tokens)
+    budget_chars = int(input_budget_tokens * 2.5)
+    used_chars = sum(len(p) for p in context_parts)
+
+    from src.rag.retriever import chunk_id as _chunk_id
+
+    for i, doc in enumerate(documents, 1):
+        meta = getattr(doc, "metadata", {}) or {}
+        header = _source_header(i, doc)
+        remaining = budget_chars - used_chars
+        if remaining <= len(header) + 50:
+            break
+        max_chars = min(2500 if meta.get("type") == "web_search" else 2000, remaining - len(header) - 10)
+        content = (doc.page_content or "")[:max_chars]
+        if not content.strip():
+            continue
+        candidate = f"{header}\n{content}"
+        candidate_context = "\n\n---\n\n".join([*context_parts, candidate])
+        while (
+            count_tokens(candidate_context) + history_tokens + output_tokens + settings.rag_context_safety_margin_tokens > n_ctx
+            and len(content) > 200
+        ):
+            content = content[: int(len(content) * 0.75)].rstrip()
+            candidate = f"{header}\n{content}"
+            candidate_context = "\n\n---\n\n".join([*context_parts, candidate])
+        if count_tokens(candidate_context) + history_tokens + output_tokens + settings.rag_context_safety_margin_tokens > n_ctx:
+            if context_parts:
+                break
+            content = content[:200].rstrip()
+            candidate = f"{header}\n{content}"
+        context_parts.append(candidate)
+        used_chars += len(header) + len(content) + 10
+        used_chunk_ids.append(_chunk_id(doc))
+
+    docs_included = len(context_parts) - (1 if vision_context else 0)
+    context = "\n\n---\n\n".join(context_parts)
+    system_content = RAG_WITH_CONTEXT_SYSTEM_PROMPT.replace("{context}", context)
+
+    prior_chars = sum(len(getattr(m, "content", "") or "") for m in rag_history)
+    total_prompt_chars = len(system_content) + prior_chars + len(answer_question)
+    max_input_chars = int(max(256, n_ctx - output_tokens - 50) * 2.5)
+    truncated = False
+    if total_prompt_chars > max_input_chars:
+        safe_ctx_len = max(500, max_input_chars - prior_chars - len(answer_question) - 800)
+        context = context[:safe_ctx_len]
+        system_content = RAG_WITH_CONTEXT_SYSTEM_PROMPT.replace("{context}", context)
+        used_chars = min(used_chars, len(context))
+        truncated = True
+
+    used_set = set(used_chunk_ids)
+    for entry in retrieval_trace:
+        if entry.get("chunk_id") in used_set:
+            entry["used_in_context"] = True
+
+    return RAGContextAssembly(
+        system_content=system_content,
+        context=context,
+        used_chunk_ids=used_chunk_ids,
+        docs_included=docs_included,
+        input_budget_tokens=input_budget_tokens,
+        budget_chars=budget_chars,
+        used_chars=used_chars,
+        overhead_tokens=overhead_tokens,
+        truncated=truncated,
+        max_input_chars=max_input_chars,
+    )
+
+
+def _source_list_line(index: int, doc: Document) -> str:
+    meta = getattr(doc, "metadata", {}) or {}
+    title = meta.get("display_name") or meta.get("title") or meta.get("source_file") or meta.get("source") or f"Kaynak {index}"
+    url = meta.get("url") or (meta.get("source") if meta.get("type") == "web_search" else "")
+    published = f" — {meta.get('published')}" if meta.get("published") else ""
+    page = meta.get("page")
+    page_txt = f", s. {page}" if page and str(page) not in {"", "?"} else ""
+    if url:
+        return f"- [{index}] [{title}]({url}){published}"
+    return f"- [{index}] {title}{page_txt}"
+
+
+def append_used_sources(answer: str, documents: list[Document], question: str) -> str:
+    """Append a compact source list for citations that appear in the answer."""
+    if not answer.strip() or not documents:
+        return answer.strip()
+    if re.search(r"(?im)^\s*(kaynaklar|sources)\s*:", answer):
+        return answer.strip()
+    cited: list[int] = []
+    for raw in re.findall(r"\[(?:Kaynak\s*)?(\d+)\]", answer, re.IGNORECASE):
+        try:
+            idx = int(raw)
+        except ValueError:
+            continue
+        if 1 <= idx <= len(documents) and idx not in cited:
+            cited.append(idx)
+    if not cited:
+        return answer.strip()
+    header = "Kaynaklar:" if is_turkish_query(question) else "Sources:"
+    lines = [header] + [_source_list_line(idx, documents[idx - 1]) for idx in cited]
+    return f"{answer.strip()}\n\n" + "\n".join(lines)
 
 
 def _final_answer_fields(
@@ -1529,6 +1756,8 @@ async def generator_node(state: AgentState) -> AgentState:
     budget_chars = 0
     used_chars = 0
     overhead_tokens = 0
+    context_truncated = False
+    max_input_chars = 0
     retry_summary: dict[str, object] = {
         "empty_response": False,
         "compact_retry_answer_chars": 0,
@@ -1537,65 +1766,61 @@ async def generator_node(state: AgentState) -> AgentState:
         "retry_path": "primary",
     }
 
+    if state.get("refusal_mode") or state.get("grader_reason") == "insufficient_context":
+        generation = (
+            "Bu soruyu yanıtlayabilecek yeterli bağlam yüklenen belgelerde bulunamadı. "
+            "Bu yüzden bağlam dışı bir yanıt üretmiyorum."
+        )
+        new_messages = [
+            *prior_messages,
+            HumanMessage(content=answer_question),
+            AIMessage(content=generation),
+        ]
+        return {
+            **state,
+            "generation": generation,
+            "messages": new_messages,
+            **_final_answer_fields(state, generation, t0=t0, mode="generator"),
+        }
+
+    if state.get("web_search_error") and not documents and not vision_context:
+        generation = str(state.get("web_search_error") or "").strip()
+        new_messages = [
+            *prior_messages,
+            HumanMessage(content=answer_question),
+            AIMessage(content=generation),
+        ]
+        return {
+            **state,
+            "generation": generation,
+            "messages": new_messages,
+            **_final_answer_fields(state, generation, t0=t0, mode="generator"),
+        }
+
     if documents or vision_context:
-        context_parts = []
-
-        # Görsel analiz sonucu ilk kaynak olarak eklenir
-        if vision_context:
-            context_parts.append(f"[Görsel Analizi]\n{vision_context}")
-
-        # Bütçe: n_ctx toplam limittir (giriş+çıkış). max_tokens çıkışa ayrılır;
-        # geri kalandan sistem şablonu, soru ve geçmiş için güvenlik payı düşülür.
-        # Türkçe için muhafazakâr: 1 token ≈ 2.5 karakter.
-        n_ctx = settings.llm_context_size
-        output_tokens = settings.rag_max_tokens
-        prior_chars = sum(len(getattr(m, "content", "") or "") for m in rag_history)
-        prior_tokens_est = max(0, prior_chars // 4)
-        overhead_tokens = 600 + prior_tokens_est  # sistem şablonu + soru + geçmiş + pay
-        input_budget_tokens = max(256, n_ctx - output_tokens - overhead_tokens)
-        budget_chars = int(input_budget_tokens * 2.5)
-        used_chars = sum(len(p) for p in context_parts)
-
-        from src.rag.retriever import chunk_id as _chunk_id
-        for i, doc in enumerate(documents, 1):
-            meta = getattr(doc, "metadata", {}) or {}
-            src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
-            page = meta.get("page", "")
-            is_web = meta.get("type") == "web_search"
-            if is_web:
-                url = meta.get("url") or meta.get("source", "")
-                published = meta.get("published", "")
-                header = f"[Kaynak {i}: {src or url}, Web"
-                if published:
-                    header += f", Tarih: {published}"
-                if url:
-                    header += f", URL: {url}"
-                header += "]"
-            else:
-                header = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
-            remaining = budget_chars - used_chars
-            if remaining <= len(header) + 50:
-                break
-            max_chars = min(2500 if is_web else 2000, remaining - len(header) - 10)
-            content = doc.page_content[:max_chars]
-            context_parts.append(f"{header}\n{content}")
-            used_chars += len(header) + len(content) + 10
-            used_chunk_ids.append(_chunk_id(doc))
-
-        docs_included = len(context_parts) - (1 if vision_context else 0)
-        context = "\n\n---\n\n".join(context_parts)
-        # .replace() yerine .format() kullanılmaz — PDF/kod içindeki { } format() çökertiyor
-        system_content = RAG_WITH_CONTEXT_SYSTEM_PROMPT.replace("{context}", context)
-
-        total_prompt_chars = len(system_content) + prior_chars + len(answer_question)
-        max_input_chars = int((n_ctx - output_tokens - 50) * 2.5)
-        if total_prompt_chars > max_input_chars:
-            safe_ctx_len = max(500, max_input_chars - prior_chars - len(answer_question) - 800)
-            context = context[:safe_ctx_len]
-            system_content = RAG_WITH_CONTEXT_SYSTEM_PROMPT.replace("{context}", context)
+        session_max_tok = state.get("max_tokens") or settings.rag_max_tokens
+        output_tokens = min(int(session_max_tok), settings.rag_max_tokens)
+        assembly = assemble_rag_context(
+            documents=documents,
+            vision_context=vision_context,
+            rag_history=rag_history,
+            answer_question=answer_question,
+            retrieval_trace=retrieval_trace,
+            output_tokens=output_tokens,
+        )
+        system_content = assembly.system_content
+        used_chunk_ids = assembly.used_chunk_ids
+        docs_included = assembly.docs_included
+        input_budget_tokens = assembly.input_budget_tokens
+        budget_chars = assembly.budget_chars
+        used_chars = assembly.used_chars
+        overhead_tokens = assembly.overhead_tokens
+        context_truncated = assembly.truncated
+        max_input_chars = assembly.max_input_chars
+        if context_truncated:
             logger.warning(
                 "Generator: context truncated to %dch to fit n_ctx=%d",
-                len(context), n_ctx,
+                len(assembly.context), settings.llm_context_size,
             )
 
         logger.info(
@@ -1603,14 +1828,9 @@ async def generator_node(state: AgentState) -> AgentState:
             "n_ctx=%d, output_max=%dtok, overhead=%dtok",
             input_budget_tokens, budget_chars, used_chars,
             docs_included, len(documents), bool(vision_context),
-            len(rag_history), n_ctx, output_tokens, overhead_tokens,
+            len(rag_history), settings.llm_context_size, output_tokens, overhead_tokens,
         )
 
-        # Trace'te used_in_context flag'ini işaretle ve final_used log'unu yaz
-        used_set = set(used_chunk_ids)
-        for entry in retrieval_trace:
-            if entry.get("chunk_id") in used_set:
-                entry["used_in_context"] = True
         if used_chunk_ids:
             id_to_entry = {e["chunk_id"]: e for e in retrieval_trace}
             final_parts = []
@@ -1636,6 +1856,8 @@ async def generator_node(state: AgentState) -> AgentState:
     if documents or vision_context:
         session_temp = min(float(session_temp), 0.2)
     session_max_tok = state.get("max_tokens") or None
+    if documents or vision_context:
+        session_max_tok = min(int(session_max_tok or settings.rag_max_tokens), settings.rag_max_tokens)
     llm = _get_rag_llm(temperature=session_temp, max_tokens=session_max_tok)
 
     messages_to_send = [SystemMessage(content=system_content)]
@@ -1682,6 +1904,9 @@ async def generator_node(state: AgentState) -> AgentState:
         retry_summary["fallback_context_answer_used"] = True
         retry_summary["retry_path"] = "compact_retry>micro_retry>fallback_context"
 
+    if generation.strip() and documents:
+        generation = append_used_sources(generation, documents, answer_question)
+
     llm_elapsed = time.perf_counter() - t_llm
     total_elapsed = time.perf_counter() - t0
     logger.info(
@@ -1727,6 +1952,7 @@ async def generator_node(state: AgentState) -> AgentState:
             "used_chunks": trace_summary.get("used_chunks", ""),
             "retry_summary": retry_summary,
             "retry_path": retry_summary["retry_path"],
+            "context_truncated": context_truncated,
             "latency_ms_by_stage": latency_ms,
         },
         metadata={
@@ -1736,6 +1962,8 @@ async def generator_node(state: AgentState) -> AgentState:
             "context_budget_chars": budget_chars,
             "context_used_chars": used_chars,
             "context_overhead_tokens": overhead_tokens,
+            "context_max_input_chars": max_input_chars,
+            "context_truncated": context_truncated,
             "empty_response": retry_summary["empty_response"],
             "fallback_context_answer_used": retry_summary["fallback_context_answer_used"],
             "retry_path": retry_summary["retry_path"],
@@ -1764,17 +1992,18 @@ async def generator_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Node 7 — Web Search (çok provider destekli, OCP uyumlu)
+# Node 7 — Web Search (Tavily-only policy)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def web_search_node(state: AgentState) -> AgentState:
     """Belge alaka düşük veya bulunamadığında web araması yapar.
 
-    Provider zinciri: Brave MCP → Tavily → DuckDuckGo (ayarlara göre).
+    Sağlayıcı politikası: yalnızca Tavily. Düşük kaliteli/sıfır sonuçta refusal'a düşer.
     Web araması için orijinal soru kullanılır — rewriter çıktısı web için uygun değildir.
     """
     # Orijinal soru vektör DB için yeniden yazılmış olabilir; web için doğal dili tercih et.
+    t0 = time.perf_counter()
     question = state.get("original_question") or state["question"]
     existing_docs = state.get("documents", [])
     search_query = _build_contextual_web_query(question, list(state.get("messages", [])))
@@ -1788,35 +2017,32 @@ async def web_search_node(state: AgentState) -> AgentState:
         if result is None:
             logger.warning("Web search: Tavily kullanılamıyor veya sonuç yok")
             step.output = "Web search failed."
-            return {**state, "documents": existing_docs}
-
-        records = WebResultFormatter.extract_source_records(result.text, limit=settings.web_search_max_results)
-        web_docs = [
-            Document(
-                page_content=(
-                    f"Title: {record.title}\n"
-                    f"Published: {record.published or 'unknown'}\n"
-                    f"URL: {record.url}\n"
-                    f"Snippet: {record.content}"
-                )[:2500],
-                metadata={
-                    "display_name": record.title,
-                    "source": record.url,
-                    "url": record.url,
-                    "published": record.published,
-                    "chunk_index": record.index,
-                    "type": "web_search",
+            _observe_node(
+                "frappe.web_search_result",
+                state,
+                inputs={"query_preview": search_query[:180]},
+                outputs={
+                    "status": "unavailable" if service is None else "no_result",
+                    "provider": "tavily" if service is not None else "",
+                    "result_count": 0,
+                    "latency_ms_by_stage": {"total": round((time.perf_counter() - t0) * 1000, 2)},
                 },
+                metadata={
+                    "web_query_preview": search_query[:180],
+                    "web_query_hash": _hash_text(search_query),
+                    "web_result_count": 0,
+                },
+                tags=["frappe", "web-search", "no-result"],
             )
-            for record in records
-        ]
-        if not web_docs:
-            web_docs = [
-                Document(
-                    page_content=result.text[:8000],
-                    metadata={"source": result.provider, "display_name": result.provider, "type": "web_search"},
-                )
-            ]
+            err = (
+                "Canlı web araması şu anda devre dışı çünkü `TAVILY_API_KEY` ayarlanmamış. "
+                "Web araması için `.env` içine `TAVILY_API_KEY` ekleyip uygulamayı yeniden başlatmalısın."
+                if service is None
+                else "Web araması sonuç döndürmedi. Lütfen sorguyu biraz daraltıp tekrar deneyin."
+            )
+            return {**state, "documents": existing_docs, "web_search_error": err}
+
+        web_docs = _web_docs_from_result(result, query=search_query)
         step.output = f"Found content via {result.provider} ({len(result.text)} chars)."
         step.elements = [
             cl.Text(
@@ -1826,6 +2052,30 @@ async def web_search_node(state: AgentState) -> AgentState:
             )
         ]
 
+    domains = sorted({_web_domain(str((d.metadata or {}).get("url") or (d.metadata or {}).get("source") or "")) for d in web_docs})
+    domains = [d for d in domains if d]
+    dated = [str((d.metadata or {}).get("published") or "") for d in web_docs if (d.metadata or {}).get("published")]
+    _observe_node(
+        "frappe.web_search_result",
+        state,
+        inputs={"query_preview": search_query[:180]},
+        outputs={
+            "status": "success",
+            "provider": result.provider,
+            "result_count": len(web_docs),
+            "top_domains": " | ".join(domains[:8]),
+            "freshest_published": max(dated) if dated else "",
+            "latency_ms_by_stage": {"total": round((time.perf_counter() - t0) * 1000, 2)},
+        },
+        metadata={
+            "web_provider": result.provider,
+            "web_query_preview": search_query[:180],
+            "web_query_hash": _hash_text(search_query),
+            "web_result_count": len(web_docs),
+            "top_domains": " | ".join(domains[:8]),
+        },
+        tags=["frappe", "web-search", "success"],
+    )
     return {**state, "documents": existing_docs + web_docs}
 
 
@@ -2000,7 +2250,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
                 time.perf_counter() - t_search,
             )
             t_sum = time.perf_counter()
-            if is_weather_query(question) and _is_pure_weather_query(question):
+            if settings.weather_specialization_enabled and is_weather_query(question) and _is_pure_weather_query(question):
                 answer = WebResultFormatter.format_weather(question, web_result.text)
                 logger.info("Direct: weather_format [ans_len=%dch, t=%.3fs]", len(answer), time.perf_counter() - t_sum)
             else:
@@ -2127,7 +2377,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
 
     # Normal yol — araçlı ReAct agent (backend capability dependent)
     from langgraph.prebuilt import create_react_agent
-    from src.tools.search import search_web, tavily_search
+    from src.tools.search import tavily_search
     from src.tools.file_reader import read_uploaded_file
     from src.tools.calculator import calculator
     from src.tools.mcp_bridge import mcp_call
@@ -2147,7 +2397,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
         except Exception as exc:
             logger.warning("MCP araçları yüklenemedi: %s", exc)
 
-    base_tools = [tavily_search, search_web, calculator, read_uploaded_file, mcp_call]
+    base_tools = [tavily_search, calculator, read_uploaded_file, mcp_call]
     all_tools = _get_deduped_tools_cached(mcp_tools, base_tools)
 
     system_prompt = build_generator_prompt(all_tools)

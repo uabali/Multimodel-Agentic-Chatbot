@@ -170,6 +170,40 @@ async def _persist_thread_memory(thread_id: str | None, memory: ThreadMemory) ->
         logger.warning("Thread memory metadata güncellenemedi: %s", exc)
 
 
+def _thread_upload_metadata() -> dict:
+    uploads = [
+        str(item) for item in (cl.user_session.get("session_uploads") or [])
+        if str(item or "").strip()
+    ]
+    return {"session_uploads": uploads}
+
+
+async def _persist_thread_uploads(thread_id: str | None = None) -> None:
+    thread_id = thread_id or cl.user_session.get("id")
+    if not thread_id:
+        return
+    try:
+        await _get_shared_data_layer().patch_thread_metadata(thread_id, _thread_upload_metadata())
+    except Exception as exc:
+        logger.warning("Thread upload metadata güncellenemedi: %s", exc)
+
+
+def _ingest_metadata(original_name: str | None = None) -> dict:
+    return {
+        "thread_id": cl.user_session.get("id") or "",
+        "user_id": cl.user_session.get("user_id") or "",
+        "user_identifier": getattr(cl.user_session.get("user"), "identifier", "") if cl.user_session.get("user") else "",
+        "original_name": Path(original_name or "").name if original_name else "",
+        "uploaded_at": datetime_now_iso(),
+    }
+
+
+def datetime_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 @cl.data_layer
 def data_layer():
     return _get_shared_data_layer()
@@ -226,11 +260,22 @@ async def on_chat_resume(thread):
     meta = thread.get("metadata", {}) if isinstance(thread, dict) else {}
     memory = ThreadMemory.from_metadata(meta if isinstance(meta, dict) else {})
     _set_thread_memory(memory)
+    uploads = []
+    if isinstance(meta, dict):
+        uploads = [
+            str(item) for item in (meta.get("session_uploads") or [])
+            if str(item or "").strip()
+        ]
+    cl.user_session.set("session_uploads", uploads)
     if memory.rolling_summary or memory.pinned_facts:
         logger.info(
             "on_chat_resume: memory yüklendi [summary=%dch, pins=%d]",
             len(memory.rolling_summary), len(memory.pinned_facts),
         )
+    if memory.last_topic:
+        await cl.Message(content=f"💬 Kaldığımız yer: {memory.last_topic}", author="Frappe").send()
+    if uploads:
+        logger.info("on_chat_resume: upload kaynakları yüklendi [count=%d]", len(uploads))
 
 
 # ── Whisper / STT ──
@@ -465,7 +510,10 @@ async def _ingest_url(url: str, sess_dir: Path) -> dict | None:
         if not combined:
             return None
         dest.write_text(combined, encoding="utf-8")
-        return await cl.make_async(ingest_file)(dest)
+        return await cl.make_async(ingest_file)(
+            dest,
+            extra_metadata=_ingest_metadata(safe_name),
+        )
     except Exception as exc:
         logger.warning("URL ingest basarisiz (%s): %s", url, exc)
         return None
@@ -488,9 +536,11 @@ async def on_chat_start():
     session_upload_dir.mkdir(parents=True, exist_ok=True)
     cl.user_session.set("session_upload_dir", str(session_upload_dir))
 
-    # Temiz session state
-    cl.user_session.set("chat_history", [])
-    _set_thread_memory(ThreadMemory.empty())
+    # Temiz session state; resume edilmiş thread state'i varsa koru.
+    if cl.user_session.get("chat_history") is None:
+        cl.user_session.set("chat_history", [])
+    if cl.user_session.get("thread_memory") is None and cl.user_session.get("session_summary") is None:
+        _set_thread_memory(ThreadMemory.empty())
     cl.user_session.set("pending_vision_images", [])
     cl.user_session.set("last_vision_images", [])
     # Session boyunca yüklenen dosyaların listesi — follow-up RAG sorguları için
@@ -500,7 +550,7 @@ async def on_chat_start():
     cl.user_session.set("tts_enabled", tts_default)
     cl.user_session.set("tts_voice", "auto")
     cl.user_session.set("temperature", settings.chat_temperature)
-    cl.user_session.set("max_tokens", settings.chat_max_tokens)
+    cl.user_session.set("max_tokens", _clamp_max_tokens(settings.chat_max_tokens))
     cl.user_session.set("retrieval_strategy", settings.retrieval_strategy)
     cl.user_session.set("use_rerank", settings.use_rerank)
 
@@ -532,11 +582,11 @@ async def on_chat_start():
             Slider(
                 id="max_tokens",
                 label="Max Token",
-                initial=float(settings.chat_max_tokens),
+                initial=float(_clamp_max_tokens(settings.chat_max_tokens)),
                 min=256,
-                max=1536,
+                max=_max_token_ceiling(),
                 step=128,
-                description="Yanit uzunlugu limiti. MacBook local profilinde 1536 ustu onerilmez.",
+                description="Yanit uzunlugu limiti; context penceresine gore otomatik sinirlanir.",
             ),
             Select(
                 id="retrieval_strategy",
@@ -698,7 +748,7 @@ async def on_audio_end():
         # Ses modunda TTS her zaman aktif — streamer oluştur
         audio_tts_streamer = _TtsStreamer.make(enabled=True)
         _a_temp = float(cl.user_session.get("temperature", settings.chat_temperature))
-        _a_max_tok = int(cl.user_session.get("max_tokens", settings.chat_max_tokens))
+        _a_max_tok = _clamp_max_tokens(cl.user_session.get("max_tokens", settings.chat_max_tokens))
         _a_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
         _a_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
         _a_trace = _langsmith_trace_context(
@@ -814,6 +864,17 @@ _MAX_HISTORY_CHARS = 6000
 _SUMMARY_TRIGGER = 32       # Mesaj sayısı eşiği (2 × tur sayısı)
 _SUMMARY_KEEP_RECENT = 12   # Özetlemeden sonra canlı tutulan son mesaj sayısı (6 tur)
 
+
+def _max_token_ceiling() -> int:
+    return max(256, min(1536, settings.llm_context_size - settings.rag_context_safety_margin_tokens - 512))
+
+
+def _clamp_max_tokens(value: int | float | None) -> int:
+    try:
+        raw = int(value if value is not None else settings.chat_max_tokens)
+    except (TypeError, ValueError):
+        raw = settings.chat_max_tokens
+    return max(128, min(raw, _max_token_ceiling()))
 
 
 async def _summarize_and_compress_history(
@@ -1158,9 +1219,14 @@ async def on_message(message: cl.Message):
                         if transcript:
                             txt_path = dest.with_suffix(".txt")
                             txt_path.write_text(transcript, encoding="utf-8")
-                            result = await cl.make_async(ingest_file)(txt_path, display_name=f"{original_name}.txt")
+                            result = await cl.make_async(ingest_file)(
+                                txt_path,
+                                display_name=f"{original_name}.txt",
+                                extra_metadata=_ingest_metadata(original_name),
+                            )
                             ingested_filenames.append(txt_path.name)
                             _track_session_upload(txt_path.name)
+                            await _persist_thread_uploads()
                             status_lines.append(
                                 f"**{original_name}** → transcribe + indekslendi (**{result['chunk_count']}** chunk)."
                             )
@@ -1170,9 +1236,14 @@ async def on_message(message: cl.Message):
                         status_lines.append(f"**{dest.name}** → STT hatasi: {exc}")
                     continue
 
-                result = await cl.make_async(ingest_file)(dest, display_name=original_name)
+                result = await cl.make_async(ingest_file)(
+                    dest,
+                    display_name=original_name,
+                    extra_metadata=_ingest_metadata(original_name),
+                )
                 ingested_filenames.append(dest.name)
                 _track_session_upload(dest.name)
+                await _persist_thread_uploads()
                 status_lines.append(f"**{result.get('display_name', original_name)}** indekslendi — **{result['chunk_count']}** chunk.")
 
         if image_paths:
@@ -1224,6 +1295,7 @@ async def on_message(message: cl.Message):
             result = await _ingest_url(raw_url, sess_dir)
             if result:
                 _track_session_upload(result.get("file_name", ""))
+                await _persist_thread_uploads()
                 url_msg.content = f"**{raw_url}** indekslendi — **{result['chunk_count']}** chunk."
             else:
                 url_msg.content = f"URL ingest basarisiz: `{raw_url}`"
@@ -1269,8 +1341,13 @@ async def on_message(message: cl.Message):
                         if transcript:
                             txt_path = dest.with_suffix(".txt")
                             txt_path.write_text(transcript, encoding="utf-8")
-                            result = await cl.make_async(ingest_file)(txt_path, display_name=f"{original_name}.txt")
+                            result = await cl.make_async(ingest_file)(
+                                txt_path,
+                                display_name=f"{original_name}.txt",
+                                extra_metadata=_ingest_metadata(original_name),
+                            )
                             _track_session_upload(txt_path.name)
+                            await _persist_thread_uploads()
                             results_text.append(
                                 f"**{original_name}** → transcribe edildi + indekslendi "
                                 f"(**{result['chunk_count']}** chunk, {len(transcript)} karakter)."
@@ -1280,8 +1357,13 @@ async def on_message(message: cl.Message):
                     except Exception as exc:
                         results_text.append(f"**{dest.name}** → STT hatasi: {exc}")
                 else:
-                    result = await cl.make_async(ingest_file)(dest, display_name=original_name)
+                    result = await cl.make_async(ingest_file)(
+                        dest,
+                        display_name=original_name,
+                        extra_metadata=_ingest_metadata(original_name),
+                    )
                     _track_session_upload(result.get("file_name", dest.name))
+                    await _persist_thread_uploads()
                     results_text.append(f"**{result.get('display_name', original_name)}** — **{result['chunk_count']}** chunk.")
             thinking_msg.content = "\n".join(results_text) + "\n\nBelgeler hakkinda soru sorabilirsin."
             await thinking_msg.update()
@@ -1352,7 +1434,7 @@ async def on_message(message: cl.Message):
         tts_streamer = _TtsStreamer.make(cl.user_session.get("tts_enabled", False))
 
         _sess_temp = float(cl.user_session.get("temperature", settings.chat_temperature))
-        _sess_max_tok = int(cl.user_session.get("max_tokens", settings.chat_max_tokens))
+        _sess_max_tok = _clamp_max_tokens(cl.user_session.get("max_tokens", settings.chat_max_tokens))
         _allowed_strategies = {"hybrid", "similarity", "mmr", "threshold"}
         _sess_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
         if _sess_strategy not in _allowed_strategies:
@@ -1480,7 +1562,7 @@ async def on_message(message: cl.Message):
 
         # RAG kaynakları — Chainlit Text elementleri olarak ekle (açılır/kapanır)
         source_elements: list[cl.Text] = []
-        if last_route == "rag" and last_documents:
+        if last_route in {"rag", "web"} and last_documents:
             source_elements = _build_source_elements(last_documents)
 
         thinking_msg.content = answer
@@ -1505,15 +1587,18 @@ async def on_message(message: cl.Message):
         )
         chat_history.append({"role": "user", "content": question})
         chat_history.append({"role": "assistant", "content": answer})
+        thread_id = cl.user_session.get("id")
+        topic_memory = _get_thread_memory().with_last_topic(question)
 
         if len(chat_history) >= _SUMMARY_TRIGGER:
-            thread_id = cl.user_session.get("id")
             chat_history, updated_memory = await _summarize_and_compress_history(
-                chat_history, thread_id, _get_thread_memory()
+                chat_history, thread_id, topic_memory
             )
             _set_thread_memory(updated_memory)
         else:
             chat_history = _trim_chat_history(chat_history)
+            _set_thread_memory(topic_memory)
+            await _persist_thread_memory(thread_id, topic_memory)
 
         cl.user_session.set("chat_history", chat_history)
 
@@ -1555,7 +1640,7 @@ async def on_settings_update(settings_dict: dict):
     tts_was = cl.user_session.get("tts_enabled", False)
     tts_voice = settings_dict.get("tts_voice", "auto")
     temp = float(settings_dict.get("temperature", settings.chat_temperature))
-    max_tok = int(settings_dict.get("max_tokens", settings.chat_max_tokens))
+    max_tok = _clamp_max_tokens(settings_dict.get("max_tokens", settings.chat_max_tokens))
     strategy = settings_dict.get("retrieval_strategy", settings.retrieval_strategy)
     rerank = bool(settings_dict.get("use_rerank", settings.use_rerank))
 
@@ -1597,15 +1682,11 @@ async def on_chat_end():
     n_turns = len(chat_history) // 2
 
     if session_uploads:
-        try:
-            from src.rag.vectorstore import get_hybrid_store
-            await asyncio.to_thread(get_hybrid_store().delete_by_source, session_uploads)
-            logger.info(
-                "[%s] session_cleanup: qdrant [files=%d, %s]",
-                sid, len(session_uploads), session_uploads,
-            )
-        except Exception as exc:
-            logger.warning("[%s] session_cleanup: qdrant_error [%s]", sid, exc)
+        await _persist_thread_uploads(cl.user_session.get("id"))
+        logger.info(
+            "[%s] session_cleanup: qdrant retained for thread resume [files=%d]",
+            sid, len(session_uploads),
+        )
 
     session_dir = cl.user_session.get("session_upload_dir")
     if session_dir:

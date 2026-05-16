@@ -172,17 +172,18 @@ _TURKISH_RE = [re.compile(p, re.IGNORECASE) for p in _TURKISH_PATTERNS]
 
 
 def keyword_route(question: str, *, has_uploads: bool = False) -> str | None:
-    """RAG veya direct rotası için keyword eşleşmesi dener.
+    """RAG, web veya direct rotası için keyword eşleşmesi dener.
 
     Öncelik sırası:
     1. _DOCUMENT_PRONOUN_PATTERNS  → rag     (bu/şu cv/dosya/belge — kesin belge referansı)
-    2. _GENERAL_KNOWLEDGE_PATTERNS → direct  (belgeden bağımsız genel sorular)
+    2. _WEB_PATTERNS               → web     (gerçek zamanlı / güncel veri)
+    3. _GENERAL_KNOWLEDGE_PATTERNS → direct  (belgeden bağımsız genel sorular)
                                             has_uploads=True iken atlanır: kullanıcı
                                             belge yüklemişse "X nedir?" tarzı
                                             soru büyük ihtimalle belge içeriğiyle
                                             ilgilidir — direct'e kaçırma.
-    3. _RAG_PATTERNS               → rag     (belgeye özgü sorgular)
-    4. _DIRECT_PATTERNS            → direct  (sohbet, matematik, araç komutları, hava/haber)
+    4. _RAG_PATTERNS               → rag     (belgeye özgü sorgular)
+    5. _DIRECT_PATTERNS            → direct  (sohbet, matematik, araç komutları)
 
     Returns:
         "rag", "direct", ya da eşleşme yoksa None (LLM fallback tetiklenir).
@@ -193,6 +194,9 @@ def keyword_route(question: str, *, has_uploads: bool = False) -> str | None:
     for rx in _DOCUMENT_PRONOUN_RE:
         if rx.search(q):
             return "rag"
+    for rx in _WEB_RE:
+        if rx.search(q):
+            return "web"
     if not has_uploads:
         for rx in _GENERAL_KNOWLEDGE_RE:
             if rx.search(q):

@@ -9,14 +9,85 @@ from __future__ import annotations
 
 import logging
 import time
+from functools import lru_cache
 from typing import Any
+from urllib.parse import urljoin
 
+import httpx
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+import tiktoken
 
 from src.config import settings
 
 logger = logging.getLogger(__name__)
+_runtime_context_checked = False
+
+
+@lru_cache(maxsize=1)
+def _token_encoding():
+    return tiktoken.get_encoding("cl100k_base")
+
+
+def count_tokens(text: str) -> int:
+    """Approximate token count with cl100k_base.
+
+    The local Gemma backend uses its own SentencePiece tokenizer, so this is not
+    exact. It is still a much better dependency-light estimate for Turkish text
+    than character heuristics such as len(text) / 4, which systematically
+    over- or under-budget mixed Turkish/English RAG prompts.
+    """
+    if not text:
+        return 0
+    return len(_token_encoding().encode(str(text)))
+
+
+def count_message_tokens(messages: list) -> int:
+    """Approximate token count for LangChain-style messages via .content."""
+    total = 0
+    for message in messages or []:
+        content = getattr(message, "content", "")
+        if isinstance(content, list):
+            content = " ".join(str(item.get("text") or item) if isinstance(item, dict) else str(item) for item in content)
+        total += count_tokens(str(content or ""))
+    return total
+
+
+def negotiate_runtime_context_size(timeout_s: float = 1.0) -> int:
+    """Best-effort llama.cpp /props n_ctx negotiation.
+
+    If the server reports a smaller context window than configuration, the
+    configured runtime value is reduced to the smaller safe value.
+    """
+    global _runtime_context_checked
+    if _runtime_context_checked:
+        return int(settings.llm_context_size)
+    _runtime_context_checked = True
+
+    base = settings.llm_server_url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    props_url = urljoin(base + "/", "props")
+    try:
+        resp = httpx.get(props_url, timeout=timeout_s)
+        resp.raise_for_status()
+        data = resp.json()
+        reported = data.get("default_generation_settings", {}).get("n_ctx") or data.get("n_ctx")
+        if reported is None:
+            return int(settings.llm_context_size)
+        reported_i = int(reported)
+        configured = int(settings.llm_context_size)
+        if reported_i != configured:
+            effective = min(reported_i, configured)
+            logger.warning(
+                "LLM context mismatch: configured=%d, runtime=%d, effective=%d",
+                configured, reported_i, effective,
+            )
+            settings.llm_context_size = effective
+        return int(settings.llm_context_size)
+    except Exception as exc:
+        logger.debug("LLM /props context negotiation skipped: %s", exc)
+        return int(settings.llm_context_size)
 
 
 def _make_openai_compat_client(
@@ -77,6 +148,7 @@ class DualLLM:
     """
 
     def __init__(self) -> None:
+        negotiate_runtime_context_size()
         self._chat: ChatOpenAI | None = None
         self._rag: ChatOpenAI | None = None
         self._agent: ChatOpenAI | None = None

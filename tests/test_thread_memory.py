@@ -117,6 +117,14 @@ def test_semantic_cache_context_changes_when_memory_changes():
     assert ctx_a != ctx_b
 
 
+def test_thread_memory_last_topic_round_trip():
+    memory = ThreadMemory.empty().with_summary("Özet").with_last_topic("Token-aware RAG bağlam bütçesi")
+    restored = ThreadMemory.from_metadata({"memory": memory.to_metadata()})
+
+    assert restored.last_topic == "Token-aware RAG bağlam bütçesi"
+    assert "Son konu" in __import__("src.memory.thread_memory", fromlist=["format_memory_context"]).format_memory_context(restored)
+
+
 @pytest.mark.anyio
 async def test_memory_write_commands_skip_semantic_cache(monkeypatch):
     from src.agent import graph

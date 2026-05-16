@@ -18,6 +18,8 @@ from typing import Any, Mapping
 MEMORY_VERSION = 1
 MAX_PINNED_FACTS = 20
 MAX_PIN_CHARS = 400
+MAX_SUMMARY_TOKENS = 1000
+MAX_TOPIC_CHARS = 200
 
 _PIN_PATTERNS = [
     re.compile(r"^\s*(?:bunu\s+hat[ıi]rla|not\s+al|remember\s+this)\s*[:：-]\s*(.+)\s*$", re.I | re.S),
@@ -40,11 +42,27 @@ def _clean_text(text: str, max_chars: int) -> str:
     return cleaned
 
 
+def _clean_summary(text: str) -> str:
+    cleaned = _clean_text(text, MAX_SUMMARY_TOKENS * 8)
+    try:
+        from src.rag.llm import count_tokens
+        while count_tokens(cleaned) > MAX_SUMMARY_TOKENS and len(cleaned) > 100:
+            cleaned = cleaned[: int(len(cleaned) * 0.9)].rstrip()
+        if count_tokens(cleaned) > MAX_SUMMARY_TOKENS:
+            cleaned = cleaned[:100].rstrip()
+        if cleaned and cleaned != text.strip() and not cleaned.endswith("..."):
+            cleaned += "..."
+    except Exception:
+        cleaned = _clean_text(cleaned, 4000)
+    return cleaned
+
+
 @dataclass(slots=True)
 class ThreadMemory:
     version: int = MEMORY_VERSION
     rolling_summary: str = ""
     pinned_facts: list[str] = field(default_factory=list)
+    last_topic: str = ""
     updated_at: str = ""
 
     @classmethod
@@ -65,12 +83,13 @@ class ThreadMemory:
             ][:MAX_PINNED_FACTS]
             return cls(
                 version=int(raw_memory.get("version") or MEMORY_VERSION),
-                rolling_summary=_clean_text(str(raw_memory.get("rolling_summary") or ""), 4000),
+                rolling_summary=_clean_summary(str(raw_memory.get("rolling_summary") or "")),
                 pinned_facts=pinned,
+                last_topic=_clean_text(str(raw_memory.get("last_topic") or ""), MAX_TOPIC_CHARS),
                 updated_at=str(raw_memory.get("updated_at") or _now_iso()),
             )
 
-        legacy_summary = _clean_text(str(metadata.get("summary") or ""), 4000)
+        legacy_summary = _clean_summary(str(metadata.get("summary") or ""))
         if legacy_summary:
             return cls(rolling_summary=legacy_summary, updated_at=_now_iso())
         return cls.empty()
@@ -80,14 +99,16 @@ class ThreadMemory:
             "version": self.version,
             "rolling_summary": self.rolling_summary,
             "pinned_facts": list(self.pinned_facts),
+            "last_topic": self.last_topic,
             "updated_at": self.updated_at or _now_iso(),
         }
 
     def with_summary(self, summary: str) -> "ThreadMemory":
         return ThreadMemory(
             version=self.version,
-            rolling_summary=_clean_text(summary, 4000),
+            rolling_summary=_clean_summary(summary),
             pinned_facts=list(self.pinned_facts),
+            last_topic=self.last_topic,
             updated_at=_now_iso(),
         )
 
@@ -103,6 +124,16 @@ class ThreadMemory:
             version=self.version,
             rolling_summary=self.rolling_summary,
             pinned_facts=updated,
+            last_topic=self.last_topic,
+            updated_at=_now_iso(),
+        )
+
+    def with_last_topic(self, topic: str) -> "ThreadMemory":
+        return ThreadMemory(
+            version=self.version,
+            rolling_summary=self.rolling_summary,
+            pinned_facts=list(self.pinned_facts),
+            last_topic=_clean_text(topic, MAX_TOPIC_CHARS),
             updated_at=_now_iso(),
         )
 
@@ -122,6 +153,7 @@ def memory_hash(memory: ThreadMemory | Mapping[str, Any] | None) -> str:
         {
             "summary": memory.rolling_summary,
             "pins": memory.pinned_facts,
+            "last_topic": memory.last_topic,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -152,4 +184,6 @@ def format_memory_context(memory: ThreadMemory | None) -> str:
         pins = "\n".join(f"- {fact}" for fact in memory.pinned_facts if fact.strip())
         if pins:
             parts.append("Bu thread için kalıcı notlar:\n" + pins)
+    if memory.last_topic.strip():
+        parts.append("Son konu:\n" + memory.last_topic.strip())
     return "\n\n".join(parts).strip()
