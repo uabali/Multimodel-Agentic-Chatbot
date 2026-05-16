@@ -114,6 +114,15 @@ _DIRECT_PATTERNS: list[str] = [
     r"(toplant[ıi] ayarla|schedule meeting|takvim|calendar|email g[öo]nder|send email)",
 ]
 
+_DIRECT_SUPPORT_PATTERNS: list[str] = [
+    r"\b(devam\s+et|devam[ıi]n[ıi]\s+(yaz|getir)|kald[ıi][ğg][ıi]n\s+yerden)\b",
+    r"\b(t[üu]m[üu]n[üu]\s+yaz|tamam[ıi]n[ıi]\s+yaz|tekrar\s+yaz|yeniden\s+yaz)\b",
+    r"\b(yar[ıi]m\s+kald[ıi]|cevab[ıi]n?\s+kesildi|cevaplar[ıi]n?\s+kesiliyor|tak\s+diye\s+kesiliyor)\b",
+    r"\b(neden\s+cevap|neden\s+yar[ıi]m|why\s+(did|does)\s+.*(cut|stop))\b",
+    r"\b(token|maksimum\s+token|max\s+token|answer\s+length|yan[ıi]t\s+uzunlu[ğg]u)\b",
+    r"\b(RAG\s+yetene[ğg]in|rag\s+yetene[ğg]in|sen\s+t[üu]m\s+sorular[ıi])\b",
+]
+
 _WEB_PATTERNS: list[str] = [
     # Hava durumu — yazım varyasyonları, ek biçimleri ve tarihi sorgular dahil
     # ("havadurumu", "havadrumu", "hava nasıldı", "hava nasıl", "weather")
@@ -163,6 +172,7 @@ _DOCUMENT_PRONOUN_RE = [re.compile(p, re.IGNORECASE | re.UNICODE) for p in _DOCU
 _GENERAL_KNOWLEDGE_RE = [re.compile(p, re.IGNORECASE) for p in _GENERAL_KNOWLEDGE_PATTERNS]
 _RAG_RE = [re.compile(p, re.IGNORECASE) for p in _RAG_PATTERNS]
 _DIRECT_RE = [re.compile(p, re.IGNORECASE) for p in _DIRECT_PATTERNS]
+_DIRECT_SUPPORT_RE = [re.compile(p, re.IGNORECASE | re.UNICODE) for p in _DIRECT_SUPPORT_PATTERNS]
 _WEB_RE = [re.compile(p, re.IGNORECASE) for p in _WEB_PATTERNS]
 _MCP_RE = [re.compile(p, re.IGNORECASE) for p in _MCP_PATTERNS]
 _TURKISH_RE = [re.compile(p, re.IGNORECASE) for p in _TURKISH_PATTERNS]
@@ -194,9 +204,10 @@ def keyword_route(question: str, *, has_uploads: bool = False) -> str | None:
     for rx in _DOCUMENT_PRONOUN_RE:
         if rx.search(q):
             return "rag"
-    for rx in _WEB_RE:
-        if rx.search(q):
-            return "web"
+    if is_direct_support_query(q):
+        return "direct"
+    if _has_web_intent(q):
+        return "web"
     if not has_uploads:
         for rx in _GENERAL_KNOWLEDGE_RE:
             if rx.search(q):
@@ -212,8 +223,26 @@ def keyword_route(question: str, *, has_uploads: bool = False) -> str | None:
 
 def is_web_query(question: str) -> bool:
     """Sorunun gerçek zamanlı web araması gerektirip gerektirmediğini döner."""
+    return _has_web_intent(question)
+
+
+def is_direct_support_query(question: str) -> bool:
+    """Continuation, truncation complaints and assistant-meta questions stay direct."""
     q = question.strip()
-    return any(rx.search(q) for rx in _WEB_RE)
+    return any(rx.search(q) for rx in _DIRECT_SUPPORT_RE)
+
+
+def _first_sentence(text: str) -> str:
+    first = re.split(r"[\n.!?。！？]", text.strip(), maxsplit=1)[0]
+    return first.strip() or text.strip()
+
+
+def _has_web_intent(question: str) -> bool:
+    q = question.strip()
+    if not q or is_direct_support_query(q):
+        return False
+    target = _first_sentence(q) if len(q) > 240 else q
+    return any(rx.search(target) for rx in _WEB_RE)
 
 
 def needs_mcp_tools(question: str) -> bool:

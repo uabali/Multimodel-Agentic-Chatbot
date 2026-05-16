@@ -1,13 +1,30 @@
 from langchain_core.messages import AIMessage
 
-from src.agent.nodes import _build_contextual_web_query, _web_docs_from_result, append_used_sources
-from src.agent.routing import keyword_route
+from src.agent.nodes import _build_contextual_web_query, _compact_web_query, _web_docs_from_result, _web_fallback_answer, append_used_sources
+from src.agent.routing import keyword_route, is_web_query
 from src.agent.web_search import WebResultFormatter, WebSearchResult
 from src.agent.web_search import WebSearchService
 
 
 def test_realtime_query_routes_to_web():
     assert keyword_route("bugünkü Tesla hisse fiyatı ne kadar?") == "web"
+
+
+def test_answer_quality_followups_do_not_route_to_web():
+    assert keyword_route("neden cevapların tak diye kesiliyor?") == "direct"
+    assert keyword_route("devam et eden durdun") == "direct"
+    assert keyword_route("RAG yeteneğin var mı?") == "direct"
+    pasted = (
+        "Bu çok teknik ve güzel bir soru. Cevabı hem evet hem de hayır şeklinde verilebilir. "
+        "Güncel sistemlerde RAG farklı şekillerde uygulanır. neden cevapların kesiliyor?"
+    )
+    assert keyword_route(pasted) == "direct"
+    assert not is_web_query(pasted)
+
+
+def test_core_live_queries_still_route_to_web():
+    assert keyword_route("tamam bana güncel olarak euro fiyatını araştır") == "web"
+    assert keyword_route("bugün dolar kuru ne kadar?") == "web"
 
 
 def test_contextual_web_query_uses_previous_product_for_price_followup():
@@ -29,6 +46,24 @@ def test_contextual_web_query_keeps_explicit_entity():
     assert query.startswith("bugünkü Tesla hisse fiyatı ne kadar?")
     assert "official quote" in query
     assert "Yahoo Finance" in query
+
+
+def test_compact_web_query_stays_under_tavily_limit():
+    long_query = "tamam bana güncel olarak euro fiyatını araştır " + ("önceki cevap metni " * 80)
+
+    query = _compact_web_query(long_query)
+
+    assert len(query) <= 360
+    assert "EURO" in query.upper()
+
+
+def test_contextual_web_query_compacts_long_price_followup():
+    long_query = "şuanki güncel euro fiyatı ne kadar? " + ("önceki konuşma " * 80)
+
+    query = _build_contextual_web_query(long_query, [])
+
+    assert len(query) <= 360
+    assert "EURO" in query.upper()
 
 
 def test_web_sources_are_numbered_and_dated():
@@ -109,3 +144,20 @@ def test_tavily_quality_gate_marks_tiny_unknown_results_low_quality():
         "published_date": "2026-05-16",
         "url": "https://example.com",
     })
+
+
+def test_web_structured_fallback_uses_sources_not_raw_document_label():
+    from langchain_core.documents import Document
+
+    docs = [
+        Document(
+            page_content="Title: Euro kuru\nPublished: 2026-05-16\nURL: https://example.com/eur\nSnippet: Euro 52.87 TL seviyesinde.",
+            metadata={"type": "web_search", "display_name": "Euro kuru", "url": "https://example.com/eur", "published": "2026-05-16"},
+        )
+    ]
+
+    answer = _web_fallback_answer("güncel euro fiyatı", docs)
+
+    assert "Web kaynaklarından" in answer
+    assert "Belgeden" not in answer
+    assert "https://example.com/eur" in answer

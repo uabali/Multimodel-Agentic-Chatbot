@@ -53,6 +53,8 @@ from src.memory.thread_memory import (
 )
 from src.mcp.mcp_client import get_mcp_tools, is_mcp_tools_cache_warm
 from src.rag.ingest import ingest_file
+from src.rag.llm import count_tokens
+from src.agent.routing import is_direct_support_query, is_web_query
 from src.persistence.sqlite_data_layer import SQLiteDataLayer
 from src.api.router import router as _api_router
 from src.tts import synthesize as tts_synthesize
@@ -550,7 +552,10 @@ async def on_chat_start():
     cl.user_session.set("tts_enabled", tts_default)
     cl.user_session.set("tts_voice", "auto")
     cl.user_session.set("temperature", settings.chat_temperature)
-    cl.user_session.set("max_tokens", _clamp_max_tokens(settings.chat_max_tokens))
+    cl.user_session.set("max_tokens", _max_token_ceiling())
+    cl.user_session.set("last_answer_was_truncated", False)
+    cl.user_session.set("last_answer_token_count", 0)
+    cl.user_session.set("last_answer_token_budget", 0)
     cl.user_session.set("retrieval_strategy", settings.retrieval_strategy)
     cl.user_session.set("use_rerank", settings.use_rerank)
 
@@ -581,12 +586,12 @@ async def on_chat_start():
             ),
             Slider(
                 id="max_tokens",
-                label="Max Token",
-                initial=float(_clamp_max_tokens(settings.chat_max_tokens)),
+                label="Answer Length Limit",
+                initial=float(_max_token_ceiling()),
                 min=256,
                 max=_max_token_ceiling(),
                 step=128,
-                description="Yanit uzunlugu limiti; context penceresine gore otomatik sinirlanir.",
+                description="Ust sinir. Her tur icin soru tipine gore daha dusuk/daha yuksek dinamik kullanilir.",
             ),
             Select(
                 id="retrieval_strategy",
@@ -748,7 +753,11 @@ async def on_audio_end():
         # Ses modunda TTS her zaman aktif — streamer oluştur
         audio_tts_streamer = _TtsStreamer.make(enabled=True)
         _a_temp = float(cl.user_session.get("temperature", settings.chat_temperature))
-        _a_max_tok = _clamp_max_tokens(cl.user_session.get("max_tokens", settings.chat_max_tokens))
+        _a_max_tok = _dynamic_answer_token_budget(
+            text,
+            cap=cl.user_session.get("max_tokens", _max_token_ceiling()),
+            input_type=audio_input_type,
+        )
         _a_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
         _a_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
         _a_trace = _langsmith_trace_context(
@@ -814,6 +823,9 @@ async def on_audio_end():
 
         # Streaming sırasında başlatılan TTS'i tamamla ve gönder
         await audio_tts_streamer.send_to(msg)
+        cl.user_session.set("last_answer_token_count", count_tokens(answer))
+        cl.user_session.set("last_answer_token_budget", _a_max_tok)
+        cl.user_session.set("last_answer_was_truncated", _looks_truncated(answer, _a_max_tok))
 
         chat_history.append({"role": "user", "content": text})
         chat_history.append({"role": "assistant", "content": answer})
@@ -875,6 +887,44 @@ def _clamp_max_tokens(value: int | float | None) -> int:
     except (TypeError, ValueError):
         raw = settings.chat_max_tokens
     return max(128, min(raw, _max_token_ceiling()))
+
+
+_SHORT_ANSWER_RE = re.compile(r"\b(k[ıi]sa|özet|ozet|tek\s+c[üu]mle|brief|short|summary)\b", re.IGNORECASE)
+_LONG_ANSWER_RE = re.compile(r"\b(detayl[ıi]|ayr[ıi]nt[ıi]l[ıi]|uzun|kapsaml[ıi]|devam\s+et|tamam[ıi]n[ıi]|t[üu]m[üu]n[üu]|detailed|continue)\b", re.IGNORECASE)
+_SIMPLE_MATH_RE = re.compile(r"^[\d\s\+\-\*\/\(\)\^.,]+$|(\byar[ıi]s[ıi]\b|\bkat[ıi]\b|\bhesapla\b|\bcalculate\b)", re.IGNORECASE)
+
+
+def _dynamic_answer_token_budget(question: str, *, cap: int | None = None, input_type: str = "text") -> int:
+    """Per-turn output budget. The settings slider is treated as a maximum cap."""
+    q = (question or "").strip()
+    hard_cap = _clamp_max_tokens(cap if cap is not None else _max_token_ceiling())
+    if input_type == "image":
+        desired = 1024
+    elif _SIMPLE_MATH_RE.search(q):
+        desired = 384
+    elif is_web_query(q):
+        desired = 1024
+    elif is_direct_support_query(q):
+        desired = 1280
+    else:
+        desired = 1024
+
+    if _SHORT_ANSWER_RE.search(q):
+        desired = min(desired, 512)
+    if _LONG_ANSWER_RE.search(q):
+        desired = max(desired, 1280)
+    if len(q) > 300:
+        desired = max(desired, 1152)
+    return max(128, min(desired, hard_cap, _max_token_ceiling()))
+
+
+def _looks_truncated(answer: str, budget: int) -> bool:
+    if not answer.strip() or budget <= 0:
+        return False
+    token_count = count_tokens(answer)
+    if token_count < int(budget * 0.85):
+        return False
+    return not re.search(r"([.!?…]|```)\s*$", answer.strip())
 
 
 async def _summarize_and_compress_history(
@@ -1434,7 +1484,11 @@ async def on_message(message: cl.Message):
         tts_streamer = _TtsStreamer.make(cl.user_session.get("tts_enabled", False))
 
         _sess_temp = float(cl.user_session.get("temperature", settings.chat_temperature))
-        _sess_max_tok = _clamp_max_tokens(cl.user_session.get("max_tokens", settings.chat_max_tokens))
+        _sess_max_tok = _dynamic_answer_token_budget(
+            question,
+            cap=cl.user_session.get("max_tokens", _max_token_ceiling()),
+            input_type=agent_input_type,
+        )
         _allowed_strategies = {"hybrid", "similarity", "mmr", "threshold"}
         _sess_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
         if _sess_strategy not in _allowed_strategies:
@@ -1585,6 +1639,10 @@ async def on_message(message: cl.Message):
             "[%s] ← msg [route=%s, ans_len=%dch, total_t=%.3fs]",
             sid, last_route or "?", len(answer), _time.perf_counter() - _t0,
         )
+        answer_tokens = count_tokens(answer)
+        cl.user_session.set("last_answer_token_count", answer_tokens)
+        cl.user_session.set("last_answer_token_budget", _sess_max_tok)
+        cl.user_session.set("last_answer_was_truncated", _looks_truncated(answer, _sess_max_tok))
         chat_history.append({"role": "user", "content": question})
         chat_history.append({"role": "assistant", "content": answer})
         thread_id = cl.user_session.get("id")
@@ -1656,7 +1714,7 @@ async def on_settings_update(settings_dict: dict):
         lines.append("🔊 Sesli yanıt **aktif**" if tts_now else "🔇 Sesli yanıt **kapalı**")
     if tts_now and tts_voice != "auto":
         lines.append(f"🎤 TTS sesi: **{tts_voice}**")
-    lines.append(f"🌡️ Sıcaklık: **{temp}** · Max token: **{max_tok}**")
+    lines.append(f"🌡️ Sıcaklık: **{temp}** · Yanıt üst sınırı: **{max_tok} token**")
     lines.append(f"🔍 Strateji: **{strategy}** · Reranker: **{'açık' if rerank else 'kapalı'}**")
     await cl.Message(content="\n".join(lines)).send()
 

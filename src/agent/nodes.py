@@ -47,6 +47,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from src.agent.state import AgentState
 from src.agent.routing import (
     keyword_route,
+    is_direct_support_query,
     is_turkish_query,
     is_web_query,
     needs_mcp_tools,
@@ -188,10 +189,24 @@ def _get_rag_llm(temperature: float = 0.0, max_tokens: int | None = None):
     return _rag_llm_cache[key]
 
 
-def _get_chat_llm():
+_chat_llm_cache: dict[tuple, object] = {}
+
+
+def _get_chat_llm(temperature: float | None = None, max_tokens: int | None = None):
     """Basit sohbet için araçsız, küçük prompt'lu LLM."""
-    from src.rag.llm import get_chat_llm
-    return get_chat_llm()
+    if temperature is None and max_tokens is None:
+        from src.rag.llm import get_chat_llm
+        return get_chat_llm()
+    key = (temperature if temperature is not None else settings.chat_temperature, max_tokens or settings.chat_max_tokens)
+    if key not in _chat_llm_cache:
+        if len(_chat_llm_cache) >= _RAG_LLM_CACHE_MAXSIZE:
+            _chat_llm_cache.pop(next(iter(_chat_llm_cache)))
+        from src.rag.llm import create_vllm_llm
+        _chat_llm_cache[key] = create_vllm_llm(
+            temperature=float(key[0]),
+            max_tokens=int(key[1]),
+        )
+    return _chat_llm_cache[key]
 
 
 def reset_nodes_llm_cache() -> None:
@@ -199,6 +214,7 @@ def reset_nodes_llm_cache() -> None:
     global _router_llm_cache
     _router_llm_cache = None
     _rag_llm_cache.clear()
+    _chat_llm_cache.clear()
 
 
 def _get_agent_llm():
@@ -1899,6 +1915,11 @@ async def generator_node(state: AgentState) -> AgentState:
             logger.warning("Generator: micro_retry failed: %s", exc)
             generation = ""
 
+    if not generation.strip() and any((getattr(d, "metadata", {}) or {}).get("type") == "web_search" for d in documents):
+        generation = _web_fallback_answer(answer_question, documents)
+        retry_summary["fallback_context_answer_used"] = True
+        retry_summary["retry_path"] = "web_structured_fallback"
+
     if not generation.strip() and (documents or vision_context):
         generation = _fallback_context_answer(answer_question, documents, vision_context)
         retry_summary["fallback_context_answer_used"] = True
@@ -2116,6 +2137,11 @@ _PRODUCT_SUBJECT_PATTERNS = [
     ),
     re.compile(r"\b(TESLA|TSLA|APPLE|AAPL|NVIDIA|NVDA|MICROSOFT|MSFT)\b", re.IGNORECASE),
 ]
+_WEB_QUERY_MAX_CHARS = 360
+_CURRENCY_ENTITY_RE = re.compile(
+    r"\b(euro|eur|dolar|dollar|usd|try|tl|sterlin|gbp|alt[ıi]n|gram|bitcoin|btc|ethereum|eth)\b",
+    re.IGNORECASE | re.UNICODE,
+)
 
 
 def _message_text(message: object) -> str:
@@ -2154,25 +2180,62 @@ def _build_contextual_web_query(question: str, prior_messages: list) -> str:
     normalized = normalize_web_query(question)
     q = question.strip()
     if not _FOLLOWUP_PRICE_RE.search(q):
-        return normalized
+        return _compact_web_query(normalized)
     today = datetime.date.today().isoformat()
     q_lower = q.lower()
     if _EXPLICIT_WEB_ENTITY_RE.search(q):
         if re.search(r"\b(hisse|stock|borsa)\b", q_lower):
-            return f"{normalized} {today} official quote Nasdaq Yahoo Finance MarketWatch"
+            return _compact_web_query(f"{normalized} {today} official quote Nasdaq Yahoo Finance MarketWatch")
         if re.search(r"\b(fiyat|price)\b", q_lower) and re.search(r"\b(iphone|telefon|phone|apple|samsung|xiaomi)\b", q_lower):
-            return f"{normalized} Türkiye {today} resmi satıcı fiyat karşılaştırma"
-        return normalized
+            return _compact_web_query(f"{normalized} Türkiye {today} resmi satıcı fiyat karşılaştırma")
+        return _compact_web_query(normalized)
 
     subject = _extract_web_subject_from_history(prior_messages)
     if not subject:
-        return normalized
+        return _compact_web_query(normalized)
 
     if re.search(r"\b(hisse|stock|borsa)\b", q_lower):
-        return f"{subject} stock price today {today} official quote market"
+        return _compact_web_query(f"{subject} stock price today {today} official quote market")
     if re.search(r"\b(iphone|apple|samsung|xiaomi|telefon|phone)\b", subject, re.IGNORECASE):
-        return f"{subject} güncel fiyat Türkiye {today} resmi satıcı teknoloji mağazaları"
-    return f"{subject} {normalized} {today}"
+        return _compact_web_query(f"{subject} güncel fiyat Türkiye {today} resmi satıcı teknoloji mağazaları")
+    return _compact_web_query(f"{subject} {normalized} {today}")
+
+
+def _compact_web_query(query: str, *, max_chars: int = _WEB_QUERY_MAX_CHARS) -> str:
+    """Keep Tavily queries below its hard limit and strip pasted conversation noise."""
+    q = re.sub(r"\s+", " ", (query or "").strip())
+    if len(q) <= max_chars:
+        return q
+
+    first = re.split(r"[.!?\n]", q, maxsplit=1)[0].strip()
+    entities = " ".join(dict.fromkeys(m.group(0).upper() for m in _CURRENCY_ENTITY_RE.finditer(q)))
+    today = datetime.date.today().isoformat()
+    if entities and re.search(r"\b(fiyat|price|kur|exchange|g[üu]ncel|today|bug[üu]n)\b", q, re.IGNORECASE):
+        compact = f"{entities} current exchange rate price {today}"
+        return compact[:max_chars].rstrip()
+    if len(first) >= 20:
+        return first[:max_chars].rstrip()
+    return q[:max_chars].rstrip()
+
+
+def _web_fallback_answer(question: str, documents: list[Document]) -> str:
+    web_docs = [d for d in documents if (getattr(d, "metadata", {}) or {}).get("type") == "web_search"]
+    if not web_docs:
+        return ""
+    lines: list[str] = []
+    header = "Web kaynaklarından bulunanlar:" if is_turkish_query(question) else "Found from web sources:"
+    lines.append(header)
+    for idx, doc in enumerate(web_docs[:5], 1):
+        meta = getattr(doc, "metadata", {}) or {}
+        title = meta.get("display_name") or meta.get("title") or meta.get("source") or f"Kaynak {idx}"
+        url = meta.get("url") or meta.get("source") or ""
+        published = f" ({meta.get('published')})" if meta.get("published") else ""
+        snippet = re.sub(r"\s+", " ", (doc.page_content or "").strip())
+        snippet = re.sub(r"^(Title|Published|URL|Snippet):\s*", "", snippet)
+        lines.append(f"- [Kaynak {idx}] {title}{published}: {snippet[:220]}".rstrip())
+        if url:
+            lines.append(f"  {url}")
+    return "\n".join(lines)
 
 
 def _is_pure_weather_query(question: str) -> bool:
@@ -2260,6 +2323,8 @@ async def direct_response_node(state: AgentState) -> AgentState:
                     direct_history,
                     search_query=search_query,
                 )
+                if not answer.strip():
+                    answer = _web_fallback_answer(question, _web_docs_from_result(web_result, query=search_query))
                 logger.info(
                     "Direct: web_summarize [ans_len=%dch, llm_t=%.3fs, total_t=%.3fs]",
                     len(answer), time.perf_counter() - t_sum, time.perf_counter() - t0,
@@ -2321,7 +2386,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
             "Kullanıcının dilinde yanıt ver. Gereken ara adımları kısa göster.\n"
             "Sonucu net biçimde yaz. Görsel, web veya belge bağlamı yoksa bunlardan bahsetme."
         )
-        llm = _get_chat_llm()
+        llm = _get_chat_llm(max_tokens=int(state.get("max_tokens") or settings.chat_max_tokens))
         t_math = time.perf_counter()
         response = await llm.ainvoke([
             SystemMessage(content=system_prompt),
@@ -2357,7 +2422,12 @@ async def direct_response_node(state: AgentState) -> AgentState:
             "Kısa ama samimi ol. Selamlamalara sıcak ve doğal yanıt ver (1-2 cümle).\n"
             "Soruyu başta tekrar etme; emoji kullanma."
         )
-        llm = _get_chat_llm()
+        if is_direct_support_query(question):
+            system_prompt += (
+                "\nKullanıcı devam etmeni, yarım kalan cevabı tamamlamanı veya cevap kesilmesini açıklamanı "
+                "istiyorsa web arama yapmadan son asistan cevabından devam et ya da teknik nedeni kısa açıkla."
+            )
+        llm = _get_chat_llm(max_tokens=int(state.get("max_tokens") or settings.chat_max_tokens))
         messages_to_send = [SystemMessage(content=system_prompt)]
         messages_to_send.extend(direct_history)
         messages_to_send.append(HumanMessage(content=question))
