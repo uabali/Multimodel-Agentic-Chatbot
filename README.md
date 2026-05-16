@@ -1,125 +1,140 @@
-# FRAPPE — Multimodal Agentic RAG Pipeline
+# FRAPPE — Multimodal Agentic RAG Chatbot
 
-Fully local, GPU-accelerated conversational AI system built as a graduation project. Combines **Corrective RAG (CRAG)**, **multimodal vision**, **ReAct tool-calling**, and **real-time web search** in a single LangGraph pipeline served through a Chainlit web UI.
+FRAPPE is a local-first multimodal RAG chatbot built with Chainlit, LangGraph,
+Qdrant, BGE-M3 embeddings, a BGE reranker, llama.cpp, SQLite persistence, and
+Tavily web search.
 
+The project was developed as a graduation thesis prototype. Its main goal is to
+answer Turkish-heavy document questions with grounded citations, while still
+supporting direct chat, image input, voice input, web search, and session resume.
+
+## Architecture
+
+```text
+Chainlit UI
+  ├─ text / image / audio input
+  ├─ streaming answers
+  ├─ Web Search steps
+  └─ side-panel source elements
+
+LangGraph agent
+  ├─ router
+  ├─ rewriter
+  ├─ retriever
+  ├─ grader
+  ├─ generator
+  ├─ web_search
+  ├─ direct_response
+  ├─ vision
+  ├─ vision_rag
+  └─ vision_search
+
+Storage and models
+  ├─ Qdrant: dense + sparse hybrid retrieval
+  ├─ SQLite: Chainlit thread data
+  ├─ SQLite: LangGraph checkpoints at data/checkpoint.db
+  ├─ llama.cpp: OpenAI-compatible local LLM endpoint
+  └─ Tavily: live web search provider
 ```
-┌─────────────────────────────┐
-│    Chainlit UI  (port 7860) │
-│  Text · Image · Voice       │
-└──────────────┬──────────────┘
-               │
-┌──────────────▼──────────────┐
-│     LangGraph StateGraph    │
-│                             │
-│  Router → Rewriter          │
-│    → Retriever → Grader     │
-│    → Generator              │
-│    └─(CRAG)─→ WebSearch     │
-│  Direct → ReAct Agent       │
-│  Vision → Vision-RAG        │
-└──────┬───────────┬──────────┘
-       │           │
-┌──────▼──────┐ ┌──▼──────────────┐
-│ llama.cpp   │ │ Qdrant (Docker) │
-│ Gemma 4 E4B │ │ Dense + BM25    │
-│ port 8080   │ │ port 6333       │
-└─────────────┘ └────────────────┘
-```
 
-## Tech Stack
+## Stack
 
 | Layer | Technology |
 |---|---|
-| LLM inference | llama.cpp · Gemma 4 E4B (GGUF, Q4_K_M / Q5_K_M) |
-| Orchestration | LangGraph `StateGraph` |
-| Vector store | Qdrant — hybrid dense (BGE-M3, 1024-dim) + sparse (BM25) |
-| Reranking | BAAI/bge-reranker-base cross-encoder |
-| Frontend | Chainlit 2.x — streaming, audio, file upload |
-| STT | faster-whisper (CPU int8) |
-| TTS | edge-tts (Microsoft Azure Neural) |
-| Web search | Tavily API with zero-result quality gate |
-| External tools | MCP servers via `langchain-mcp-adapters` |
-| Persistence | SQLite — thread history, session resume |
-| Semantic cache | Qdrant collection with TTL + context-key filter |
+| UI | Chainlit 2.x |
+| Agent orchestration | LangGraph |
+| Checkpointing | `AsyncSqliteSaver`, `data/checkpoint.db` |
+| LLM backend | llama.cpp OpenAI-compatible server |
+| Default model | `gemma-4-e4b` |
+| Embeddings | `BAAI/bge-m3` |
+| Vector database | Qdrant |
+| Retrieval | Hybrid dense + BM25 |
+| Reranking | `BAAI/bge-reranker-base` |
+| Web search | Tavily only |
+| Speech-to-text | faster-whisper |
+| Text-to-speech | edge-tts |
+| Observability | LangSmith, sanitized and optional |
+| Persistence | SQLite Chainlit data layer |
 
-## Pipeline Modes
+## Main Features
 
-| Input | Route | Flow |
+- Multimodal Chainlit UI for text, images, files, audio, and TTS.
+- RAG over uploaded documents with hybrid retrieval and reranking.
+- Three-zone dense gate:
+  - `pass`: dense score is strong enough to trust retrieval.
+  - `soft`: borderline query; retrieval continues and the grader decides.
+  - `weak`: retrieval still runs, but insufficient context can refuse without web search.
+- Grader reasons: `sufficient`, `partial`, `insufficient_context`, `needs_live_data`, `irrelevant`.
+- Graceful refusal when the uploaded documents do not contain enough context.
+- Tavily-only web search with a zero-result quality gate.
+- Inline citations such as `[Kaynak 1]` and Chainlit side-panel source previews.
+- Token-aware context budgeting using `tiktoken` `cl100k_base`.
+- Runtime context guard that checks llama.cpp `/props` and uses the safer context size.
+- Thread-scoped memory with rolling summary, pinned facts, and last-topic resume message.
+- Semantic answer cache with context-aware cache keys.
+- LangSmith traces with sanitized metadata, node tags, retrieval scores, and latency fields.
+
+## Pipeline Routes
+
+| Route | Flow | Use case |
 |---|---|---|
-| Text query | `rag` | Rewriter → Retriever → Grader → Generator |
-| Low-relevance text | `rag` + CRAG | → WebSearch → Generator |
-| General question | `direct` | ReAct agent (web, calc, file, MCP tools) |
-| Image only | `vision` | Gemma-4 multimodal → END |
-| Image + document | `vision_rag` | Vision → RAG pipeline |
-| Image + web query | `vision_search` | Vision → WebSearch → Generator |
+| `rag` | router → rewriter → retriever → grader → generator | Questions about uploaded documents |
+| `web` | router → web_search → generator | Current or live information |
+| `direct` | router → direct_response | General chat, math, coding, simple questions |
+| `vision` | router → vision | Image-only analysis |
+| `vision_rag` | vision → rewriter → retriever → grader → generator | Image plus uploaded document context |
+| `vision_search` | vision → web_search → generator | Image plus current/live data |
 
-## Prerequisites
+## Requirements
 
-| | Linux (Ubuntu 22.04 / WSL2) | macOS (Apple Silicon) |
-|---|---|---|
-| **GPU** | NVIDIA ≥ 8 GB VRAM (16 GB recommended) | M1/M2/M3/M4 — Metal GPU |
-| **RAM** | ≥ 16 GB | ≥ 16 GB (32 GB recommended) |
-| **Python** | 3.12 | 3.12 |
-| **Tools** | `uv`, Docker, `llama.cpp` (CUDA) | `uv`, Docker Desktop, `llama.cpp` (Metal) |
+| Component | Requirement |
+|---|---|
+| Python | 3.12 |
+| Package manager | `uv` |
+| Services | Docker / Docker Compose |
+| LLM server | llama.cpp `llama-server` |
+| macOS | Apple Silicon with Metal recommended |
+| Linux | NVIDIA GPU recommended for llama.cpp CUDA |
+| RAM | 16 GB minimum, 32 GB recommended |
 
-### System dependencies
-
-<details>
-<summary><strong>Linux (Ubuntu / WSL2)</strong></summary>
+System packages:
 
 ```bash
+# Ubuntu / WSL2
 sudo apt install -y poppler-utils ffmpeg tesseract-ocr libmagic1 build-essential
-```
-</details>
 
-<details>
-<summary><strong>macOS (Homebrew)</strong></summary>
-
-```bash
-# Install Homebrew if not present
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
+# macOS
 brew install git cmake ninja python@3.12 libmagic poppler tesseract ffmpeg node
 ```
-</details>
 
-### Build llama.cpp
+## llama.cpp
+
+Build llama.cpp separately:
 
 ```bash
 git clone https://github.com/ggerganov/llama.cpp ~/llama.cpp
 cd ~/llama.cpp
 
-# Linux (NVIDIA CUDA)
+# Linux CUDA
 cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
 
-# macOS (Apple Metal)
+# macOS Metal
 cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build --config Release -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
 ```
 
-## Quick Start
+Set `LLAMA_SERVER_BIN` in `.env` to the built `llama-server` binary.
+
+## Setup
 
 ```bash
 git clone https://github.com/uabali/Multimodel-Agentic-Chatbot.git
 cd Multimodel-Agentic-Chatbot
-make setup        # creates .venv, generates .env template
+make setup
 ```
 
-Edit `.env` — mandatory fields:
-
-```env
-LLAMA_SERVER_BIN=/absolute/path/to/llama-server   # ~/llama.cpp/build/bin/llama-server
-LLM_MODEL_NAME=gemma-4-e4b
-APP_ADMIN_PASSWORD=<strong-password>
-APP_PASSWORD_SALT=<random-hex-32>
-CHAINLIT_AUTH_SECRET=<random-hex-64>
-
-# macOS Apple Silicon: set embedding device to mps
-EMBEDDING_DEVICE=mps   # or cpu for Linux without GPU
-```
-
-Generate local secrets quickly:
+Create local secrets:
 
 ```bash
 python3 - <<'PY'
@@ -130,124 +145,281 @@ print("CHAINLIT_AUTH_SECRET=" + secrets.token_hex(32))
 PY
 ```
 
-Do not leave `APP_ADMIN_PASSWORD` or `APP_PASSWORD_SALT` at the example
-placeholder values; the app refuses to start with those values.
-
-Start the stack:
-
-```bash
-make qdrant   # start Qdrant in Docker
-make llm      # start llama-server (downloads ~8 GB model on first run)
-make app      # start Chainlit UI at http://localhost:7860
-make check    # health check
-make test     # automated tests
-```
-
-## Project Structure
-
-```
-src/
-├── main.py                   # Chainlit entry point, session, STT/TTS
-├── config.py                 # Pydantic settings
-├── tts.py                    # edge-tts synthesis, language detection
-├── agent/
-│   ├── graph.py              # LangGraph DAG, astream_agent()
-│   ├── nodes.py              # Node implementations
-│   ├── state.py              # AgentState TypedDict
-│   ├── routing.py            # Keyword routing + LLM fallback
-│   ├── prompts.py            # System prompts
-│   └── web_search.py         # Tavily service
-├── rag/
-│   ├── ingest.py             # Document loader/splitter
-│   ├── vectorstore.py        # HybridVectorStore (Qdrant)
-│   ├── retriever.py          # Strategy factory, confidence scoring
-│   ├── reranker.py           # Cross-encoder with TTL cache
-│   ├── semantic_cache.py     # Query cache with context key
-│   ├── embeddings.py         # BGE-M3 singleton
-│   └── llm.py                # DualLLM profiles (chat/rag/agent)
-├── memory/
-│   └── thread_memory.py      # Thread-scoped rolling summary and pinned facts
-├── mcp/
-│   ├── mcp_client.py         # MultiServerMCPClient
-│   └── mcp_config.json       # Server definitions
-├── tools/
-│   ├── search.py             # Tavily tool
-│   ├── calculator.py         # AST-based safe eval
-│   ├── file_reader.py        # Upload sandbox (path traversal protected)
-│   └── mcp_bridge.py         # LangChain ↔ MCP adapter
-├── api/router.py             # FastAPI admin endpoints
-├── middleware/rate_limiter.py # Sliding-window per-IP limiter
-└── persistence/sqlite_data_layer.py
-
-tests/
-├── test_ingest.py            # PDF visual ingest opt-in/skip behavior
-├── test_observability.py     # LangSmith config, redaction, graph/manual spans
-├── test_thread_memory.py     # short/long thread memory and cache context
-├── test_security.py          # traversal, rate limiter, API auth, URL guard, settings
-└── test_rag_retriever.py     # retriever heuristics and deduplication
-```
-
-## Configuration
-
-Key `.env` variables (see `src/config.py` for full list):
+Edit `.env` before starting the app:
 
 ```env
-LLM_BACKEND=llama.cpp          # or vllm
+LLAMA_SERVER_BIN=/absolute/path/to/llama-server
+LLAMA_HF_REPO=lmstudio-community/gemma-4-E4B-it-GGUF:Q4_K_M
+LLAMA_CTX_SIZE=8192
+LLAMA_PORT=8080
+
+LLM_BACKEND=llama.cpp
 LLM_SERVER_URL=http://localhost:8080/v1
-LLM_CONTEXT_SIZE=16384
+LLM_MODEL_NAME=gemma-4-e4b
+VISION_MODEL=gemma-4-e4b
+LLM_CONTEXT_SIZE=8192
 
-CHUNK_SIZE=1200
-CHUNK_OVERLAP=200
-TOP_K=6
-RETRIEVAL_STRATEGY=hybrid      # hybrid | similarity | mmr | threshold
-USE_RERANK=true
-PDF_VISUAL_INGEST_MAX_PAGES=0  # default: disabled; set N > 0 to analyze first N PDF pages with vision
-
-APP_LANGSMITH_ENABLED=false     # opt-in tracing
-APP_LANGSMITH_REDACT=true       # sanitize prompts/doc chunks before sending
-APP_LANGSMITH_PREVIEW_ENABLED=true
-APP_LANGSMITH_PREVIEW_CHARS=240
-APP_LANGSMITH_DOC_PREVIEW_CHARS=320
-APP_LANGSMITH_MAX_DOC_PREVIEWS=6
-LANGSMITH_API_KEY=
-LANGSMITH_PROJECT=frappe-rag-dev
-
-SEMANTIC_CACHE_ENABLED=true
-SEMANTIC_CACHE_THRESHOLD=0.92
-SEMANTIC_CACHE_TTL_HOURS=24
+APP_ADMIN_PASSWORD=<strong-password>
+APP_PASSWORD_SALT=<random-hex-32>
+CHAINLIT_AUTH_SECRET=<random-hex-64>
 
 TAVILY_API_KEY=tvly_...
 ```
 
-PDF text ingestion stays enabled through `PyPDFLoader`. The expensive visual PDF
-path is opt-in because it renders pages and calls the vision LLM once per page;
-enable it only for scanned/image-heavy PDFs where upload latency is acceptable.
+The app refuses to start if `APP_ADMIN_PASSWORD` or `APP_PASSWORD_SALT` still use
+the example placeholder values.
 
-LangSmith observation is controlled by the app-level `APP_LANGSMITH_ENABLED`
-flag. Do not enable global `LANGSMITH_TRACING=true`; the app attaches sanitized
-metadata and redacted payload handling itself to avoid duplicate or raw traces.
+## Run
 
-## Makefile
+Use separate terminals:
 
 ```bash
-make setup    # install deps, generate .env
-make qdrant   # start Qdrant (Docker)
-make llm      # start llama-server
-make app      # start Chainlit
-make check    # health + LLM probe
-make test     # run automated tests
-make stop     # stop all services
-make clean    # remove .venv, caches
+make qdrant
+make llm
+make app
 ```
 
-The Dockerfile builds only the Chainlit application image. Run Qdrant separately
-with `make qdrant` / `docker compose up -d`, and pass the required `.env`
-configuration to the app container.
+Open:
+
+```text
+http://localhost:7860
+```
+
+Useful commands:
+
+```bash
+make check
+make test
+make stop
+make clean
+```
+
+## Configuration
+
+Important `.env` values:
+
+```env
+# LLM
+LLM_BACKEND=llama.cpp
+LLM_SERVER_URL=http://localhost:8080/v1
+LLM_MODEL_NAME=gemma-4-e4b
+LLM_CONTEXT_SIZE=8192
+LLM_ENABLE_THINKING=false
+
+# Generation profiles
+CHAT_TEMPERATURE=0.7
+CHAT_MAX_TOKENS=512
+RAG_TEMPERATURE=0.0
+RAG_MAX_TOKENS=768
+AGENT_TEMPERATURE=0.1
+AGENT_MAX_TOKENS=1024
+RAG_CONTEXT_SAFETY_MARGIN_TOKENS=700
+
+# Embeddings
+EMBEDDING_MODEL=BAAI/bge-m3
+EMBEDDING_DEVICE=cpu
+
+# Qdrant
+QDRANT_URL=http://localhost:6333
+QDRANT_COLLECTION=user_documents
+QDRANT_AUTO_REINDEX=smart
+
+# RAG
+CHUNK_SIZE=500
+CHUNK_OVERLAP=80
+TOP_K=4
+RETRIEVAL_STRATEGY=hybrid
+BASE_K=4
+USE_RERANK=true
+RERANK_TOP_N=8
+
+# Dense gate
+RAG_MIN_DENSE_SIMILARITY=0.45
+RAG_DENSE_PASS_SIMILARITY=0.62
+
+# Grader
+GRADER_CONF_HIGH=0.75
+GRADER_CONF_LOW=0.08
+GRADER_MAX_DOCS=5
+
+# Web search
+TAVILY_API_KEY=tvly_...
+WEB_SEARCH_MAX_RESULTS=5
+WEATHER_SPECIALIZATION_ENABLED=true
+
+# Observability
+APP_LANGSMITH_ENABLED=false
+APP_LANGSMITH_REDACT=true
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=frappe-rag-dev
+
+# Semantic cache
+SEMANTIC_CACHE_ENABLED=true
+SEMANTIC_CACHE_THRESHOLD=0.92
+SEMANTIC_CACHE_TTL_HOURS=24
+
+# PDF visual ingest
+PDF_VISUAL_INGEST_MAX_PAGES=0
+```
+
+If `LANGSMITH_API_KEY` is set, LangSmith tracing is enabled automatically unless
+explicitly disabled in settings. Payloads are sanitized before tracing.
+
+## Web Search
+
+Web search uses Tavily only. There is no DuckDuckGo, Brave, Serper, or Google
+fallback in the app pipeline.
+
+The Tavily response is treated as empty when results are too weak to trust, for
+example when snippets are very short or the result has an unknown date and a
+generic title. In that case the assistant returns a graceful refusal instead of
+inventing an answer.
+
+During web search, Chainlit shows a tool step and attaches source previews in the
+side panel when sources are available.
+
+## Citations
+
+RAG and web answers use inline citation markers:
+
+```text
+... answer sentence [Kaynak 1].
+```
+
+The final answer may include a short source list. Chainlit also receives side
+panel elements for chunks used in context, including source name, page, URL, and
+available retrieval/rerank scores.
+
+## Context and Token Budgeting
+
+The app uses `tiktoken` `cl100k_base` for approximate token counting. Gemma uses
+a different tokenizer, so the count is not exact, but it is more reliable than a
+plain character-based estimate for Turkish-heavy prompts.
+
+The generator builds context with:
+
+- selected recent history,
+- retrieved chunks,
+- expected output token budget,
+- safety margin,
+- runtime context size.
+
+At startup, the LLM client tries to read llama.cpp `/props`. If the server
+reports a smaller `n_ctx` than configured, the app uses the smaller value.
+
+Check the runtime manually:
+
+```bash
+uv run python scripts/verify_llm_runtime.py
+```
+
+The script reports configured and discovered context size when `/props` is
+available.
+
+## Persistence
+
+There are two SQLite uses:
+
+- Chainlit thread persistence through the app data layer.
+- LangGraph checkpoints in `data/checkpoint.db`.
+
+These files are separate. Checkpoints use the Chainlit thread id as LangGraph
+`thread_id`, so an interrupted graph run can resume with the same thread id.
+
+Thread memory is scoped to a single Chainlit thread. It stores:
+
+- rolling summary,
+- pinned facts,
+- last topic.
+
+On resume, Chainlit shows:
+
+```text
+Kaldığımız yer: <last topic>
+```
+
+## Project Structure
+
+```text
+src/
+  main.py                     Chainlit app, session handling, audio, source panel
+  config.py                   Pydantic settings
+  agent/
+    graph.py                  LangGraph routes, cache context, checkpoint config
+    nodes.py                  Router, retriever, grader, generator, web, vision
+    prompts.py                System prompts
+    routing.py                Keyword and heuristic routing
+    state.py                  AgentState
+    web_search.py             Tavily service and source formatting
+  rag/
+    llm.py                    LLM clients, token counting, n_ctx negotiation
+    retriever.py              Retrieval strategy, confidence, deduplication
+    vectorstore.py            Qdrant hybrid vector store
+    reranker.py               Cross-encoder reranker
+    embeddings.py             BGE-M3 embeddings
+    ingest.py                 Document ingest
+    semantic_cache.py         Qdrant-backed semantic cache
+  memory/
+    thread_memory.py          Thread-scoped memory
+  observability/
+    langsmith.py              Sanitized LangSmith helpers
+  tools/
+    search.py                 Tavily tool
+    calculator.py             Safe calculator
+    file_reader.py            Uploaded file reader
+    mcp_bridge.py             MCP bridge tool
+  persistence/
+    sqlite_data_layer.py      Chainlit SQLite data layer
+
+tests/
+  test_ingest.py
+  test_observability.py
+  test_rag_retriever.py
+  test_security.py
+  test_thread_memory.py
+  test_token_counter.py
+  test_web_search_policy.py
+```
 
 ## Tests
 
+Run the full suite:
+
 ```bash
-uv run pytest -q
-uv run python -m pytest -q
-uv run python -m compileall -q src tests
+uv run pytest
 ```
+
+Current expected result:
+
+```text
+62 passed
+```
+
+Runtime probe:
+
+```bash
+uv run python scripts/verify_llm_runtime.py
+```
+
+This requires the llama.cpp server to be running.
+
+## Manual Smoke Test
+
+1. Start Qdrant, llama-server, and Chainlit.
+2. Upload a PDF.
+3. Ask a document-specific question.
+4. Confirm the answer includes `[Kaynak N]`.
+5. Open the Chainlit side panel and check source previews and scores.
+6. Ask a borderline document question and confirm retrieval still runs.
+7. Ask an unrelated document question and confirm graceful refusal.
+8. Ask a live-data question and confirm Tavily web search is used.
+9. Resume the thread and confirm the last-topic message appears.
+
+## Notes
+
+- PDF text extraction is always available.
+- Visual PDF ingest is disabled by default because it renders pages and calls the
+  vision model per page.
+- `data/` contains local runtime state and should not be committed.
+- Web search requires `TAVILY_API_KEY`.
+- LangSmith is optional and should be used with redaction enabled.
