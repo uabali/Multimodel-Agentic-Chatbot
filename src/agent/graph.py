@@ -47,6 +47,7 @@ from src.agent.nodes import (
     web_search_node,
     direct_response_node,
 )
+from src.observability.langsmith import build_graph_config, record_semantic_cache_hit
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ def _grader_decision(state: AgentState) -> str:
     Döngü koruması graph yapısı tarafından sağlanır, retry_count burada gereksiz.
 
     source_filter aktifken iki senaryo:
-    - reason="irrelevant": belge soruyla ilgisiz → "bu bilgi belgede yok" de, web arama.
+    - reason="irrelevant": belge soruyla ilgisiz → generator "belgede yok" cevabı verir.
     - reason="needs_live_data": belge formülü içeriyor ama canlı veri eksik → web arama.
     Reason belirsizse/yoksa: güvenli taraf olan "sufficient" seçilir.
     """
@@ -94,7 +95,7 @@ def _grader_decision(state: AgentState) -> str:
         return "sufficient"
     reason = state.get("grader_reason", "")
     if state.get("source_filter"):
-        if reason in ("needs_live_data", "irrelevant"):
+        if reason == "needs_live_data":
             return "insufficient"
         return "sufficient"
     return "insufficient"
@@ -225,6 +226,44 @@ def _init_state(
     }
 
 
+def _turn_run_name(default: str, trace_context: dict | None = None) -> str:
+    if default == "frappe.sync_run":
+        return default
+    channel = str((trace_context or {}).get("channel") or "")
+    if channel == "chainlit_audio":
+        return "frappe.audio_turn"
+    return "frappe.chat_turn"
+
+
+def _graph_config(
+    *,
+    run_name: str,
+    question: str,
+    source_filter: str,
+    image_data: list[dict] | None,
+    input_type: str,
+    session_uploads: list[str] | None,
+    temperature: float | None,
+    max_tokens: int | None,
+    retrieval_strategy: str | None,
+    use_rerank: bool | None,
+    trace_context: dict | None,
+) -> dict | None:
+    return build_graph_config(
+        run_name=run_name,
+        question=question,
+        source_filter=source_filter,
+        session_uploads=session_uploads,
+        image_data=image_data,
+        input_type=input_type,
+        retrieval_strategy=retrieval_strategy,
+        use_rerank=use_rerank,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        trace_context=trace_context,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -241,12 +280,27 @@ def run_agent(
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
+    trace_context: dict | None = None,
 ) -> str:
     """Senkron agent çalıştırıcı (test veya CLI için)."""
-    result = get_graph().invoke(
-        _init_state(question, chat_history, source_filter, image_data, input_type,
-                    session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank)
+    state = _init_state(
+        question, chat_history, source_filter, image_data, input_type,
+        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank,
     )
+    config = _graph_config(
+        run_name="frappe.sync_run",
+        question=question,
+        source_filter=source_filter,
+        image_data=image_data,
+        input_type=input_type,
+        session_uploads=session_uploads,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        retrieval_strategy=retrieval_strategy,
+        use_rerank=use_rerank,
+        trace_context=trace_context,
+    )
+    result = get_graph().invoke(state, config=config) if config else get_graph().invoke(state)
     return result.get("generation", "Bir hata oluştu, lütfen tekrar deneyin.")
 
 
@@ -261,12 +315,27 @@ async def arun_agent(
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
+    trace_context: dict | None = None,
 ) -> str:
     """Asenkron agent çalıştırıcı."""
-    result = await get_graph().ainvoke(
-        _init_state(question, chat_history, source_filter, image_data, input_type,
-                    session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank)
+    state = _init_state(
+        question, chat_history, source_filter, image_data, input_type,
+        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank,
     )
+    config = _graph_config(
+        run_name=_turn_run_name("frappe.chat_turn", trace_context),
+        question=question,
+        source_filter=source_filter,
+        image_data=image_data,
+        input_type=input_type,
+        session_uploads=session_uploads,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        retrieval_strategy=retrieval_strategy,
+        use_rerank=use_rerank,
+        trace_context=trace_context,
+    )
+    result = await get_graph().ainvoke(state, config=config) if config else await get_graph().ainvoke(state)
     return result.get("generation", "Bir hata oluştu, lütfen tekrar deneyin.")
 
 
@@ -281,6 +350,7 @@ async def astream_agent(
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
+    trace_context: dict | None = None,
 ):
     """Agent çalıştırıcı: mesaj ve güncelleme olaylarını stream eder.
 
@@ -320,6 +390,12 @@ async def astream_agent(
         cache_ctx = _build_cache_ctx()
         cached = await SemanticCache.get().lookup(question, cache_ctx=cache_ctx)
         if cached:
+            record_semantic_cache_hit(
+                question=question,
+                cached_answer=cached,
+                cache_ctx=cache_ctx,
+                trace_context=trace_context,
+            )
             yield ("updates", {"generator": {"generation": cached}})
             chunk_size = 20
             for i in range(0, len(cached), chunk_size):
@@ -330,11 +406,27 @@ async def astream_agent(
         cache_ctx = ""
 
     collected_generation = ""
-    async for event in get_graph().astream(
-        _init_state(question, chat_history, source_filter, image_data, input_type,
-                    session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank),
-        stream_mode=["messages", "updates"],
-    ):
+    state = _init_state(
+        question, chat_history, source_filter, image_data, input_type,
+        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank,
+    )
+    config = _graph_config(
+        run_name=_turn_run_name("frappe.chat_turn", trace_context),
+        question=question,
+        source_filter=source_filter,
+        image_data=image_data,
+        input_type=input_type,
+        session_uploads=session_uploads,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        retrieval_strategy=retrieval_strategy,
+        use_rerank=use_rerank,
+        trace_context=trace_context,
+    )
+    kwargs = {"stream_mode": ["messages", "updates"]}
+    if config:
+        kwargs["config"] = config
+    async for event in get_graph().astream(state, **kwargs):
         # Yanıtı cache için topla (generator / direct_response / vision)
         if isinstance(event, tuple) and event[0] == "updates":
             for node_name, delta in (event[1] or {}).items():

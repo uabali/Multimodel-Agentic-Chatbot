@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import base64
 import logging
+import time
 import uuid
 from pathlib import Path
 
@@ -167,6 +168,32 @@ class DocumentIngester:
             {"file_name": str, "file_id": str, "chunk_count": int, "status": str}
         """
         file_path = Path(file_path)
+        t0 = time.perf_counter()
+        try:
+            result = self._ingest_file_impl(file_path, display_name=display_name)
+        except Exception as exc:
+            from src.observability.langsmith import record_ingest_observation
+
+            record_ingest_observation(
+                file_path=file_path,
+                result=None,
+                elapsed_s=time.perf_counter() - t0,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+
+        from src.observability.langsmith import record_ingest_observation
+
+        record_ingest_observation(
+            file_path=file_path,
+            result=result,
+            elapsed_s=time.perf_counter() - t0,
+        )
+        return result
+
+    def _ingest_file_impl(self, file_path: str | Path, display_name: str | None = None) -> dict:
+        """Implementation body for ingest_file; separated to keep observation isolated."""
+        file_path = Path(file_path)
         display_name = display_name or file_path.name
 
         # Önceki indekslemeden kalan chunk'ları temizle (idempotent upsert davranışı).
@@ -200,17 +227,21 @@ class DocumentIngester:
             "status": "success",
         }
 
-        # Multimodal ingestion: PDF sayfaları Gemma 4 vision ile de analiz edilir
+        # Opsiyonel multimodal ingestion: default kapalı, çünkü her PDF sayfası
+        # ayrı vision LLM çağrısı yapar ve upload latency'yi ciddi artırır.
         if file_path.suffix.lower() == ".pdf":
-            visual_ingester = VisualPageIngester()
-            visual_docs = visual_ingester.ingest_pdf_visuals(file_path, file_id, display_name)
-            if visual_docs:
-                self._vectorstore.add_documents(visual_docs)
-                logger.info(
-                    "%s → %d görsel açıklama chunk'ı indekslendi",
-                    file_path.name, len(visual_docs),
-                )
-                result["visual_chunk_count"] = len(visual_docs)
+            if settings.pdf_visual_ingest_max_pages > 0:
+                visual_ingester = VisualPageIngester()
+                visual_docs = visual_ingester.ingest_pdf_visuals(file_path, file_id, display_name)
+                if visual_docs:
+                    self._vectorstore.add_documents(visual_docs)
+                    logger.info(
+                        "%s → %d görsel açıklama chunk'ı indekslendi",
+                        file_path.name, len(visual_docs),
+                    )
+                    result["visual_chunk_count"] = len(visual_docs)
+            else:
+                logger.info("PDF görsel ingestion kapalı: %s", file_path.name)
 
         return result
 

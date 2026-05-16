@@ -5,8 +5,6 @@ Run: pytest tests/test_security.py -v
 """
 
 import hashlib
-import os
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -255,3 +253,116 @@ def test_health_endpoint_public():
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.get("/api/health")
     assert resp.status_code == 200
+
+
+# ─── URL ingest: SSRF guard ─────────────────────────────────────────────────
+
+
+def test_url_guard_blocks_loopback_ip():
+    from src.security.url_guard import URLFetchError, validate_public_http_url
+
+    with pytest.raises(URLFetchError):
+        validate_public_http_url("http://127.0.0.1:8080/private")
+
+
+def test_url_guard_blocks_localhost(monkeypatch):
+    from src.security import url_guard
+    from src.security.url_guard import URLFetchError
+
+    monkeypatch.setattr(url_guard, "_resolve_host", lambda _host: ["127.0.0.1"])
+
+    with pytest.raises(URLFetchError):
+        url_guard.validate_public_http_url("http://localhost/private")
+
+
+def test_url_guard_blocks_link_local_ip():
+    from src.security.url_guard import URLFetchError, validate_public_http_url
+
+    with pytest.raises(URLFetchError):
+        validate_public_http_url("http://169.254.169.254/latest/meta-data")
+
+
+def test_url_guard_blocks_private_lan_ip():
+    from src.security.url_guard import URLFetchError, validate_public_http_url
+
+    with pytest.raises(URLFetchError):
+        validate_public_http_url("http://192.168.1.10/admin")
+
+
+def test_url_guard_accepts_public_hostname(monkeypatch):
+    from src.security import url_guard
+
+    monkeypatch.setattr(url_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
+
+    assert url_guard.validate_public_http_url("https://example.com/page") == "https://example.com/page"
+
+
+@pytest.mark.anyio
+async def test_url_fetch_blocks_redirect_to_private_ip(monkeypatch):
+    import httpx
+
+    from src.security import url_guard
+    from src.security.url_guard import URLFetchError
+
+    def fake_resolve(host: str) -> list[str]:
+        if host == "example.com":
+            return ["93.184.216.34"]
+        if host == "127.0.0.1":
+            return ["127.0.0.1"]
+        return ["93.184.216.34"]
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return httpx.Response(
+                status_code=302,
+                headers={"location": "http://127.0.0.1/admin"},
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(url_guard, "_resolve_host", fake_resolve)
+    monkeypatch.setattr(url_guard.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(URLFetchError):
+        await url_guard.fetch_public_url_text("https://example.com/start")
+
+
+def test_settings_rejects_placeholder_admin_password(monkeypatch):
+    from pydantic import ValidationError
+    from src.config import Settings
+
+    monkeypatch.setenv("APP_ADMIN_PASSWORD", "change-me")
+    monkeypatch.setenv("APP_PASSWORD_SALT", "test-password-salt")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_settings_rejects_example_salt_placeholder(monkeypatch):
+    from pydantic import ValidationError
+    from src.config import Settings
+
+    monkeypatch.setenv("APP_ADMIN_PASSWORD", "strong-test-password")
+    monkeypatch.setenv("APP_PASSWORD_SALT", "REPLACE_WITH_RANDOM_SALT")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_settings_accepts_non_placeholder_secrets(monkeypatch):
+    from src.config import Settings
+
+    monkeypatch.setenv("APP_ADMIN_PASSWORD", "strong-test-password")
+    monkeypatch.setenv("APP_PASSWORD_SALT", "random-test-salt")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.app_admin_password == "strong-test-password"

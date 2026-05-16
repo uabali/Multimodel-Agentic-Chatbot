@@ -23,6 +23,7 @@ def _make_openai_compat_client(
     temperature: float,
     max_tokens: int,
     top_p: float = 0.95,
+    profile_name: str = "custom",
 ) -> ChatOpenAI:
     """
     Build a ChatOpenAI client pointed at an OpenAI-compatible endpoint.
@@ -50,6 +51,14 @@ def _make_openai_compat_client(
         "max_tokens": max_tokens,
         "top_p": top_p,
         "streaming": True,
+        "name": f"frappe.llm.{profile_name}",
+        "tags": ["frappe", "llm", f"profile:{profile_name}"],
+        "metadata": {
+            "ls_provider": "openai_compat",
+            "ls_model_name": settings.llm_model_name,
+            "frappe_llm_profile": profile_name,
+            "llm_backend": settings.llm_backend,
+        },
     }
     if extra_body:
         kwargs["extra_body"] = extra_body
@@ -78,6 +87,7 @@ class DualLLM:
             self._chat = _make_openai_compat_client(
                 temperature=settings.chat_temperature,
                 max_tokens=settings.chat_max_tokens,
+                profile_name="chat",
             )
         return self._chat
 
@@ -87,6 +97,7 @@ class DualLLM:
             self._rag = _make_openai_compat_client(
                 temperature=settings.rag_temperature,
                 max_tokens=settings.rag_max_tokens,
+                profile_name="rag",
             )
         return self._rag
 
@@ -98,6 +109,7 @@ class DualLLM:
                 temperature=settings.agent_temperature,
                 max_tokens=settings.agent_max_tokens,
                 top_p=0.9,
+                profile_name="agent",
             )
         return self._agent
 
@@ -160,4 +172,9 @@ def create_vllm_llm(
     top_p: float = 0.95,
 ) -> ChatOpenAI:
     """Convenience factory for callers that need a one-off OpenAI-compat client."""
-    return _make_openai_compat_client(temperature=temperature, max_tokens=max_tokens, top_p=top_p)
+    return _make_openai_compat_client(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=top_p,
+        profile_name="custom",
+    )

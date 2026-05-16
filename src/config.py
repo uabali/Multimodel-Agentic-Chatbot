@@ -11,7 +11,7 @@ This allows swapping the backend without touching agent/RAG logic:
 from pathlib import Path
 from typing import Optional
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -90,11 +90,11 @@ class Settings(BaseSettings):
     chunk_overlap: int = 80
     top_k: int = 4
 
-    # PDF sayfalarını vision ile OCR/analiz etme limiti. Küçük belgelerde tüm
-    # sayfalar işlenir; büyük belgelerde ilk N sayfa işlenerek chat akışı
-    # dakikalarca bloklanmaz. 0 veya negatif değer görsel PDF ingestion'ı kapatır.
+    # PDF sayfalarını vision ile OCR/analiz etme limiti. Varsayılan 0'dır:
+    # text PDF ingest hızlı kalır, pahalı sayfa başı vision çağrıları sadece
+    # bilinçli olarak N > 0 verildiğinde çalışır.
     pdf_visual_ingest_max_pages: int = Field(
-        default=8,
+        default=0,
         validation_alias=AliasChoices("PDF_VISUAL_INGEST_MAX_PAGES"),
     )
 
@@ -137,6 +137,30 @@ class Settings(BaseSettings):
     # ── Confidence ──
     local_search_conf_threshold: float = 0.35
 
+    # ── Observability (LangSmith, opt-in) ──
+    app_env: str = Field(default="local", validation_alias=AliasChoices("APP_ENV"))
+    app_langsmith_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("APP_LANGSMITH_ENABLED"),
+    )
+    langsmith_api_key: str = Field(default="", validation_alias=AliasChoices("LANGSMITH_API_KEY"))
+    langsmith_project: str = Field(
+        default="frappe-rag-dev",
+        validation_alias=AliasChoices("LANGSMITH_PROJECT"),
+    )
+    langsmith_endpoint: str = Field(
+        default="https://api.smith.langchain.com",
+        validation_alias=AliasChoices("LANGSMITH_ENDPOINT"),
+    )
+    langsmith_workspace_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("LANGSMITH_WORKSPACE_ID"),
+    )
+    app_langsmith_redact: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("APP_LANGSMITH_REDACT"),
+    )
+
     # ── Auth ──
     app_admin_username: str = "admin"
     # No defaults — startup fails loudly if these are missing from .env
@@ -162,6 +186,22 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self):
         self.upload_dir.mkdir(parents=True, exist_ok=True)
+
+    @model_validator(mode="after")
+    def reject_placeholder_secrets(self) -> "Settings":
+        placeholders = {
+            "change-me",
+            "change-me-in-production",
+            "<strong-password>",
+            "<random-hex-32>",
+            "REPLACE_WITH_STRONG_ADMIN_PASSWORD",
+            "REPLACE_WITH_RANDOM_SALT",
+        }
+        if self.app_admin_password.strip() in placeholders:
+            raise ValueError("APP_ADMIN_PASSWORD must be changed from the example placeholder.")
+        if self.app_password_salt.strip() in placeholders:
+            raise ValueError("APP_PASSWORD_SALT must be changed from the example placeholder.")
+        return self
 
     @property
     def llm_model(self) -> str:

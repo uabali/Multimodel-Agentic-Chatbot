@@ -19,8 +19,9 @@ persist_user_env = false
 # Set to true to show API keys as ***, false to show them as plain text
 mask_user_env = false
 
-# Authorized origins
-allow_origins = ["*"]
+# Authorized origins for local use. Replace/add your deployed HTTPS origin before
+# exposing the app through a tunnel or public domain.
+allow_origins = ["http://localhost:7860", "http://127.0.0.1:7860"]
 
 [features]
 # HTML render kapalı; kaynaklar Chainlit Text elementleriyle gösteriliyor.

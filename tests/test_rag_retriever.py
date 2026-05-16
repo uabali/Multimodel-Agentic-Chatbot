@@ -42,3 +42,27 @@ def test_deduplicate_documents_removes_repeated_chunks():
 
     assert len(result) == 2
     assert [doc.page_content for doc in result] == ["same content", "other content"]
+
+
+def test_source_filter_irrelevant_does_not_trigger_web_search():
+    from src.agent.graph import _grader_decision
+
+    decision = _grader_decision({
+        "relevance": "no",
+        "grader_reason": "irrelevant",
+        "source_filter": "uploaded.pdf",
+    })
+
+    assert decision == "sufficient"
+
+
+def test_source_filter_live_data_still_triggers_web_search():
+    from src.agent.graph import _grader_decision
+
+    decision = _grader_decision({
+        "relevance": "no",
+        "grader_reason": "needs_live_data",
+        "source_filter": "uploaded.pdf",
+    })
+
+    assert decision == "insufficient"

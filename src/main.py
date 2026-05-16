@@ -50,8 +50,8 @@ from src.api.router import router as _api_router
 from src.tts import synthesize as tts_synthesize
 
 # ── FastAPI admin/config router'ı Chainlit'e mount et ──────────────────────
-# Swagger UI: http://localhost:8000/docs
-# Endpoints : http://localhost:8000/api/*
+# Swagger UI: http://localhost:7860/docs
+# Endpoints : http://localhost:7860/api/*
 _cl_app.include_router(_api_router)
 logger_bootstrap = logging.getLogger("api.mount")
 logger_bootstrap.info("FastAPI admin router /api/* mount edildi. Docs: /docs")
@@ -78,6 +78,23 @@ _VISION_FOLLOWUP_RE = re.compile(
 def _is_vision_followup(question: str) -> bool:
     """Önceki görseli yalnızca soru gerçekten görsele atıf yapıyorsa yeniden kullan."""
     return bool(_VISION_FOLLOWUP_RE.search((question or "").strip()))
+
+
+def _langsmith_trace_context(
+    channel: str,
+    input_type: str,
+    *,
+    image_count: int = 0,
+    attempt: str = "primary",
+) -> dict:
+    """Build safe per-turn trace context; raw values are hashed by observability."""
+    return {
+        "channel": channel,
+        "input_type": input_type,
+        "session_id": cl.user_session.get("id") or cl.user_session.get("_session_id_short", ""),
+        "image_count": image_count,
+        "attempt": attempt,
+    }
 
 
 # ── Auth helpers ──
@@ -397,15 +414,15 @@ async def _ingest_url(url: str, sess_dir: Path) -> dict | None:
         ingest_file() sonucu dict veya hata durumunda None.
     """
     try:
-        from langchain_community.document_loaders import WebBaseLoader
-        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", url.split("//")[-1])[:60] + ".txt"
+        from src.security.url_guard import fetch_public_url_text, safe_filename_from_url
+
+        final_url, combined = await fetch_public_url_text(url)
+        safe_name = safe_filename_from_url(final_url)
         dest = sess_dir / safe_name
         sess_dir.mkdir(parents=True, exist_ok=True)
-        loader = WebBaseLoader(url)
-        docs = loader.load()
-        if not docs:
+        combined = combined.strip()
+        if not combined:
             return None
-        combined = "\n\n".join(d.page_content for d in docs)
         dest.write_text(combined, encoding="utf-8")
         return await cl.make_async(ingest_file)(dest)
     except Exception as exc:
@@ -628,6 +645,11 @@ async def on_audio_end():
         _a_max_tok = int(cl.user_session.get("max_tokens", settings.chat_max_tokens))
         _a_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
         _a_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
+        _a_trace = _langsmith_trace_context(
+            "chainlit_audio",
+            audio_input_type,
+            image_count=len(audio_image_data),
+        )
         try:
             async for ev in astream_agent(
                 question=text,
@@ -639,6 +661,7 @@ async def on_audio_end():
                 max_tokens=_a_max_tok,
                 retrieval_strategy=_a_strategy,
                 use_rerank=_a_rerank,
+                trace_context=_a_trace,
             ):
                 if isinstance(ev, tuple) and len(ev) == 2 and ev[0] == "updates":
                     payload = ev[1]
@@ -673,6 +696,7 @@ async def on_audio_end():
                 max_tokens=_a_max_tok,
                 retrieval_strategy=_a_strategy,
                 use_rerank=_a_rerank,
+                trace_context={**_a_trace, "attempt": "fallback"},
             )
             answer_parts = [fallback]
 
@@ -1233,6 +1257,11 @@ async def on_message(message: cl.Message):
         if _sess_strategy not in _allowed_strategies:
             _sess_strategy = settings.retrieval_strategy
         _sess_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
+        _text_trace = _langsmith_trace_context(
+            "chainlit_text",
+            agent_input_type,
+            image_count=len(agent_image_data),
+        )
 
         try:
             async for ev in _timed_stream(
@@ -1247,6 +1276,7 @@ async def on_message(message: cl.Message):
                     max_tokens=_sess_max_tok,
                     retrieval_strategy=_sess_strategy,
                     use_rerank=_sess_rerank,
+                    trace_context=_text_trace,
                 ),
                 _STREAM_CHUNK_TIMEOUT,
             ):
@@ -1312,6 +1342,7 @@ async def on_message(message: cl.Message):
                 max_tokens=_sess_max_tok,
                 retrieval_strategy=_sess_strategy,
                 use_rerank=_sess_rerank,
+                trace_context={**_text_trace, "attempt": "fallback_exception"},
             )
             final_parts = [answer]
             for i in range(0, len(answer), 24):
@@ -1337,6 +1368,7 @@ async def on_message(message: cl.Message):
                     max_tokens=_sess_max_tok,
                     retrieval_strategy=_sess_strategy,
                     use_rerank=_sess_rerank,
+                    trace_context={**_text_trace, "attempt": "fallback_empty_stream"},
                 )
             except Exception as exc:
                 logger.error("Fallback ainvoke de başarısız: %s", exc)

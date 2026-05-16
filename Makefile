@@ -1,4 +1,4 @@
-.PHONY: setup qdrant llm app dev check stop clean help
+.PHONY: setup qdrant llm app dev check test stop clean help
 
 SHELL := /bin/bash
 
@@ -72,6 +72,10 @@ check: ## Health-check all services + verify model ids
 	@curl -sf $(LLM_SERVER_URL)/models > /dev/null 2>&1 && echo "OK" || echo "FAIL"
 	@echo ""
 	@. .venv/bin/activate && python3 scripts/verify_llm_runtime.py
+
+test: ## Run automated tests
+	@echo "── test ───────────────────────────────────────────"
+	@. .venv/bin/activate && uv run pytest -q
 
 # ─────────────────────────────────────────────────────────────────────────────
 tunnel: ## Share Chainlit via ngrok (NGROK_AUTHTOKEN required in .env)

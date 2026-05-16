@@ -1,3 +1,5 @@
+# Application image only. Qdrant is run separately via docker-compose.yml, and
+# required runtime secrets/config must be supplied through environment variables.
 # ── Stage 1: dependency install ───────────────────────────────────────────────
 # We use a Python 3.12 base image so the project requirement (>=3.12) is satisfied
 # without depending on Ubuntu PPAs. GPU usage works via PyTorch CUDA wheels plus

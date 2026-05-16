@@ -119,6 +119,20 @@ CHAINLIT_AUTH_SECRET=<random-hex-64>
 EMBEDDING_DEVICE=mps   # or cpu for Linux without GPU
 ```
 
+Generate local secrets quickly:
+
+```bash
+python3 - <<'PY'
+import secrets
+print("APP_ADMIN_PASSWORD=" + secrets.token_urlsafe(18))
+print("APP_PASSWORD_SALT=" + secrets.token_hex(16))
+print("CHAINLIT_AUTH_SECRET=" + secrets.token_hex(32))
+PY
+```
+
+Do not leave `APP_ADMIN_PASSWORD` or `APP_PASSWORD_SALT` at the example
+placeholder values; the app refuses to start with those values.
+
 Start the stack:
 
 ```bash
@@ -126,6 +140,7 @@ make qdrant   # start Qdrant in Docker
 make llm      # start llama-server (downloads ~8 GB model on first run)
 make app      # start Chainlit UI at http://localhost:7860
 make check    # health check
+make test     # automated tests
 ```
 
 ## Project Structure
@@ -163,7 +178,10 @@ src/
 └── persistence/sqlite_data_layer.py
 
 tests/
-└── test_security.py          # 14 tests: traversal, rate limiter, API auth
+├── test_ingest.py            # PDF visual ingest opt-in/skip behavior
+├── test_observability.py     # LangSmith config, redaction, graph/manual spans
+├── test_security.py          # traversal, rate limiter, API auth, URL guard, settings
+└── test_rag_retriever.py     # retriever heuristics and deduplication
 ```
 
 ## Configuration
@@ -180,6 +198,12 @@ CHUNK_OVERLAP=200
 TOP_K=6
 RETRIEVAL_STRATEGY=hybrid      # hybrid | similarity | mmr | threshold
 USE_RERANK=true
+PDF_VISUAL_INGEST_MAX_PAGES=0  # default: disabled; set N > 0 to analyze first N PDF pages with vision
+
+APP_LANGSMITH_ENABLED=false     # opt-in tracing
+APP_LANGSMITH_REDACT=true       # sanitize prompts/doc chunks before sending
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=frappe-rag-dev
 
 SEMANTIC_CACHE_ENABLED=true
 SEMANTIC_CACHE_THRESHOLD=0.92
@@ -187,6 +211,14 @@ SEMANTIC_CACHE_TTL_HOURS=24
 
 TAVILY_API_KEY=tvly_...
 ```
+
+PDF text ingestion stays enabled through `PyPDFLoader`. The expensive visual PDF
+path is opt-in because it renders pages and calls the vision LLM once per page;
+enable it only for scanned/image-heavy PDFs where upload latency is acceptable.
+
+LangSmith observation is controlled by the app-level `APP_LANGSMITH_ENABLED`
+flag. Do not enable global `LANGSMITH_TRACING=true`; the app attaches sanitized
+metadata and redacted payload handling itself to avoid duplicate or raw traces.
 
 ## Makefile
 
@@ -196,13 +228,19 @@ make qdrant   # start Qdrant (Docker)
 make llm      # start llama-server
 make app      # start Chainlit
 make check    # health + LLM probe
+make test     # run automated tests
 make stop     # stop all services
 make clean    # remove .venv, caches
 ```
 
+The Dockerfile builds only the Chainlit application image. Run Qdrant separately
+with `make qdrant` / `docker compose up -d`, and pass the required `.env`
+configuration to the app container.
+
 ## Tests
 
 ```bash
-source .venv/bin/activate
-pytest tests/test_security.py -v
+uv run pytest -q
+uv run python -m pytest -q
+uv run python -m compileall -q src tests
 ```
