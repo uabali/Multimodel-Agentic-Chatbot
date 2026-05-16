@@ -43,6 +43,14 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.config import settings
 from src.agent.graph import arun_agent, astream_agent
+from src.memory.thread_memory import (
+    ThreadMemory,
+    extract_memory_pin,
+    format_memory_context,
+    is_memory_command,
+    memory_hash,
+    metadata_patch,
+)
 from src.mcp.mcp_client import get_mcp_tools, is_mcp_tools_cache_warm
 from src.rag.ingest import ingest_file
 from src.persistence.sqlite_data_layer import SQLiteDataLayer
@@ -132,6 +140,36 @@ def _get_shared_data_layer() -> "SQLiteDataLayer":
     return _dl_singleton
 
 
+def _coerce_thread_memory(value) -> ThreadMemory:
+    if isinstance(value, ThreadMemory):
+        return value
+    if isinstance(value, dict):
+        return ThreadMemory.from_metadata({"memory": value})
+    if isinstance(value, str) and value.strip():
+        return ThreadMemory.from_metadata({"summary": value})
+    return ThreadMemory.empty()
+
+
+def _get_thread_memory() -> ThreadMemory:
+    return _coerce_thread_memory(
+        cl.user_session.get("thread_memory") or cl.user_session.get("session_summary") or ""
+    )
+
+
+def _set_thread_memory(memory: ThreadMemory) -> None:
+    cl.user_session.set("thread_memory", memory.to_metadata())
+    cl.user_session.set("session_summary", memory.rolling_summary)
+
+
+async def _persist_thread_memory(thread_id: str | None, memory: ThreadMemory) -> None:
+    if not thread_id:
+        return
+    try:
+        await _get_shared_data_layer().patch_thread_metadata(thread_id, metadata_patch(memory))
+    except Exception as exc:
+        logger.warning("Thread memory metadata güncellenemedi: %s", exc)
+
+
 @cl.data_layer
 def data_layer():
     return _get_shared_data_layer()
@@ -184,12 +222,15 @@ async def on_chat_resume(thread):
     if trimmed:
         cl.user_session.set("_resume_msg_count", len(trimmed))
 
-    # Önceki oturumdan özet yükle (uzun süreli bellek)
+    # Önceki oturumdan thread-scoped memory yükle (legacy summary destekli).
     meta = thread.get("metadata", {}) if isinstance(thread, dict) else {}
-    summary = (meta.get("summary", "") or "") if isinstance(meta, dict) else ""
-    if summary:
-        cl.user_session.set("session_summary", summary)
-        logger.info("on_chat_resume: özet yüklendi (%dch)", len(summary))
+    memory = ThreadMemory.from_metadata(meta if isinstance(meta, dict) else {})
+    _set_thread_memory(memory)
+    if memory.rolling_summary or memory.pinned_facts:
+        logger.info(
+            "on_chat_resume: memory yüklendi [summary=%dch, pins=%d]",
+            len(memory.rolling_summary), len(memory.pinned_facts),
+        )
 
 
 # ── Whisper / STT ──
@@ -448,7 +489,8 @@ async def on_chat_start():
     cl.user_session.set("session_upload_dir", str(session_upload_dir))
 
     # Temiz session state
-    cl.user_session.set("chat_history", cl.user_session.get("chat_history") or [])
+    cl.user_session.set("chat_history", [])
+    _set_thread_memory(ThreadMemory.empty())
     cl.user_session.set("pending_vision_images", [])
     cl.user_session.set("last_vision_images", [])
     # Session boyunca yüklenen dosyaların listesi — follow-up RAG sorguları için
@@ -619,8 +661,22 @@ async def on_audio_end():
         msg.content = f"**Transcript:** {text}\n\n"
         await msg.update()
 
-        _audio_summary = cl.user_session.get("session_summary") or ""
-        lc_history = _build_lc_history(chat_history, summary=_audio_summary or None)
+        _audio_pin = extract_memory_pin(text)
+        if _audio_pin:
+            _audio_memory = _get_thread_memory().with_pin(_audio_pin)
+            _set_thread_memory(_audio_memory)
+            await _persist_thread_memory(cl.user_session.get("id"), _audio_memory)
+            msg.content = f"**Transcript:** {text}\n\nBu sohbet için not aldım."
+            await msg.update()
+            return
+        if is_memory_command(text):
+            msg.content = f"**Transcript:** {text}\n\nHatırlamamı istediğin notu anlayamadım. Örnek: `bunu hatırla: rapor dili akademik olsun`"
+            await msg.update()
+            return
+
+        _audio_memory = _get_thread_memory()
+        _audio_memory_hash = memory_hash(_audio_memory)
+        lc_history = _build_lc_history(chat_history, memory=_audio_memory)
 
         # Pending görselleri kontrol et - sesli soruyla birlikte gönderilecek
         pending_images = cl.user_session.get("pending_vision_images", [])
@@ -662,6 +718,7 @@ async def on_audio_end():
                 retrieval_strategy=_a_strategy,
                 use_rerank=_a_rerank,
                 trace_context=_a_trace,
+                memory_hash=_audio_memory_hash,
             ):
                 if isinstance(ev, tuple) and len(ev) == 2 and ev[0] == "updates":
                     payload = ev[1]
@@ -697,6 +754,7 @@ async def on_audio_end():
                 retrieval_strategy=_a_strategy,
                 use_rerank=_a_rerank,
                 trace_context={**_a_trace, "attempt": "fallback"},
+                memory_hash=_audio_memory_hash,
             )
             answer_parts = [fallback]
 
@@ -711,11 +769,10 @@ async def on_audio_end():
         chat_history.append({"role": "assistant", "content": answer})
         if len(chat_history) >= _SUMMARY_TRIGGER:
             thread_id = cl.user_session.get("id")
-            chat_history, new_summary = await _summarize_and_compress_history(
-                chat_history, thread_id
+            chat_history, updated_memory = await _summarize_and_compress_history(
+                chat_history, thread_id, _get_thread_memory()
             )
-            if new_summary:
-                cl.user_session.set("session_summary", new_summary)
+            _set_thread_memory(updated_memory)
         else:
             chat_history = _trim_chat_history(chat_history)
         cl.user_session.set("chat_history", chat_history)
@@ -753,23 +810,25 @@ _MAX_HISTORY_CHARS = 6000
 
 # Uzun süreli bellek: bu eşiği geçince eski mesajlar LLM ile özetlenir.
 # chat_history her turu 2 kayıtla temsil eder (user + assistant);
-# 40 mesaj = 20 konuşma turu.
-_SUMMARY_TRIGGER = 40       # Mesaj sayısı eşiği (2 × tur sayısı)
-_SUMMARY_KEEP_RECENT = 10   # Özetlemeden sonra canlı tutulan son mesaj sayısı (5 tur)
+# 32 mesaj = 16 konuşma turu.
+_SUMMARY_TRIGGER = 32       # Mesaj sayısı eşiği (2 × tur sayısı)
+_SUMMARY_KEEP_RECENT = 12   # Özetlemeden sonra canlı tutulan son mesaj sayısı (6 tur)
 
 
 
 async def _summarize_and_compress_history(
     chat_history: list[dict],
     thread_id: str | None,
-) -> tuple[list[dict], str]:
+    memory: ThreadMemory | None = None,
+) -> tuple[list[dict], ThreadMemory]:
     """Eski mesajları LLM ile özetler, chat_history'yi sıkıştırır.
 
-    Returns (compressed_history, summary_text).
+    Returns (compressed_history, updated_thread_memory).
     compressed_history = son _SUMMARY_KEEP_RECENT mesaj.
     """
     from src.rag.llm import get_rag_llm
 
+    memory = memory or ThreadMemory.empty()
     old_msgs = chat_history[:-_SUMMARY_KEEP_RECENT]
     recent_msgs = chat_history[-_SUMMARY_KEEP_RECENT:]
 
@@ -786,10 +845,13 @@ async def _summarize_and_compress_history(
     try:
         llm = get_rag_llm()
         prompt = (
-            "Aşağıdaki konuşmayı, ileride bağlam olarak kullanılacak şekilde "
-            "kısa ve bilgi yoğun biçimde özetle. Önemli kararları, gerçekleri "
-            "ve bağlamı koru. Maksimum 300 kelime.\n\n"
-            f"Konuşma:\n{chr(10).join(lines)}\n\nÖzet:"
+            "Aşağıdaki mevcut konuşma özetini ve yeni konuşma parçasını tek bir "
+            "rolling thread memory özetine sıkıştır. Önceki önemli kararları, "
+            "kullanıcının tercihlerini, proje bağlamını ve açık kalan işleri koru. "
+            "Gereksiz selamlaşma ve tekrarları çıkar. Maksimum 300 kelime.\n\n"
+            f"Mevcut özet:\n{memory.rolling_summary or '(yok)'}\n\n"
+            f"Yeni konuşma parçası:\n{chr(10).join(lines)}\n\n"
+            "Güncel özet:"
         )
         response = await llm.ainvoke([HumanMessage(content=prompt)])
         summary = response.content.strip()
@@ -800,13 +862,12 @@ async def _summarize_and_compress_history(
     except Exception as exc:
         logger.warning("Özetleme başarısız: %s", exc)
 
-    if summary and thread_id:
-        try:
-            await _get_shared_data_layer().patch_thread_metadata(thread_id, {"summary": summary})
-        except Exception as exc:
-            logger.warning("Thread metadata güncellenemedi: %s", exc)
+    if not summary:
+        return _trim_chat_history(chat_history), memory
 
-    return recent_msgs, summary
+    updated_memory = memory.with_summary(summary)
+    await _persist_thread_memory(thread_id, updated_memory)
+    return recent_msgs, updated_memory
 
 
 def _trim_chat_history(chat_history: list[dict]) -> list[dict]:
@@ -820,7 +881,11 @@ def _trim_chat_history(chat_history: list[dict]) -> list[dict]:
     return chat_history
 
 
-def _build_lc_history(chat_history: list[dict], summary: str | None = None) -> list:
+def _build_lc_history(
+    chat_history: list[dict],
+    memory: ThreadMemory | None = None,
+    summary: str | None = None,
+) -> list:
     """Son MAX_HISTORY_TURNS cift (user+assistant) mesaji LangChain formatina cevirir.
 
     Uc katmanli koruma:
@@ -829,8 +894,10 @@ def _build_lc_history(chat_history: list[dict], summary: str | None = None) -> l
     3. Total char budget: toplam karakter sayisi _MAX_HISTORY_CHARS'i asmaz
        (per-user context window'a sigdirmak icin)
 
-    summary verilirse en başa SystemMessage olarak eklenir (uzun süreli bellek).
+    memory/summary verilirse en başa SystemMessage olarak eklenir (thread memory).
     """
+    if memory is None and summary:
+        memory = ThreadMemory.from_metadata({"summary": summary})
     MAX_MSG_CHARS = 1500
     lc = []
     for m in chat_history:
@@ -854,8 +921,9 @@ def _build_lc_history(chat_history: list[dict], summary: str | None = None) -> l
         removed_a = lc.pop(0)
         total_chars -= len(removed_u.content) + len(removed_a.content)
 
-    if summary:
-        lc.insert(0, SystemMessage(content=f"Önceki konuşma özeti:\n{summary}"))
+    memory_context = format_memory_context(memory)
+    if memory_context:
+        lc.insert(0, SystemMessage(content=memory_context))
 
     return lc
 
@@ -977,6 +1045,19 @@ async def on_message(message: cl.Message):
                 dl_msg.content = f"Whisper error: {e}"
             await dl_msg.update()
             thinking_msg.content = ""
+            await thinking_msg.update()
+            return
+
+        pin = extract_memory_pin(cmd)
+        if pin:
+            thread_memory = _get_thread_memory().with_pin(pin)
+            _set_thread_memory(thread_memory)
+            await _persist_thread_memory(cl.user_session.get("id"), thread_memory)
+            thinking_msg.content = "Bu sohbet için not aldım."
+            await thinking_msg.update()
+            return
+        if is_memory_command(cmd):
+            thinking_msg.content = "Hatırlamamı istediğin notu anlayamadım. Örnek: `bunu hatırla: rapor dili akademik olsun`"
             await thinking_msg.update()
             return
 
@@ -1189,8 +1270,9 @@ async def on_message(message: cl.Message):
 
         # ── Agent streaming ──
 
-        session_summary = cl.user_session.get("session_summary") or ""
-        lc_history = _build_lc_history(chat_history, summary=session_summary or None)
+        thread_memory = _get_thread_memory()
+        thread_memory_hash = memory_hash(thread_memory)
+        lc_history = _build_lc_history(chat_history, memory=thread_memory)
         source_filter = ingested_filenames[0] if len(ingested_filenames) == 1 else ""
         session_uploads: list[str] = list(cl.user_session.get("session_uploads") or [])
 
@@ -1277,6 +1359,7 @@ async def on_message(message: cl.Message):
                     retrieval_strategy=_sess_strategy,
                     use_rerank=_sess_rerank,
                     trace_context=_text_trace,
+                    memory_hash=thread_memory_hash,
                 ),
                 _STREAM_CHUNK_TIMEOUT,
             ):
@@ -1343,6 +1426,7 @@ async def on_message(message: cl.Message):
                 retrieval_strategy=_sess_strategy,
                 use_rerank=_sess_rerank,
                 trace_context={**_text_trace, "attempt": "fallback_exception"},
+                memory_hash=thread_memory_hash,
             )
             final_parts = [answer]
             for i in range(0, len(answer), 24):
@@ -1369,6 +1453,7 @@ async def on_message(message: cl.Message):
                     retrieval_strategy=_sess_strategy,
                     use_rerank=_sess_rerank,
                     trace_context={**_text_trace, "attempt": "fallback_empty_stream"},
+                    memory_hash=thread_memory_hash,
                 )
             except Exception as exc:
                 logger.error("Fallback ainvoke de başarısız: %s", exc)
@@ -1404,11 +1489,10 @@ async def on_message(message: cl.Message):
 
         if len(chat_history) >= _SUMMARY_TRIGGER:
             thread_id = cl.user_session.get("id")
-            chat_history, new_summary = await _summarize_and_compress_history(
-                chat_history, thread_id
+            chat_history, updated_memory = await _summarize_and_compress_history(
+                chat_history, thread_id, _get_thread_memory()
             )
-            if new_summary:
-                cl.user_session.set("session_summary", new_summary)
+            _set_thread_memory(updated_memory)
         else:
             chat_history = _trim_chat_history(chat_history)
 

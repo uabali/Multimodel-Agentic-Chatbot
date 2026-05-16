@@ -30,6 +30,8 @@ SOLID uyumu:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 
 from langgraph.graph import END, StateGraph
@@ -47,9 +49,27 @@ from src.agent.nodes import (
     web_search_node,
     direct_response_node,
 )
+from src.memory.thread_memory import is_memory_command
 from src.observability.langsmith import build_graph_config, record_semantic_cache_hit
 
 logger = logging.getLogger(__name__)
+
+
+def build_semantic_cache_context(
+    *,
+    source_filter: str = "",
+    session_uploads: list[str] | None = None,
+    retrieval_strategy: str | None = None,
+    memory_hash: str = "",
+) -> str:
+    """Stable cache context; memory changes must invalidate cached answers."""
+    payload = json.dumps({
+        "sf": source_filter or "",
+        "su": sorted(session_uploads or []),
+        "rs": retrieval_strategy or "",
+        "mh": memory_hash or "",
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -281,6 +301,7 @@ def run_agent(
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
     trace_context: dict | None = None,
+    memory_hash: str = "",
 ) -> str:
     """Senkron agent çalıştırıcı (test veya CLI için)."""
     state = _init_state(
@@ -316,6 +337,7 @@ async def arun_agent(
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
     trace_context: dict | None = None,
+    memory_hash: str = "",
 ) -> str:
     """Asenkron agent çalıştırıcı."""
     state = _init_state(
@@ -351,6 +373,7 @@ async def astream_agent(
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
     trace_context: dict | None = None,
+    memory_hash: str = "",
 ):
     """Agent çalıştırıcı: mesaj ve güncelleme olaylarını stream eder.
 
@@ -358,21 +381,21 @@ async def astream_agent(
       - Önce benzer soru cache'te aranır; bulunursa pipeline atlanır.
       - Bulunamazsa pipeline çalışır ve yanıt cache'e yazılır.
     """
-    import hashlib as _hashlib
-    import json as _json
     from src.config import settings as _s
 
     # Semantic cache bağlam anahtarı — aynı soru farklı belge setlerinde
     # yanlış cache dönmesini engeller.
     def _build_cache_ctx() -> str:
-        payload = _json.dumps({
-            "sf": source_filter or "",
-            "su": sorted(session_uploads or []),
-            "rs": retrieval_strategy or "",
-        }, sort_keys=True)
-        return _hashlib.sha256(payload.encode()).hexdigest()[:16]
+        return build_semantic_cache_context(
+            source_filter=source_filter,
+            session_uploads=session_uploads,
+            retrieval_strategy=retrieval_strategy,
+            memory_hash=memory_hash,
+        )
 
     def _should_use_semantic_cache() -> bool:
+        if is_memory_command(question):
+            return False
         if not (_s.semantic_cache_enabled and not image_data and input_type == "text"):
             return False
         # Lokal sohbetlerde cache embedding maliyeti cevabın kendisinden pahalı.

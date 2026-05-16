@@ -165,6 +165,8 @@ src/
 │   ├── semantic_cache.py     # Query cache with context key
 │   ├── embeddings.py         # BGE-M3 singleton
 │   └── llm.py                # DualLLM profiles (chat/rag/agent)
+├── memory/
+│   └── thread_memory.py      # Thread-scoped rolling summary and pinned facts
 ├── mcp/
 │   ├── mcp_client.py         # MultiServerMCPClient
 │   └── mcp_config.json       # Server definitions
@@ -180,6 +182,7 @@ src/
 tests/
 ├── test_ingest.py            # PDF visual ingest opt-in/skip behavior
 ├── test_observability.py     # LangSmith config, redaction, graph/manual spans
+├── test_thread_memory.py     # short/long thread memory and cache context
 ├── test_security.py          # traversal, rate limiter, API auth, URL guard, settings
 └── test_rag_retriever.py     # retriever heuristics and deduplication
 ```

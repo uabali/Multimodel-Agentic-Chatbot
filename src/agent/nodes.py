@@ -59,6 +59,39 @@ from src.config import settings
 logger = logging.getLogger(__name__)
 
 
+def select_recent_history(messages: list, *, mode: str = "rag") -> list:
+    """Select bounded recent chat history while preserving memory SystemMessage."""
+    max_messages = 6 if mode == "rag" else 8
+    char_budget = 2500 if mode == "rag" else 3500
+
+    system_messages = [m for m in messages if isinstance(m, SystemMessage)]
+    chat_messages = [m for m in messages if not isinstance(m, SystemMessage)]
+    selected = list(chat_messages[-max_messages:])
+
+    def _chars(items: list) -> int:
+        return sum(len(getattr(m, "content", "") or "") for m in items)
+
+    total = _chars(selected)
+    while total > char_budget and len(selected) > 2:
+        drop_count = (
+            2
+            if len(selected) >= 2
+            and isinstance(selected[0], HumanMessage)
+            and isinstance(selected[1], AIMessage)
+            else 1
+        )
+        for _ in range(drop_count):
+            removed = selected.pop(0)
+            total -= len(getattr(removed, "content", "") or "")
+    while total > char_budget and selected:
+        removed = selected.pop(0)
+        total -= len(getattr(removed, "content", "") or "")
+    while selected and isinstance(selected[0], AIMessage):
+        selected.pop(0)
+
+    return system_messages[:1] + selected
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM fabrika erişimleri — DIP: node'lar doğrudan ChatOpenAI yaratmaz
@@ -1048,7 +1081,7 @@ async def _retry_generator_with_compact_context(
     llm = _get_rag_llm(temperature=0.0, max_tokens=min(settings.rag_max_tokens, 512))
     response = await llm.ainvoke([
         SystemMessage(content=system_content),
-        *prior_messages[-1:],
+        *select_recent_history(list(prior_messages), mode="rag"),
         HumanMessage(content=question),
     ])
     return _coerce_llm_text(response)
@@ -1084,6 +1117,7 @@ async def generator_node(state: AgentState) -> AgentState:
     answer_question = state.get("original_question") or question
     documents = state.get("documents", [])
     prior_messages = list(state.get("messages", []))
+    rag_history = select_recent_history(prior_messages, mode="rag")
     vision_context = state.get("vision_context", "")
 
     retrieval_trace = list(state.get("retrieval_trace") or [])
@@ -1101,8 +1135,7 @@ async def generator_node(state: AgentState) -> AgentState:
         # Türkçe için muhafazakâr: 1 token ≈ 2.5 karakter.
         n_ctx = settings.llm_context_size
         output_tokens = settings.rag_max_tokens
-        # prior_messages[-2:] yaklaşık token maliyetini hesaba kat
-        prior_chars = sum(len(getattr(m, "content", "") or "") for m in prior_messages[-2:])
+        prior_chars = sum(len(getattr(m, "content", "") or "") for m in rag_history)
         prior_tokens_est = max(0, prior_chars // 4)
         overhead_tokens = 600 + prior_tokens_est  # sistem şablonu + soru + geçmiş + pay
         input_budget_tokens = max(256, n_ctx - output_tokens - overhead_tokens)
@@ -1146,7 +1179,7 @@ async def generator_node(state: AgentState) -> AgentState:
             "n_ctx=%d, output_max=%dtok, overhead=%dtok",
             input_budget_tokens, budget_chars, used_chars,
             docs_included, len(documents), bool(vision_context),
-            len(prior_messages[-2:]), n_ctx, output_tokens, overhead_tokens,
+            len(rag_history), n_ctx, output_tokens, overhead_tokens,
         )
 
         # Trace'te used_in_context flag'ini işaretle ve final_used log'unu yaz
@@ -1171,7 +1204,7 @@ async def generator_node(state: AgentState) -> AgentState:
         system_content = RAG_NO_CONTEXT_SYSTEM_PROMPT
         logger.info(
             "Generator: no_context [prior=%d, n_ctx=%d, output_max=%dtok]",
-            len(prior_messages[-2:]), settings.llm_context_size,
+            len(rag_history), settings.llm_context_size,
             state.get("max_tokens") or settings.rag_max_tokens,
         )
 
@@ -1182,7 +1215,7 @@ async def generator_node(state: AgentState) -> AgentState:
     llm = _get_rag_llm(temperature=session_temp, max_tokens=session_max_tok)
 
     messages_to_send = [SystemMessage(content=system_content)]
-    messages_to_send.extend(prior_messages[-2:])
+    messages_to_send.extend(rag_history)
     messages_to_send.append(HumanMessage(content=answer_question))
 
     t_llm = time.perf_counter()
@@ -1324,7 +1357,7 @@ async def _fast_web_summarize(question: str, result_text: str, prior_messages: l
     llm = _get_rag_llm(temperature=0.0)
     messages_to_send = [SystemMessage(content=system)]
     if prior_messages:
-        messages_to_send.extend(prior_messages[-4:])
+        messages_to_send.extend(select_recent_history(list(prior_messages), mode="direct"))
     messages_to_send.append(
         HumanMessage(content=f"Question: {question}\n\nWeb results:\n{result_text[:5000]}")
     )
@@ -1342,6 +1375,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
     t0 = time.perf_counter()
     question = state["question"]
     prior_messages = list(state.get("messages", []))
+    direct_history = select_recent_history(prior_messages, mode="direct")
 
     # Hızlı yol — gerçek zamanlı web sorguları
     if is_web_query(question):
@@ -1364,7 +1398,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
                 answer = WebResultFormatter.format_weather(question, web_result.text)
                 logger.info("Direct: weather_format [ans_len=%dch, t=%.3fs]", len(answer), time.perf_counter() - t_sum)
             else:
-                answer = await _fast_web_summarize(question, web_result.text, prior_messages)
+                answer = await _fast_web_summarize(question, web_result.text, direct_history)
                 logger.info(
                     "Direct: web_summarize [ans_len=%dch, llm_t=%.3fs, total_t=%.3fs]",
                     len(answer), time.perf_counter() - t_sum, time.perf_counter() - t0,
@@ -1464,7 +1498,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
         )
         llm = _get_chat_llm()
         messages_to_send = [SystemMessage(content=system_prompt)]
-        messages_to_send.extend(prior_messages[-4:])
+        messages_to_send.extend(direct_history)
         messages_to_send.append(HumanMessage(content=question))
         t_plain = time.perf_counter()
         response = await llm.ainvoke(messages_to_send)
@@ -1512,7 +1546,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
     if backend in {"llama.cpp", "llamacpp", "llama"} and needs_mcp_tools(question):
         logger.info("Direct: react_skip [reason=llamacpp_no_tools, prior=%d]", len(prior_messages))
         messages_to_send = [SystemMessage(content=system_prompt)]
-        messages_to_send.extend(prior_messages)
+        messages_to_send.extend(direct_history)
         messages_to_send.append(HumanMessage(content=question))
         response = await llm.ainvoke(messages_to_send)
         generation = getattr(response, "content", "") or ""
@@ -1544,7 +1578,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
     except Exception:
         agent = create_react_agent(llm, all_tools, prompt=system_prompt)
 
-    result = await agent.ainvoke({"messages": prior_messages + [HumanMessage(content=question)]})
+    result = await agent.ainvoke({"messages": direct_history + [HumanMessage(content=question)]})
 
     generation = result["messages"][-1].content
     logger.info(
