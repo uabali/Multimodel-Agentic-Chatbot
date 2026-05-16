@@ -929,26 +929,45 @@ def _build_lc_history(
 
 
 def _build_source_elements(docs) -> list[cl.Text]:
-    """RAG kaynaklarından minimal Chainlit Text elementleri oluşturur (side panel)."""
+    """RAG kaynaklarını okunabilir, numaralı Chainlit side-panel öğelerine dönüştürür."""
     if not docs:
         return []
 
     seen: set[str] = set()
     elements: list[cl.Text] = []
-    for doc in docs:
+    for idx, doc in enumerate(docs, 1):
         meta = getattr(doc, "metadata", None) or {}
         src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
         page = meta.get("page", "")
+        url = meta.get("url") or meta.get("source_url") or (meta.get("source") if meta.get("type") == "web_search" else "")
+        chunk_index = meta.get("chunk_index", "")
 
         src_short = Path(src).name if src and ("/" in src or "\\" in src) else (src or "Bilinmeyen kaynak")
-        dedup_key = f"{src_short}:{page}"
+        dedup_key = f"{src_short}:{page}:{chunk_index}:{url}"
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
 
         page_str = f" s.{page}" if page and str(page) not in {"", "?"} else ""
-        label = f"{src_short}{page_str}"
-        elements.append(cl.Text(name=label, content=src_short + page_str, display="side"))
+        score_parts = []
+        for key, label in (("retrieval_score", "retrieval"), ("rerank_score", "rerank")):
+            if meta.get(key) is None:
+                continue
+            try:
+                score_parts.append(f"{label}={float(meta[key]):.3f}")
+            except (TypeError, ValueError):
+                score_parts.append(f"{label}={meta[key]}")
+        scores = f"\nSkorlar: {', '.join(score_parts)}" if score_parts else ""
+        excerpt = re.sub(r"\s+", " ", (getattr(doc, "page_content", "") or "").strip())[:900]
+        url_line = f"\nURL: {url}" if url else ""
+        label = f"Kaynak {idx} · {src_short}{page_str}"
+        content = (
+            f"Kaynak {idx}: {src_short}{page_str}"
+            f"{url_line}"
+            f"{scores}\n\n"
+            f"{excerpt}"
+        ).strip()
+        elements.append(cl.Text(name=label, content=content, display="side"))
 
     return elements
 

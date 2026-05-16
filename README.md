@@ -205,6 +205,10 @@ PDF_VISUAL_INGEST_MAX_PAGES=0  # default: disabled; set N > 0 to analyze first N
 
 APP_LANGSMITH_ENABLED=false     # opt-in tracing
 APP_LANGSMITH_REDACT=true       # sanitize prompts/doc chunks before sending
+APP_LANGSMITH_PREVIEW_ENABLED=true
+APP_LANGSMITH_PREVIEW_CHARS=240
+APP_LANGSMITH_DOC_PREVIEW_CHARS=320
+APP_LANGSMITH_MAX_DOC_PREVIEWS=6
 LANGSMITH_API_KEY=
 LANGSMITH_PROJECT=frappe-rag-dev
 

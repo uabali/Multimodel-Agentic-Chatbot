@@ -1,4 +1,5 @@
 import pytest
+from langchain_core.documents import Document
 
 
 def test_langsmith_disabled_is_noop(monkeypatch):
@@ -25,11 +26,14 @@ def test_langsmith_metadata_and_payload_are_redacted():
     )
 
     metadata_text = str(metadata)
-    assert "Ham soru" not in metadata_text
-    assert "raw-invoice.pdf" not in metadata_text
     assert "session-123" not in metadata_text
     assert metadata["question_hash"]
+    assert metadata["question_preview"]
+    assert metadata["question_preview"].startswith("Ham soru:")
+    assert "[redacted-email]" in metadata["question_preview"]
+    assert "[redacted-id]" in metadata["question_preview"]
     assert metadata["source_filter_hash"]
+    assert metadata["source_filter_preview"] == "raw-invoice.pdf"
     assert metadata["session_id_hash"]
 
     payload = obs.anonymize_payload({
@@ -55,11 +59,11 @@ def test_graph_config_contains_run_metadata_without_raw_values(monkeypatch):
 
     config = obs.build_graph_config(
         run_name="frappe.chat_turn",
-        question="raw prompt",
-        source_filter="secret.pdf",
+        question="mail ali@example.com tc 12345678901",
+        source_filter="secret-contract.pdf",
         session_uploads=["secret.pdf"],
         input_type="text",
-        trace_context={"channel": "chainlit_text", "session_id": "session-raw"},
+        trace_context={"channel": "chainlit_text", "session_id": "session-raw", "history_turn_count": 2},
     )
 
     assert config is not None
@@ -69,9 +73,52 @@ def test_graph_config_contains_run_metadata_without_raw_values(monkeypatch):
     assert "langgraph" in config["tags"]
     assert "rag-context" in config["tags"]
     metadata_text = str(config["metadata"])
-    assert "raw prompt" not in metadata_text
-    assert "secret.pdf" not in metadata_text
+    assert "ali@example.com" not in metadata_text
+    assert "12345678901" not in metadata_text
     assert "session-raw" not in metadata_text
+    assert config["metadata"]["question_preview"] == "mail [redacted-email] tc [redacted-id]"
+    assert config["metadata"]["history_turn_count"] == 2
+
+
+def test_langsmith_preview_can_be_disabled(monkeypatch):
+    from src.observability import langsmith as obs
+
+    monkeypatch.setattr(obs.settings, "app_langsmith_preview_enabled", False)
+    metadata = obs.build_common_metadata(question="okunabilir soru", source_filter="file.pdf")
+
+    assert metadata["question_preview"] == ""
+    assert metadata["source_filter_preview"] == ""
+
+
+def test_document_and_retrieval_summaries_are_readable_without_full_content():
+    from src.observability import langsmith as obs
+
+    doc = Document(
+        page_content="Gizli belge metni ali@example.com 12345678901 " * 20,
+        metadata={
+            "source_file": "rapor.pdf",
+            "page": 3,
+            "chunk_index": 7,
+            "retrieval_score": 0.42,
+            "rerank_score": 0.9,
+        },
+    )
+    docs = obs.summarize_documents([doc], preview_chars=80)
+
+    assert docs[0]["chunk_id"] == "rapor.pdf#7"
+    assert "page_content" not in docs[0]
+    assert "ali@example.com" not in str(docs)
+    assert "12345678901" not in str(docs)
+    assert "[redacted-email]" in docs[0]["content_preview"]
+
+    trace = obs.summarize_retrieval_trace([
+        {"chunk_id": "rapor.pdf#7", "hybrid_score": 0.42, "rerank_score": 0.9, "used_in_context": True},
+        {"chunk_id": "rapor.pdf#8", "hybrid_score": 0.2, "rerank_score": 0.1, "used_in_context": False},
+    ])
+    assert trace["retrieval_trace_count"] == 2
+    assert trace["used_context_count"] == 1
+    assert trace["top_chunks"] == "rapor.pdf#7 | rapor.pdf#8"
+    assert trace["used_chunks"] == "rapor.pdf#7"
 
 
 def test_run_agent_passes_langsmith_config(monkeypatch):
@@ -132,6 +179,41 @@ async def test_semantic_cache_hit_records_manual_observation(monkeypatch):
     assert captured["cached_answer"] == "cached answer"
     assert captured["trace_context"]["channel"] == "unit"
     assert events[0] == ("updates", {"generator": {"generation": "cached answer"}})
+
+
+@pytest.mark.anyio
+async def test_router_and_generator_record_node_observations(monkeypatch):
+    from src.agent import graph
+    from src.agent import nodes
+    from src.observability import langsmith as obs
+
+    captured = []
+
+    def fake_record_observation(name, **kwargs):
+        captured.append({"name": name, **kwargs})
+        return "run-id"
+
+    class FakeLLM:
+        async def ainvoke(self, messages):
+            class Response:
+                content = "test answer"
+            return Response()
+
+    monkeypatch.setattr(obs, "record_observation", fake_record_observation)
+    monkeypatch.setattr(nodes, "_get_rag_llm", lambda *args, **kwargs: FakeLLM())
+
+    state = graph._init_state("selam")
+    routed = await nodes.router_node(state)
+    generated = await nodes.generator_node({**routed, "route": "direct"})
+
+    router_obs = next(item for item in captured if item["name"] == "frappe.router_decision")
+    generator_obs = next(item for item in captured if item["name"] == "frappe.generator_result")
+
+    assert router_obs["outputs"]["route"] == "direct"
+    assert router_obs["outputs"]["route_reason"] == "keyword"
+    assert generator_obs["outputs"]["answer_preview"] == "test answer"
+    assert generator_obs["outputs"]["answer_chars"] == len("test answer")
+    assert generated["answer_preview"] == "test answer"
 
 
 def test_ingest_observation_omits_raw_filename_and_content(monkeypatch, tmp_path):

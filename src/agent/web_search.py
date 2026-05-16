@@ -33,6 +33,16 @@ class WebSearchResult(NamedTuple):
     provider: str  # "tavily"
 
 
+class WebSourceRecord(NamedTuple):
+    """Tekil web kaynağı; Markdown citation ve RAG context için kullanılır."""
+
+    index: int
+    title: str
+    url: str
+    content: str
+    published: str = ""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tavily provider
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,10 +97,14 @@ class WebSearchService:
                 for idx, r in enumerate(results, 1):
                     title = r.get("title", "")
                     published = r.get("published_date", "")
-                    content = (r.get("content") or "")[:700]
+                    content = re.sub(r"\s+", " ", r.get("content") or "").strip()[:900]
                     url = r.get("url", "")
-                    date_tag = f" [{published}]" if published else ""
-                    parts.append(f"[Result {idx}]{date_tag} {title}\n{content}\nSource: {url}")
+                    parts.append(
+                        f"[Result {idx}] {title}\n"
+                        f"Published: {published or 'unknown'}\n"
+                        f"Snippet: {content}\n"
+                        f"Source: {url}"
+                    )
                 return "\n\n".join(parts)
 
             text = await asyncio.to_thread(_call)
@@ -112,35 +126,82 @@ class WebResultFormatter:
     """Web arama sonuçlarını kullanıcıya gösterim için formatlar."""
 
     @staticmethod
-    def extract_sources(web_text: str, limit: int = 2) -> list[tuple[str, str]]:
-        """`Source:` satırlarından (başlık, URL) çiftlerini çıkarır."""
-        sources: list[tuple[str, str]] = []
+    def extract_source_records(web_text: str, limit: int = 5) -> list[WebSourceRecord]:
+        """Structured source records çıkarır; eski `[Result]...Source:` formatıyla uyumludur."""
+        records: list[WebSourceRecord] = []
+        current: dict[str, str | int] | None = None
+        snippet_lines: list[str] = []
+
+        def _flush() -> None:
+            nonlocal current, snippet_lines
+            if not current:
+                return
+            url = str(current.get("url") or "").strip()
+            title = re.sub(r"\s+", " ", str(current.get("title") or url)).strip()
+            if url and all(r.url != url for r in records):
+                records.append(WebSourceRecord(
+                    index=int(current.get("index") or len(records) + 1),
+                    title=title or url,
+                    url=url,
+                    content=re.sub(r"\s+", " ", " ".join(snippet_lines)).strip(),
+                    published=str(current.get("published") or "").strip(),
+                ))
+            current = None
+            snippet_lines = []
+
         current_title = ""
         for raw_line in web_text.splitlines():
             line = raw_line.strip()
             if not line:
                 continue
-            m = re.match(r"\[Result\s+\d+\]\s+(.+)", line, re.IGNORECASE)
+            m = re.match(r"\[Result\s+(\d+)\]\s+(?:\[(.*?)\]\s+)?(.+)", line, re.IGNORECASE)
             if m:
-                current_title = m.group(1).strip()
+                _flush()
+                current = {
+                    "index": int(m.group(1)),
+                    "published": (m.group(2) or "").strip(),
+                    "title": m.group(3).strip(),
+                }
+                current_title = m.group(3).strip()
+                continue
+            if current and line.lower().startswith("published:"):
+                published = line.split(":", 1)[1].strip()
+                if published and published.lower() != "unknown":
+                    current["published"] = published
+                continue
+            if current and line.lower().startswith("snippet:"):
+                snippet_lines.append(line.split(":", 1)[1].strip())
                 continue
             if line.lower().startswith("source:"):
                 url = line.split(":", 1)[1].strip()
-                if url and all(u != url for _, u in sources):
-                    sources.append((current_title or url, url))
-                    current_title = ""
-            if len(sources) >= limit:
+                if current is None:
+                    current = {"index": len(records) + 1, "title": current_title or url}
+                current["url"] = url
+                _flush()
+                current_title = ""
+            elif current:
+                snippet_lines.append(line)
+            if len(records) >= limit:
                 break
-        return sources
+        _flush()
+        return records[:limit]
 
     @staticmethod
-    def append_sources(answer: str, web_text: str, question: str, limit: int = 2) -> str:
-        """Yanıtın altına kaynak listesi ekler."""
-        sources = WebResultFormatter.extract_sources(web_text, limit)
-        if not sources:
+    def extract_sources(web_text: str, limit: int = 5) -> list[tuple[str, str]]:
+        """`Source:` satırlarından (başlık, URL) çiftlerini çıkarır."""
+        return [(r.title, r.url) for r in WebResultFormatter.extract_source_records(web_text, limit)]
+
+    @staticmethod
+    def append_sources(answer: str, web_text: str, question: str, limit: int = 4) -> str:
+        """Yanıtın altına ChatGPT web-search benzeri numaralı kaynak listesi ekler."""
+        records = WebResultFormatter.extract_source_records(web_text, limit)
+        if not records:
             return answer.strip()
         header = "Kaynaklar:" if is_turkish_query(question) else "Sources:"
-        lines = [header] + [f"- [{title}]({url})" for title, url in sources]
+        lines = [header]
+        for i, record in enumerate(records, 1):
+            published = f" — {record.published}" if record.published else ""
+            lines.append(f"- [{i}] [{record.title}]({record.url}){published}")
         return f"{answer.strip()}\n\n" + "\n".join(lines)
 
     @staticmethod
@@ -243,9 +304,9 @@ class WebResultFormatter:
 def _is_time_sensitive(query: str) -> bool:
     """Sorgunun gerçek zamanlı/tarih duyarlı olup olmadığını döner."""
     markers = (
-        "bugün", "today", "şu an", "right now", "son 24", "last 24",
+        "bugün", "today", "şu an", "şuanki", "şimdiki", "right now", "son 24", "last 24",
         "bu hafta", "this week", "güncel", "latest", "breaking", "son dakika",
-        "haber", "fiyatı", "price", "kur", "borsa",
+        "haber", "fiyat", "price", "kur", "borsa", "hisse", "stock",
     )
     q = query.lower()
     return any(m in q for m in markers)

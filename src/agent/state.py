@@ -72,3 +72,17 @@ class AgentState(TypedDict):
     # Her eleman: {chunk_id, hybrid_score, rerank_score, used_in_context}
     # retriever_node doldurur, generator_node used_in_context=True işaretler.
     retrieval_trace: list[dict]
+
+    # LangSmith/CSV okunabilirliği için sanitize edilmiş özet alanları.
+    answer_preview: str
+    answer_chars: int
+    document_count: int
+    used_context_count: int
+    document_previews: list[dict]
+    retrieval_trace_summary: dict
+    top_sources: str
+    top_chunks: str
+    used_chunks: str
+    retry_summary: dict
+    retry_path: str
+    latency_ms_by_stage: dict

@@ -119,7 +119,9 @@ BELGE KULLANIMI — KESİN KURALLAR:
 - Bağlam; yüklenen belgeler veya web arama sonuçları ([type: web_search] ile işaretli) içerebilir.
 - Bağlamda olmayan hiçbir bilgiyi ekleme, tahmin etme veya çıkar (inference) yapma.
 - Kendi eğitim verinden, genel bilginden veya bağlam dışı dış kaynaklardan bilgi EKLEME.
-- Soru bağlamda varsa: Yanıtı doğal cümlelerle yaz. Kaynak gösterimi için cümle sonuna kısa parantez içi referans ekle, örn: (Fly ticket.pdf). Numaralı [Kaynak N] blokları KULLANMA.
+- Soru bağlamda varsa: Yanıtı doğal cümlelerle yaz ve her önemli iddia/rakamdan sonra kaynak numarası ekle: [Kaynak 1], [Kaynak 2].
+- Birden fazla kaynak kullanıyorsan ilgili cümle sonunda birden fazla atıf yap: [Kaynak 1][Kaynak 3].
+- Kaynak numarasını sadece aşağıdaki bağlam başlıklarındaki gerçek `[Kaynak N: ...]` numaralarından seç; uydurma kaynak numarası verme.
 - Soru bağlamda YOKSA — ne kadar genel görünse de: "Bu bilgi yüklenen belgelerde yer almamaktadır." yaz. Başka hiçbir şey ekleme.
 
 HİBRİT SENTEZ (YALNIZCA [type: web_search] işaretli web kaynağı VE belge/görsel bağlamı BİRLİKTE mevcutsa uygulanır):
@@ -132,7 +134,8 @@ HİBRİT SENTEZ (YALNIZCA [type: web_search] işaretli web kaynağı VE belge/g�
 FORMAT:
 - Madde listesi ya da paragraf — sorunun niteliğine göre seç.
 - Teknik içerik için kod bloğu veya tablo kullanabilirsin.
-- Yanıtın sonuna ayrı bir Kaynaklar bölümü EKLEME.
+- Yanıtın sonunda kısa bir `Kaynaklar` bölümü ekle ve yalnızca gerçekten kullandığın kaynakları listele.
+- Web kaynaklarında URL verilmişse kaynak listesine URL'yi de ekle.
 
 Bağlam:
 {context}\
@@ -320,4 +323,3 @@ def select_vision_prompt(question: str, image_names: list[str] | None = None) ->
         return VISION_DIAGRAM_PROMPT
 
     return VISION_SYSTEM_PROMPT
-

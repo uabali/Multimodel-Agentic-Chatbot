@@ -243,6 +243,19 @@ def _init_state(
         "max_tokens": max_tokens if max_tokens is not None else _s.chat_max_tokens,
         "retrieval_strategy": retrieval_strategy or _s.retrieval_strategy,
         "use_rerank": use_rerank if use_rerank is not None else _s.use_rerank,
+        "retrieval_trace": [],
+        "answer_preview": "",
+        "answer_chars": 0,
+        "document_count": 0,
+        "used_context_count": 0,
+        "document_previews": [],
+        "retrieval_trace_summary": {},
+        "top_sources": "",
+        "top_chunks": "",
+        "used_chunks": "",
+        "retry_summary": {},
+        "retry_path": "",
+        "latency_ms_by_stage": {},
     }
 
 
@@ -253,6 +266,23 @@ def _turn_run_name(default: str, trace_context: dict | None = None) -> str:
     if channel == "chainlit_audio":
         return "frappe.audio_turn"
     return "frappe.chat_turn"
+
+
+def _history_turn_count(chat_history: list | None) -> int:
+    count = 0
+    for item in chat_history or []:
+        role = getattr(item, "type", None) or getattr(item, "role", None)
+        if isinstance(item, dict):
+            role = item.get("role") or item.get("type")
+        if str(role).lower() in {"human", "user"}:
+            count += 1
+    return count
+
+
+def _trace_with_history(trace_context: dict | None, chat_history: list | None) -> dict | None:
+    if trace_context is None:
+        return None
+    return {**trace_context, "history_turn_count": _history_turn_count(chat_history)}
 
 
 def _graph_config(
@@ -304,6 +334,7 @@ def run_agent(
     memory_hash: str = "",
 ) -> str:
     """Senkron agent çalıştırıcı (test veya CLI için)."""
+    trace_context = _trace_with_history(trace_context, chat_history)
     state = _init_state(
         question, chat_history, source_filter, image_data, input_type,
         session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank,
@@ -340,6 +371,7 @@ async def arun_agent(
     memory_hash: str = "",
 ) -> str:
     """Asenkron agent çalıştırıcı."""
+    trace_context = _trace_with_history(trace_context, chat_history)
     state = _init_state(
         question, chat_history, source_filter, image_data, input_type,
         session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank,
@@ -382,6 +414,7 @@ async def astream_agent(
       - Bulunamazsa pipeline çalışır ve yanıt cache'e yazılır.
     """
     from src.config import settings as _s
+    trace_context = _trace_with_history(trace_context, chat_history)
 
     # Semantic cache bağlam anahtarı — aynı soru farklı belge setlerinde
     # yanlış cache dönmesini engeller.

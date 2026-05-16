@@ -160,6 +160,22 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("APP_LANGSMITH_REDACT"),
     )
+    app_langsmith_preview_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("APP_LANGSMITH_PREVIEW_ENABLED"),
+    )
+    app_langsmith_preview_chars: int = Field(
+        default=240,
+        validation_alias=AliasChoices("APP_LANGSMITH_PREVIEW_CHARS"),
+    )
+    app_langsmith_doc_preview_chars: int = Field(
+        default=320,
+        validation_alias=AliasChoices("APP_LANGSMITH_DOC_PREVIEW_CHARS"),
+    )
+    app_langsmith_max_doc_previews: int = Field(
+        default=6,
+        validation_alias=AliasChoices("APP_LANGSMITH_MAX_DOC_PREVIEWS"),
+    )
 
     # ── Auth ──
     app_admin_username: str = "admin"

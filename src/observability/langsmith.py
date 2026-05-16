@@ -6,6 +6,7 @@ import hashlib
 import logging
 import re
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -107,6 +108,117 @@ def anonymize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return sanitized if isinstance(sanitized, dict) else {"payload": sanitized}
 
 
+def safe_preview(text: Any, max_chars: int | None = None) -> str:
+    """Return a short, redacted, single-line preview for LangSmith inspection."""
+    if not settings.app_langsmith_preview_enabled:
+        return ""
+    limit = max(0, int(max_chars or settings.app_langsmith_preview_chars))
+    if limit <= 0:
+        return ""
+    preview = "" if text is None else str(text)
+    preview = _redact_text(preview)
+    preview = re.sub(r"\s+", " ", preview).strip()
+    if len(preview) > limit:
+        preview = preview[: max(0, limit - 1)].rstrip() + "…"
+    return preview
+
+
+def _doc_source(meta: dict[str, Any]) -> str:
+    return str(meta.get("display_name") or meta.get("source_file") or meta.get("source") or "")
+
+
+def _doc_chunk_id(doc: Any, meta: dict[str, Any]) -> str:
+    source = _doc_source(meta)
+    chunk_index = meta.get("chunk_index")
+    if source and chunk_index is not None:
+        return f"{source}#{chunk_index}"
+    if source:
+        return source
+    return stable_hash(getattr(doc, "page_content", "") or "")
+
+
+def summarize_documents(
+    docs: list[Any] | tuple[Any, ...] | None,
+    *,
+    max_docs: int | None = None,
+    preview_chars: int | None = None,
+) -> list[dict[str, Any]]:
+    """Summarize LangChain Documents without sending full page_content."""
+    if not settings.app_langsmith_preview_enabled:
+        return []
+    limit = max(0, int(max_docs or settings.app_langsmith_max_doc_previews))
+    if limit <= 0:
+        return []
+    char_limit = int(preview_chars or settings.app_langsmith_doc_preview_chars)
+    summaries: list[dict[str, Any]] = []
+    for doc in list(docs or [])[:limit]:
+        meta = getattr(doc, "metadata", {}) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        summary: dict[str, Any] = {
+            "chunk_id": _doc_chunk_id(doc, meta),
+            "source_preview": safe_preview(_doc_source(meta), 120),
+            "page": meta.get("page"),
+            "chunk_index": meta.get("chunk_index"),
+            "chunk_type": meta.get("chunk_type"),
+            "retrieval_score": meta.get("retrieval_score"),
+            "rerank_score": meta.get("rerank_score"),
+            "content_preview": safe_preview(getattr(doc, "page_content", "") or "", char_limit),
+        }
+        summaries.append({k: v for k, v in summary.items() if v not in (None, "", [])})
+    return summaries
+
+
+def summarize_retrieval_trace(
+    trace: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+    *,
+    max_items: int | None = None,
+) -> dict[str, Any]:
+    """Flatten retrieval explainability into CSV-friendly LangSmith fields."""
+    entries = [e for e in list(trace or []) if isinstance(e, dict)]
+    limit = max(0, int(max_items or settings.app_langsmith_max_doc_previews))
+    top = entries[:limit] if limit else []
+
+    def _score(value: Any) -> float | None:
+        return round(float(value), 6) if isinstance(value, (int, float)) else None
+
+    top_chunks: list[str] = []
+    used_chunks: list[str] = []
+    item_summaries: list[dict[str, Any]] = []
+    for entry in top:
+        chunk_id = str(entry.get("chunk_id") or "")
+        hybrid = _score(entry.get("hybrid_score"))
+        rerank = _score(entry.get("rerank_score"))
+        used = bool(entry.get("used_in_context"))
+        if chunk_id:
+            top_chunks.append(chunk_id)
+            if used:
+                used_chunks.append(chunk_id)
+        item_summaries.append({
+            "chunk_id": chunk_id,
+            "hybrid_score": hybrid,
+            "rerank_score": rerank,
+            "used_in_context": used,
+        })
+    return {
+        "retrieval_trace_count": len(entries),
+        "used_context_count": sum(1 for e in entries if e.get("used_in_context")),
+        "top_chunks": " | ".join(top_chunks),
+        "used_chunks": " | ".join(used_chunks),
+        "items": item_summaries,
+    }
+
+
+def summarize_source_distribution(docs: list[Any] | tuple[Any, ...] | None) -> str:
+    counts: Counter[str] = Counter()
+    for doc in docs or []:
+        meta = getattr(doc, "metadata", {}) or {}
+        if isinstance(meta, dict):
+            src = safe_preview(_doc_source(meta) or "?", 120)
+            counts[src] += 1
+    return " | ".join(f"{src}×{count}" for src, count in counts.most_common(8))
+
+
 def get_langsmith_client() -> Client | None:
     """Return a cached LangSmith client, or None when tracing is disabled."""
     global _client
@@ -162,15 +274,19 @@ def build_common_metadata(
     user_id = _trace_context_value(trace_context, "user_id", "")
     channel = _trace_context_value(trace_context, "channel", "unknown")
     image_count = int(_trace_context_value(trace_context, "image_count", len(image_data or [])) or 0)
+    history_turn_count = int(_trace_context_value(trace_context, "history_turn_count", 0) or 0)
     metadata: dict[str, Any] = {
         "app": "frappe-rag-agent",
         "env": settings.app_env,
         "channel": str(channel),
         "input_type": input_type,
+        "input_summary": f"{input_type}; images={image_count}; uploads={len(uploads)}",
+        "history_turn_count": history_turn_count,
         "has_image": bool(image_data) or image_count > 0,
         "image_count": image_count,
         "has_source_filter": bool(source_filter),
         "source_filter_hash": stable_hash(source_filter),
+        "source_filter_preview": safe_preview(source_filter, 120),
         "session_upload_count": len(uploads),
         "session_upload_hashes": [stable_hash(u) for u in sorted(uploads)[:10]],
         "retrieval_strategy": retrieval_strategy or settings.retrieval_strategy,
@@ -181,6 +297,7 @@ def build_common_metadata(
         "max_tokens": settings.chat_max_tokens if max_tokens is None else max_tokens,
         "question_chars": len((question or "").strip()),
         "question_hash": stable_hash(question),
+        "question_preview": safe_preview(question),
     }
     if session_id:
         metadata["session_id_hash"] = stable_hash(session_id)

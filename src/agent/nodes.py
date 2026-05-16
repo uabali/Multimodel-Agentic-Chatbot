@@ -59,6 +59,52 @@ from src.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _history_turn_count(messages: list) -> int:
+    return sum(1 for m in messages if isinstance(m, HumanMessage))
+
+
+def _observe_node(
+    name: str,
+    state: AgentState,
+    *,
+    inputs: dict | None = None,
+    outputs: dict | None = None,
+    metadata: dict | None = None,
+    tags: list[str] | None = None,
+    error: str | None = None,
+) -> None:
+    """Best-effort node observation; disabled LangSmith is a cheap no-op."""
+    try:
+        from src.observability.langsmith import record_observation, safe_preview, stable_hash
+
+        question = state.get("original_question") or state.get("question", "")
+        docs = state.get("documents") or []
+        common = {
+            "app": "frappe-rag-agent",
+            "env": settings.app_env,
+            "question_hash": stable_hash(question),
+            "question_preview": safe_preview(question),
+            "route": state.get("route", ""),
+            "input_type": state.get("input_type", "text"),
+            "history_turn_count": _history_turn_count(list(state.get("messages") or [])),
+            "session_upload_count": len(state.get("session_uploads") or []),
+            "has_source_filter": bool(state.get("source_filter")),
+            "source_filter_hash": stable_hash(state.get("source_filter", "")),
+            "source_filter_preview": safe_preview(state.get("source_filter", ""), 120),
+            "document_count": len(docs),
+        }
+        record_observation(
+            name,
+            inputs=inputs,
+            outputs=outputs,
+            metadata={**common, **(metadata or {})},
+            tags=tags or ["frappe", "node", name.rsplit(".", 1)[-1]],
+            error=error,
+        )
+    except Exception:
+        logger.debug("LangSmith node observation failed for %s", name, exc_info=True)
+
+
 def select_recent_history(messages: list, *, mode: str = "rag") -> list:
     """Select bounded recent chat history while preserving memory SystemMessage."""
     max_messages = 6 if mode == "rag" else 8
@@ -332,44 +378,109 @@ async def router_node(state: AgentState) -> AgentState:
     question = state["question"]
     prior_messages = list(state.get("messages", []))
     q_len = len(question)
+    session_uploads = state.get("session_uploads") or []
 
     if state.get("image_data"):
         imgs = state["image_data"]
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Router → vision [images=%d, mimes=%s, q_len=%d, t=0.00s]",
             len(imgs),
             ",".join(img.get("mime", "?") for img in imgs),
             q_len,
         )
+        _observe_node(
+            "frappe.router_decision",
+            state,
+            outputs={"route": "vision", "route_reason": "image_data", "elapsed_ms": elapsed_ms},
+            metadata={
+                "route_reason": "image_data",
+                "query_chars": q_len,
+                "image_count": len(imgs),
+                "upload_count": len(state.get("session_uploads") or []),
+            },
+            tags=["frappe", "router", "vision"],
+        )
         return {**state, "route": "vision"}
 
     # Dosya yüklendiyse: deterministik RAG — keyword/LLM routing atlanır.
     if state.get("source_filter"):
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Router → rag [reason=source_filter, file='%s', q_len=%d, t=%.3fs]",
             state["source_filter"], q_len, time.perf_counter() - t0,
         )
+        _observe_node(
+            "frappe.router_decision",
+            state,
+            outputs={"route": "rag", "route_reason": "source_filter", "elapsed_ms": elapsed_ms},
+            metadata={
+                "route_reason": "source_filter",
+                "query_chars": q_len,
+                "image_count": 0,
+                "upload_count": len(session_uploads),
+            },
+            tags=["frappe", "router", "rag"],
+        )
         return {**state, "route": "rag"}
 
-    session_uploads = state.get("session_uploads") or []
     fast_route = keyword_route(question, has_uploads=bool(session_uploads))
     if fast_route:
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Router → %s [reason=keyword, uploads=%d, q_len=%d, t=%.3fs]",
             fast_route, len(session_uploads), q_len, time.perf_counter() - t0,
+        )
+        _observe_node(
+            "frappe.router_decision",
+            state,
+            outputs={"route": fast_route, "route_reason": "keyword", "elapsed_ms": elapsed_ms},
+            metadata={
+                "route_reason": "keyword",
+                "query_chars": q_len,
+                "image_count": 0,
+                "upload_count": len(session_uploads),
+            },
+            tags=["frappe", "router", fast_route],
         )
         return {**state, "route": fast_route}
 
     if session_uploads:
         if is_web_query(question):
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
             logger.info(
                 "Router → direct [reason=web_override+uploads, uploads=%d, q_len=%d, t=%.3fs]",
                 len(session_uploads), q_len, time.perf_counter() - t0,
             )
+            _observe_node(
+                "frappe.router_decision",
+                state,
+                outputs={"route": "direct", "route_reason": "web_override+uploads", "elapsed_ms": elapsed_ms},
+                metadata={
+                    "route_reason": "web_override+uploads",
+                    "query_chars": q_len,
+                    "image_count": 0,
+                    "upload_count": len(session_uploads),
+                },
+                tags=["frappe", "router", "direct"],
+            )
             return {**state, "route": "direct"}
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Router → rag [reason=uploads_bias, uploads=%d, q_len=%d, t=%.3fs]",
             len(session_uploads), q_len, time.perf_counter() - t0,
+        )
+        _observe_node(
+            "frappe.router_decision",
+            state,
+            outputs={"route": "rag", "route_reason": "uploads_bias", "elapsed_ms": elapsed_ms},
+            metadata={
+                "route_reason": "uploads_bias",
+                "query_chars": q_len,
+                "image_count": 0,
+                "upload_count": len(session_uploads),
+            },
+            tags=["frappe", "router", "rag"],
         )
         return {**state, "route": "rag"}
 
@@ -390,9 +501,29 @@ async def router_node(state: AgentState) -> AgentState:
         logger.warning("Router LLM başarısız → direct [err=%s]", exc)
         route = "direct"
 
+    llm_elapsed = time.perf_counter() - t_llm
+    total_elapsed = time.perf_counter() - t0
     logger.info(
         "Router → %s [reason=llm, llm_t=%.3fs, total_t=%.3fs]",
-        route, time.perf_counter() - t_llm, time.perf_counter() - t0,
+        route, llm_elapsed, total_elapsed,
+    )
+    _observe_node(
+        "frappe.router_decision",
+        state,
+        outputs={
+            "route": route,
+            "route_reason": "llm",
+            "llm_ms": round(llm_elapsed * 1000, 2),
+            "elapsed_ms": round(total_elapsed * 1000, 2),
+        },
+        metadata={
+            "route_reason": "llm",
+            "query_chars": q_len,
+            "image_count": 0,
+            "upload_count": len(session_uploads),
+            "router_max_tokens": settings.router_max_tokens,
+        },
+        tags=["frappe", "router", route],
     )
     return {**state, "route": route}
 
@@ -554,6 +685,12 @@ async def retriever_node(state: AgentState) -> AgentState:
     question = state["question"]
     source_filter = state.get("source_filter", "")
     session_uploads = state.get("session_uploads") or []
+    latency_ms: dict[str, float] = {}
+    dense_score = None
+    strategy = state.get("retrieval_strategy") or settings.retrieval_strategy
+    use_rerank_val = state.get("use_rerank")
+    if use_rerank_val is None:
+        use_rerank_val = settings.use_rerank
 
     try:
         from src.rag.vectorstore import get_hybrid_store
@@ -575,23 +712,39 @@ async def retriever_node(state: AgentState) -> AgentState:
             except Exception as exc:
                 logger.warning("Dense gate failed: %s — skipping gate", exc)
                 dense_score = settings.rag_min_dense_similarity
+            latency_ms["dense_gate"] = round((time.perf_counter() - t_gate) * 1000, 2)
             logger.info(
                 "Retriever: dense_gate=%.3f [threshold=%.3f, t=%.3fs]",
                 dense_score, settings.rag_min_dense_similarity,
                 time.perf_counter() - t_gate,
             )
             if dense_score < settings.rag_min_dense_similarity:
+                elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
                 logger.info(
                     "Retriever: gate_reject [score=%.3f < %.3f, t=%.3fs]",
                     dense_score, settings.rag_min_dense_similarity,
                     time.perf_counter() - t0,
                 )
-                return {**state, "documents": []}
-
-        strategy = state.get("retrieval_strategy") or settings.retrieval_strategy
-        use_rerank_val = state.get("use_rerank")
-        if use_rerank_val is None:
-            use_rerank_val = settings.use_rerank
+                _observe_node(
+                    "frappe.retriever_result",
+                    state,
+                    outputs={
+                        "status": "gate_reject",
+                        "document_count": 0,
+                        "dense_score": dense_score,
+                        "dense_threshold": settings.rag_min_dense_similarity,
+                        "latency_ms_by_stage": {**latency_ms, "total": elapsed_ms},
+                    },
+                    metadata={
+                        "retrieval_strategy": strategy,
+                        "use_rerank": bool(use_rerank_val),
+                        "dense_gate_rejected": True,
+                        "dense_score": dense_score,
+                        "dense_threshold": settings.rag_min_dense_similarity,
+                    },
+                    tags=["frappe", "retriever", "gate-reject"],
+                )
+                return {**state, "documents": [], "retrieval_trace": []}
 
         retriever = create_retriever(
             vectorstore=store.store,
@@ -608,6 +761,7 @@ async def retriever_node(state: AgentState) -> AgentState:
         documents = await asyncio.to_thread(run_retriever, retriever, question)
         documents = deduplicate_documents(documents, max_docs=settings.top_k)
         t_fetch_elapsed = time.perf_counter() - t_fetch
+        latency_ms["fetch"] = round(t_fetch_elapsed * 1000, 2)
 
         # Hybrid (fused) skorları paralel similarity_search_with_score ile çek
         # ve chunk_id üzerinden eşle. Mevcut retriever score'u yutuyor; bu ekstra
@@ -615,9 +769,11 @@ async def retriever_node(state: AgentState) -> AgentState:
         hybrid_scores: dict[str, float] = {}
         try:
             search_k = max(settings.rerank_top_n, settings.top_k * 2)
+            t_score = time.perf_counter()
             scored_pairs = await asyncio.to_thread(
                 _score_lookup_with_filter, store.store, question, search_k, qdrant_filter,
             )
+            latency_ms["score_lookup"] = round((time.perf_counter() - t_score) * 1000, 2)
             for d, s in scored_pairs:
                 hybrid_scores[chunk_id(d)] = float(s)
         except Exception as exc:
@@ -656,10 +812,55 @@ async def retriever_node(state: AgentState) -> AgentState:
                 for t in retrieval_trace
             ]
             logger.info("Retriever: trace [%s]", " | ".join(trace_parts))
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+        latency_ms["total"] = elapsed_ms
+        from src.observability.langsmith import (
+            summarize_documents,
+            summarize_retrieval_trace,
+            summarize_source_distribution,
+        )
+        trace_summary = summarize_retrieval_trace(retrieval_trace)
+        _observe_node(
+            "frappe.retriever_result",
+            state,
+            outputs={
+                "status": "success",
+                "document_count": len(documents),
+                "top_sources": summarize_source_distribution(documents),
+                "top_chunks": trace_summary.get("top_chunks", ""),
+                "used_chunks": trace_summary.get("used_chunks", ""),
+                "retrieval_trace_summary": trace_summary,
+                "document_previews": summarize_documents(documents),
+                "latency_ms_by_stage": latency_ms,
+            },
+            metadata={
+                "retrieval_strategy": strategy,
+                "use_rerank": bool(use_rerank_val),
+                "dense_score": dense_score,
+                "dense_threshold": settings.rag_min_dense_similarity,
+                "top_sources": summarize_source_distribution(documents),
+            },
+            tags=["frappe", "retriever", "success"],
+        )
     except Exception as exc:
         logger.warning("Retriever: error [%s, t=%.3fs]", exc, time.perf_counter() - t0)
         documents = []
         retrieval_trace = []
+        _observe_node(
+            "frappe.retriever_result",
+            state,
+            outputs={
+                "status": "error",
+                "document_count": 0,
+                "latency_ms_by_stage": {"total": round((time.perf_counter() - t0) * 1000, 2)},
+            },
+            metadata={
+                "retrieval_strategy": strategy,
+                "use_rerank": bool(use_rerank_val),
+            },
+            tags=["frappe", "retriever", "error"],
+            error=str(exc),
+        )
 
     return {**state, "documents": documents, "retrieval_trace": retrieval_trace}
 
@@ -729,7 +930,21 @@ async def grader_node(state: AgentState) -> AgentState:
     documents = state.get("documents", [])
 
     if not documents:
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info("Grader: no_docs → relevance=no [t=%.3fs]", time.perf_counter() - t0)
+        _observe_node(
+            "frappe.grader_decision",
+            state,
+            outputs={
+                "relevance": "no",
+                "grader_reason": "irrelevant",
+                "mode": "no_docs",
+                "document_count": 0,
+                "latency_ms_by_stage": {"total": elapsed_ms},
+            },
+            metadata={"grader_mode": "no_docs", "grader_confidence": None},
+            tags=["frappe", "grader", "no"],
+        )
         return {**state, "relevance": "no", "grader_reason": "irrelevant"}
 
     if state.get("source_filter") or state.get("session_uploads"):
@@ -742,14 +957,49 @@ async def grader_node(state: AgentState) -> AgentState:
         else:
             confidence = estimate_confidence(question, documents)
             if confidence < _GRADER_CONF_LOW:
+                elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
                 logger.info(
                     "Grader: relevance=no [mode=file_low_conf, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
                     confidence, _GRADER_CONF_LOW, len(documents), time.perf_counter() - t0,
                 )
+                _observe_node(
+                    "frappe.grader_decision",
+                    state,
+                    outputs={
+                        "relevance": "no",
+                        "grader_reason": "irrelevant",
+                        "mode": "file_low_conf",
+                        "confidence": confidence,
+                        "low_threshold": _GRADER_CONF_LOW,
+                        "document_count": len(documents),
+                        "latency_ms_by_stage": {"total": elapsed_ms},
+                    },
+                    metadata={
+                        "grader_mode": "file_low_conf",
+                        "grader_confidence": confidence,
+                        "grader_low_threshold": _GRADER_CONF_LOW,
+                    },
+                    tags=["frappe", "grader", "no"],
+                )
                 return {**state, "relevance": "no", "grader_reason": "irrelevant"}
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
             logger.info(
                 "Grader: relevance=yes [mode=file_fast, conf=%.3f, docs=%d, t=%.3fs]",
                 confidence, len(documents), time.perf_counter() - t0,
+            )
+            _observe_node(
+                "frappe.grader_decision",
+                state,
+                outputs={
+                    "relevance": "yes",
+                    "grader_reason": "",
+                    "mode": "file_fast",
+                    "confidence": confidence,
+                    "document_count": len(documents),
+                    "latency_ms_by_stage": {"total": elapsed_ms},
+                },
+                metadata={"grader_mode": "file_fast", "grader_confidence": confidence},
+                tags=["frappe", "grader", "yes"],
             )
             return {**state, "relevance": "yes", "grader_reason": ""}
 
@@ -771,24 +1021,84 @@ async def grader_node(state: AgentState) -> AgentState:
                 relevance, reason or "-", len(top_docs), len(documents), doc_chars,
                 time.perf_counter() - t_llm, time.perf_counter() - t0,
             )
+            llm_ms = round((time.perf_counter() - t_llm) * 1000, 2)
         except Exception as exc:
             logger.warning("Grader: llm_error → yes [err=%s, t=%.3fs]", exc, time.perf_counter() - t0)
             relevance, reason = "yes", ""
+            llm_ms = None
+        _observe_node(
+            "frappe.grader_decision",
+            state,
+            outputs={
+                "relevance": relevance,
+                "grader_reason": reason,
+                "mode": "file_llm",
+                "document_count": len(documents),
+                "graded_doc_count": len(top_docs),
+                "graded_doc_chars": doc_chars,
+                "latency_ms_by_stage": {
+                    "llm": llm_ms,
+                    "total": round((time.perf_counter() - t0) * 1000, 2),
+                },
+            },
+            metadata={"grader_mode": "file_llm", "grader_confidence": None},
+            tags=["frappe", "grader", relevance],
+        )
         return {**state, "relevance": relevance, "grader_reason": reason}
 
     confidence = estimate_confidence(question, documents)
 
     if confidence >= _GRADER_CONF_HIGH:
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Grader: relevance=yes [mode=high_conf, conf=%.3f>=%.3f, docs=%d, t=%.3fs]",
             confidence, _GRADER_CONF_HIGH, len(documents), time.perf_counter() - t0,
         )
+        _observe_node(
+            "frappe.grader_decision",
+            state,
+            outputs={
+                "relevance": "yes",
+                "grader_reason": "",
+                "mode": "high_conf",
+                "confidence": confidence,
+                "high_threshold": _GRADER_CONF_HIGH,
+                "document_count": len(documents),
+                "latency_ms_by_stage": {"total": elapsed_ms},
+            },
+            metadata={
+                "grader_mode": "high_conf",
+                "grader_confidence": confidence,
+                "grader_high_threshold": _GRADER_CONF_HIGH,
+            },
+            tags=["frappe", "grader", "yes"],
+        )
         return {**state, "relevance": "yes", "grader_reason": ""}
 
     if confidence < _GRADER_CONF_LOW:
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Grader: relevance=no [mode=low_conf, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
             confidence, _GRADER_CONF_LOW, len(documents), time.perf_counter() - t0,
+        )
+        _observe_node(
+            "frappe.grader_decision",
+            state,
+            outputs={
+                "relevance": "no",
+                "grader_reason": "irrelevant",
+                "mode": "low_conf",
+                "confidence": confidence,
+                "low_threshold": _GRADER_CONF_LOW,
+                "document_count": len(documents),
+                "latency_ms_by_stage": {"total": elapsed_ms},
+            },
+            metadata={
+                "grader_mode": "low_conf",
+                "grader_confidence": confidence,
+                "grader_low_threshold": _GRADER_CONF_LOW,
+            },
+            tags=["frappe", "grader", "no"],
         )
         return {**state, "relevance": "no", "grader_reason": "irrelevant"}
 
@@ -810,11 +1120,32 @@ async def grader_node(state: AgentState) -> AgentState:
             relevance, reason or "-", confidence, len(top_docs), len(documents), doc_chars,
             time.perf_counter() - t_llm, time.perf_counter() - t0,
         )
+        llm_ms = round((time.perf_counter() - t_llm) * 1000, 2)
     except Exception as exc:
         # mid_conf hata: güvensiz belgeyle üretim yerine web fallback'e düş
         logger.warning("Grader: llm_error → no [err=%s, t=%.3fs]", exc, time.perf_counter() - t0)
         relevance, reason = "no", "irrelevant"
+        llm_ms = None
 
+    _observe_node(
+        "frappe.grader_decision",
+        state,
+        outputs={
+            "relevance": relevance,
+            "grader_reason": reason,
+            "mode": "mid_conf",
+            "confidence": confidence,
+            "document_count": len(documents),
+            "graded_doc_count": len(top_docs),
+            "graded_doc_chars": doc_chars,
+            "latency_ms_by_stage": {
+                "llm": llm_ms,
+                "total": round((time.perf_counter() - t0) * 1000, 2),
+            },
+        },
+        metadata={"grader_mode": "mid_conf", "grader_confidence": confidence},
+        tags=["frappe", "grader", relevance],
+    )
     return {**state, "relevance": relevance, "grader_reason": reason}
 
 
@@ -885,7 +1216,7 @@ async def vision_node(state: AgentState) -> AgentState:
         HumanMessage(content=question),
         AIMessage(content=generation),
     ]
-    return {**state, "generation": generation, "messages": new_messages}
+    return {**state, "generation": generation, "messages": new_messages, **_final_answer_fields(state, generation, t0=t0, mode="vision")}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -985,10 +1316,30 @@ async def vision_search_node(state: AgentState) -> AgentState:
         if service:
             web_result = await service.search(original_q)
             if web_result:
-                web_docs.append(Document(
-                    page_content=web_result.text[:8000],
-                    metadata={"source": web_result.provider, "type": "web_search"},
-                ))
+                records = WebResultFormatter.extract_source_records(web_result.text, limit=settings.web_search_max_results)
+                if records:
+                    for record in records:
+                        web_docs.append(Document(
+                            page_content=(
+                                f"Title: {record.title}\n"
+                                f"Published: {record.published or 'unknown'}\n"
+                                f"URL: {record.url}\n"
+                                f"Snippet: {record.content}"
+                            )[:2500],
+                            metadata={
+                                "display_name": record.title,
+                                "source": record.url,
+                                "url": record.url,
+                                "published": record.published,
+                                "chunk_index": record.index,
+                                "type": "web_search",
+                            },
+                        ))
+                else:
+                    web_docs.append(Document(
+                        page_content=web_result.text[:8000],
+                        metadata={"source": web_result.provider, "display_name": web_result.provider, "type": "web_search"},
+                    ))
                 step.output = f"Found via {web_result.provider} ({len(web_result.text)} chars)."
             else:
                 logger.warning("Vision-Search: web araması sonuç döndürmedi")
@@ -1048,6 +1399,47 @@ def _fallback_context_answer(question: str, documents: list[Document], vision_co
     return "Bu soruyu yanıtlayabilecek bir belge bağlamı bulunamadı."
 
 
+def _final_answer_fields(
+    state: AgentState,
+    generation: str,
+    *,
+    t0: float,
+    mode: str,
+    extra_latency: dict | None = None,
+) -> dict:
+    from src.observability.langsmith import safe_preview
+
+    latency = {"total": round((time.perf_counter() - t0) * 1000, 2), **(extra_latency or {})}
+    answer_preview = safe_preview(generation)
+    _observe_node(
+        f"frappe.{mode}_result",
+        state,
+        outputs={
+            "answer_preview": answer_preview,
+            "answer_chars": len(generation),
+            "route": state.get("route", mode),
+            "retry_path": "primary",
+            "latency_ms_by_stage": latency,
+        },
+        metadata={"answer_chars": len(generation), "response_mode": mode},
+        tags=["frappe", mode, state.get("route", mode) or mode],
+    )
+    return {
+        "answer_preview": answer_preview,
+        "answer_chars": len(generation),
+        "document_count": len(state.get("documents") or []),
+        "used_context_count": 0,
+        "document_previews": [],
+        "retrieval_trace_summary": {},
+        "top_sources": "",
+        "top_chunks": "",
+        "used_chunks": "",
+        "retry_summary": {"retry_path": "primary"},
+        "retry_path": "primary",
+        "latency_ms_by_stage": latency,
+    }
+
+
 async def _retry_generator_with_compact_context(
     question: str,
     documents: list[Document],
@@ -1063,7 +1455,17 @@ async def _retry_generator_with_compact_context(
         meta = getattr(doc, "metadata", {}) or {}
         src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
         page = meta.get("page", "")
-        header = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
+        if meta.get("type") == "web_search":
+            url = meta.get("url") or meta.get("source", "")
+            published = meta.get("published", "")
+            header = f"[Kaynak {i}: {src or url}, Web"
+            if published:
+                header += f", Tarih: {published}"
+            if url:
+                header += f", URL: {url}"
+            header += "]"
+        else:
+            header = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
         content = (doc.page_content or "").strip()
         if content:
             compact_parts.append(f"{header}\n{content[:400]}")
@@ -1122,6 +1524,18 @@ async def generator_node(state: AgentState) -> AgentState:
 
     retrieval_trace = list(state.get("retrieval_trace") or [])
     used_chunk_ids: list[str] = []
+    docs_included = 0
+    input_budget_tokens = 0
+    budget_chars = 0
+    used_chars = 0
+    overhead_tokens = 0
+    retry_summary: dict[str, object] = {
+        "empty_response": False,
+        "compact_retry_answer_chars": 0,
+        "micro_retry_answer_chars": 0,
+        "fallback_context_answer_used": False,
+        "retry_path": "primary",
+    }
 
     if documents or vision_context:
         context_parts = []
@@ -1147,8 +1561,18 @@ async def generator_node(state: AgentState) -> AgentState:
             meta = getattr(doc, "metadata", {}) or {}
             src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
             page = meta.get("page", "")
-            header = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
             is_web = meta.get("type") == "web_search"
+            if is_web:
+                url = meta.get("url") or meta.get("source", "")
+                published = meta.get("published", "")
+                header = f"[Kaynak {i}: {src or url}, Web"
+                if published:
+                    header += f", Tarih: {published}"
+                if url:
+                    header += f", URL: {url}"
+                header += "]"
+            else:
+                header = f"[Kaynak {i}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
             remaining = budget_chars - used_chars
             if remaining <= len(header) + 50:
                 break
@@ -1223,6 +1647,8 @@ async def generator_node(state: AgentState) -> AgentState:
     generation = _coerce_llm_text(response)
 
     if not generation.strip() and (documents or vision_context):
+        retry_summary["empty_response"] = True
+        retry_summary["retry_path"] = "compact_retry"
         logger.warning("Generator: empty_response → compact retry")
         t_retry = time.perf_counter()
         try:
@@ -1236,25 +1662,32 @@ async def generator_node(state: AgentState) -> AgentState:
                 "Generator: compact_retry done [ans_len=%dch, t=%.3fs]",
                 len(generation), time.perf_counter() - t_retry,
             )
+            retry_summary["compact_retry_answer_chars"] = len(generation)
         except Exception as exc:
             logger.warning("Generator: compact_retry failed: %s", exc)
             generation = ""
 
     if not generation.strip() and documents:
+        retry_summary["retry_path"] = "compact_retry>micro_retry"
         try:
             generation = await _micro_answer_retry(answer_question, documents)
             logger.info("Generator: micro_retry done [ans_len=%dch]", len(generation))
+            retry_summary["micro_retry_answer_chars"] = len(generation)
         except Exception as exc:
             logger.warning("Generator: micro_retry failed: %s", exc)
             generation = ""
 
     if not generation.strip() and (documents or vision_context):
         generation = _fallback_context_answer(answer_question, documents, vision_context)
+        retry_summary["fallback_context_answer_used"] = True
+        retry_summary["retry_path"] = "compact_retry>micro_retry>fallback_context"
 
+    llm_elapsed = time.perf_counter() - t_llm
+    total_elapsed = time.perf_counter() - t0
     logger.info(
         "Generator: done [ans_len=%dch, temp=%.2f, llm_t=%.3fs, total_t=%.3fs]",
         len(generation), session_temp,
-        time.perf_counter() - t_llm, time.perf_counter() - t0,
+        llm_elapsed, total_elapsed,
     )
 
     new_messages = [
@@ -1262,11 +1695,71 @@ async def generator_node(state: AgentState) -> AgentState:
         HumanMessage(content=answer_question),
         AIMessage(content=generation),
     ]
+    from src.observability.langsmith import (
+        safe_preview,
+        summarize_documents,
+        summarize_retrieval_trace,
+        summarize_source_distribution,
+    )
+    trace_summary = summarize_retrieval_trace(retrieval_trace)
+    latency_ms = {
+        "llm": round(llm_elapsed * 1000, 2),
+        "total": round(total_elapsed * 1000, 2),
+    }
+    answer_preview = safe_preview(generation)
+    document_previews = summarize_documents(documents)
+    top_sources = summarize_source_distribution(documents)
+    _observe_node(
+        "frappe.generator_result",
+        state,
+        outputs={
+            "answer_preview": answer_preview,
+            "answer_chars": len(generation),
+            "route": state.get("route", ""),
+            "relevance": state.get("relevance", ""),
+            "grader_reason": state.get("grader_reason", ""),
+            "document_count": len(documents),
+            "used_context_count": trace_summary.get("used_context_count", 0),
+            "retrieval_trace_summary": trace_summary,
+            "document_previews": document_previews,
+            "top_sources": top_sources,
+            "top_chunks": trace_summary.get("top_chunks", ""),
+            "used_chunks": trace_summary.get("used_chunks", ""),
+            "retry_summary": retry_summary,
+            "retry_path": retry_summary["retry_path"],
+            "latency_ms_by_stage": latency_ms,
+        },
+        metadata={
+            "answer_chars": len(generation),
+            "docs_included": docs_included,
+            "context_budget_tokens": input_budget_tokens,
+            "context_budget_chars": budget_chars,
+            "context_used_chars": used_chars,
+            "context_overhead_tokens": overhead_tokens,
+            "empty_response": retry_summary["empty_response"],
+            "fallback_context_answer_used": retry_summary["fallback_context_answer_used"],
+            "retry_path": retry_summary["retry_path"],
+            "top_sources": top_sources,
+        },
+        tags=["frappe", "generator", state.get("route", "unknown") or "unknown"],
+    )
     return {
         **state,
         "generation": generation,
         "messages": new_messages,
         "retrieval_trace": retrieval_trace,
+        "answer_preview": answer_preview,
+        "answer_chars": len(generation),
+        "document_count": len(documents),
+        "used_context_count": trace_summary.get("used_context_count", 0),
+        "document_previews": document_previews,
+        "retrieval_trace_summary": trace_summary,
+        "top_sources": top_sources,
+        "top_chunks": trace_summary.get("top_chunks", ""),
+        "used_chunks": trace_summary.get("used_chunks", ""),
+        "retry_summary": retry_summary,
+        "retry_path": retry_summary["retry_path"],
+        "latency_ms_by_stage": latency_ms,
     }
 
 
@@ -1284,7 +1777,7 @@ async def web_search_node(state: AgentState) -> AgentState:
     # Orijinal soru vektör DB için yeniden yazılmış olabilir; web için doğal dili tercih et.
     question = state.get("original_question") or state["question"]
     existing_docs = state.get("documents", [])
-    search_query = normalize_web_query(question)
+    search_query = _build_contextual_web_query(question, list(state.get("messages", [])))
 
     async with cl.Step(name="Web Search", type="tool") as step:
         step.input = search_query
@@ -1297,10 +1790,33 @@ async def web_search_node(state: AgentState) -> AgentState:
             step.output = "Web search failed."
             return {**state, "documents": existing_docs}
 
-        web_doc = Document(
-            page_content=result.text[:8000],
-            metadata={"source": result.provider, "type": "web_search"},
-        )
+        records = WebResultFormatter.extract_source_records(result.text, limit=settings.web_search_max_results)
+        web_docs = [
+            Document(
+                page_content=(
+                    f"Title: {record.title}\n"
+                    f"Published: {record.published or 'unknown'}\n"
+                    f"URL: {record.url}\n"
+                    f"Snippet: {record.content}"
+                )[:2500],
+                metadata={
+                    "display_name": record.title,
+                    "source": record.url,
+                    "url": record.url,
+                    "published": record.published,
+                    "chunk_index": record.index,
+                    "type": "web_search",
+                },
+            )
+            for record in records
+        ]
+        if not web_docs:
+            web_docs = [
+                Document(
+                    page_content=result.text[:8000],
+                    metadata={"source": result.provider, "display_name": result.provider, "type": "web_search"},
+                )
+            ]
         step.output = f"Found content via {result.provider} ({len(result.text)} chars)."
         step.elements = [
             cl.Text(
@@ -1310,7 +1826,7 @@ async def web_search_node(state: AgentState) -> AgentState:
             )
         ]
 
-    return {**state, "documents": existing_docs + [web_doc]}
+    return {**state, "documents": existing_docs + web_docs}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1328,12 +1844,99 @@ _COMPOUND_QUERY_MARKERS = re.compile(
 )
 
 
+_FOLLOWUP_PRICE_RE = re.compile(
+    r"(fiyat[ıi]?|kaç\s+para|ne\s+kadar|hisse|stock|price|de[ğg]eri|value)",
+    re.IGNORECASE | re.UNICODE,
+)
+_EXPLICIT_WEB_ENTITY_RE = re.compile(
+    r"\b(tesla|tsla|apple|iphone|samsung|xiaomi|alt[ıi]n|gram|euro|dolar|usd|eur|try|"
+    r"btc|bitcoin|ethereum|nasdaq|borsa|nvda|nvidia|aapl|msft)\b|\b\d+\s*gb\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_PRODUCT_SUBJECT_PATTERNS = [
+    re.compile(
+        r"(?:telefon\s+modeli|modeli|cihaz[ıi]?|ürün[üu]?)[^,\n:]*[:,]\s*"
+        r"(.{3,90}?)(?:'?[dt][ıi]r|dir|tir|tır|\(|\.|\n|$)",
+        re.IGNORECASE | re.UNICODE,
+    ),
+    re.compile(
+        r"\b((?:APPLE\s+)?IPHONE\s*\d{1,2}(?:\s+(?:PRO|PLUS|MINI|PRO MAX))?"
+        r"(?:\s+\d+\s*GB)?(?:\s+[A-ZÇĞİÖŞÜ][A-ZÇĞİÖŞÜ\s]{2,30})?)\b",
+        re.IGNORECASE | re.UNICODE,
+    ),
+    re.compile(r"\b(TESLA|TSLA|APPLE|AAPL|NVIDIA|NVDA|MICROSOFT|MSFT)\b", re.IGNORECASE),
+]
+
+
+def _message_text(message: object) -> str:
+    if isinstance(message, dict):
+        return str(message.get("content") or "")
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    return str(content or "")
+
+
+def _clean_subject(subject: str) -> str:
+    subject = re.split(r"\bKaynaklar?:|\bSources:", subject, maxsplit=1, flags=re.IGNORECASE)[0]
+    subject = re.sub(r"\s*\[?Kaynak\s+\d+\]?.*$", "", subject, flags=re.IGNORECASE).strip()
+    subject = re.sub(r"\s+", " ", subject).strip(" .,:;\"'`")
+    return subject[:90]
+
+
+def _extract_web_subject_from_history(messages: list) -> str:
+    """Follow-up web queries için son konuşmadan ürün/hisse konusunu çıkarır."""
+    for message in reversed(messages[-8:]):
+        text = _clean_subject(_message_text(message))
+        if not text:
+            continue
+        for pattern in _PRODUCT_SUBJECT_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                subject = _clean_subject(match.group(1))
+                if 3 <= len(subject) <= 90:
+                    return subject
+    return ""
+
+
+def _build_contextual_web_query(question: str, prior_messages: list) -> str:
+    """Arama sorgusunu bağlamla zenginleştirir; özellikle 'şu anki fiyatı?' follow-up'ları."""
+    normalized = normalize_web_query(question)
+    q = question.strip()
+    if not _FOLLOWUP_PRICE_RE.search(q):
+        return normalized
+    today = datetime.date.today().isoformat()
+    q_lower = q.lower()
+    if _EXPLICIT_WEB_ENTITY_RE.search(q):
+        if re.search(r"\b(hisse|stock|borsa)\b", q_lower):
+            return f"{normalized} {today} official quote Nasdaq Yahoo Finance MarketWatch"
+        if re.search(r"\b(fiyat|price)\b", q_lower) and re.search(r"\b(iphone|telefon|phone|apple|samsung|xiaomi)\b", q_lower):
+            return f"{normalized} Türkiye {today} resmi satıcı fiyat karşılaştırma"
+        return normalized
+
+    subject = _extract_web_subject_from_history(prior_messages)
+    if not subject:
+        return normalized
+
+    if re.search(r"\b(hisse|stock|borsa)\b", q_lower):
+        return f"{subject} stock price today {today} official quote market"
+    if re.search(r"\b(iphone|apple|samsung|xiaomi|telefon|phone)\b", subject, re.IGNORECASE):
+        return f"{subject} güncel fiyat Türkiye {today} resmi satıcı teknoloji mağazaları"
+    return f"{subject} {normalized} {today}"
+
+
 def _is_pure_weather_query(question: str) -> bool:
     """Sorgu yalnızca hava durumu soruyorsa True döner; compound sorgular False."""
     return not bool(_COMPOUND_QUERY_MARKERS.search(question))
 
 
-async def _fast_web_summarize(question: str, result_text: str, prior_messages: list | None = None) -> str:
+async def _fast_web_summarize(
+    question: str,
+    result_text: str,
+    prior_messages: list | None = None,
+    *,
+    search_query: str = "",
+) -> str:
     """Web sonuçlarını LLM çağrısıyla özetler; entity isimleri ve rakamları çıkarır."""
     system = (
         "You answer ONLY from the provided web search results.\n"
@@ -1342,12 +1945,15 @@ async def _fast_web_summarize(question: str, result_text: str, prior_messages: l
         "- Turkish question → fully Turkish answer.\n"
         "- Never say you cannot access live data or the internet.\n"
         "- Never repeat the user's question at the start.\n"
+        "- Treat the Search query as the intended entity/topic. Ignore results about a different entity, commodity, product, city, ticker, or date.\n"
         "- Extract SPECIFIC entities: names, prices, percentages, dates, company names.\n"
-        "- RECENCY RULE: Always report only the MOST RECENT value. Do NOT list values from multiple historical dates.\n"
+        "- PRICE/STOCK RULE: Give the latest single value when available, with currency, timestamp/date, market status if present, and one short caveat if sources differ.\n"
+        "- RECENCY RULE: Prefer the source/result with the latest explicit date or market timestamp. Do NOT list stale historical values unless needed to explain conflict.\n"
         "- If sources conflict, pick the one with the latest date and note it briefly.\n"
-        "- Cite the source name inline when possible (e.g. 'Bloomberg'a göre...').\n"
+        "- Cite each important value/date with bracket citations like [1] or [2], using the result numbers in the provided web results.\n"
         "- Format: use bullet points for multiple facts; prose for single answers.\n"
         "- Do NOT say 'I don't have real-time data' — use what's in the web results.\n"
+        "- If the web results do not contain the requested entity/topic, say that reliable matching results were not found; do not answer a different topic.\n"
         "TABLE RULE: If the user asked for a table (tablo, table) OR a multi-day forecast "
         "(5 günlük, haftalık, X-Y arası), extract each day's data from the web results and "
         "present it as a Markdown table with columns: | Gün | Tarih | Hava | Max °C | Min °C |. "
@@ -1359,7 +1965,7 @@ async def _fast_web_summarize(question: str, result_text: str, prior_messages: l
     if prior_messages:
         messages_to_send.extend(select_recent_history(list(prior_messages), mode="direct"))
     messages_to_send.append(
-        HumanMessage(content=f"Question: {question}\n\nWeb results:\n{result_text[:5000]}")
+        HumanMessage(content=f"Question: {question}\nSearch query: {search_query or question}\n\nWeb results:\n{result_text[:6500]}")
     )
     response = await llm.ainvoke(messages_to_send)
     text = (response.content or "").strip()
@@ -1380,7 +1986,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
     # Hızlı yol — gerçek zamanlı web sorguları
     if is_web_query(question):
         service = _get_web_search_service()
-        search_query = normalize_web_query(question)
+        search_query = _build_contextual_web_query(question, prior_messages)
         logger.info(
             "Direct: web_fast [query='%.80s', prior=%d]",
             search_query, len(prior_messages),
@@ -1398,7 +2004,12 @@ async def direct_response_node(state: AgentState) -> AgentState:
                 answer = WebResultFormatter.format_weather(question, web_result.text)
                 logger.info("Direct: weather_format [ans_len=%dch, t=%.3fs]", len(answer), time.perf_counter() - t_sum)
             else:
-                answer = await _fast_web_summarize(question, web_result.text, direct_history)
+                answer = await _fast_web_summarize(
+                    question,
+                    web_result.text,
+                    direct_history,
+                    search_query=search_query,
+                )
                 logger.info(
                     "Direct: web_summarize [ans_len=%dch, llm_t=%.3fs, total_t=%.3fs]",
                     len(answer), time.perf_counter() - t_sum, time.perf_counter() - t0,
@@ -1409,7 +2020,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
                 HumanMessage(content=question),
                 AIMessage(content=answer),
             ]
-            return {**state, "generation": answer, "messages": new_messages}
+            return {**state, "generation": answer, "messages": new_messages, **_final_answer_fields(state, answer, t0=t0, mode="direct_response")}
         else:
             logger.warning("Direct: web_no_result [search_t=%.3fs]", time.perf_counter() - t_search)
             if service is None:
@@ -1428,7 +2039,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
                 HumanMessage(content=question),
                 AIMessage(content=answer),
             ]
-            return {**state, "generation": answer, "messages": new_messages}
+            return {**state, "generation": answer, "messages": new_messages, **_final_answer_fields(state, answer, t0=t0, mode="direct_response")}
 
     if _DATE_QUERY_RE.search(question):
         _today = datetime.date.today()
@@ -1438,7 +2049,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
         answer = f"{_today.day} {_months_tr[_today.month]} {_today.year}, {_days_tr[_today.weekday()]}."
         logger.info("Direct: date_fast [ans='%s', total_t=%.3fs]", answer, time.perf_counter() - t0)
         new_messages = [*prior_messages, HumanMessage(content=question), AIMessage(content=answer)]
-        return {**state, "generation": answer, "messages": new_messages}
+        return {**state, "generation": answer, "messages": new_messages, **_final_answer_fields(state, answer, t0=t0, mode="direct_response")}
 
     if _PLAIN_DIRECT_ARITH_RE.fullmatch(question.strip()):
         try:
@@ -1451,7 +2062,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
             HumanMessage(content=question),
             AIMessage(content=answer),
         ]
-        return {**state, "generation": answer, "messages": new_messages}
+        return {**state, "generation": answer, "messages": new_messages, **_final_answer_fields(state, answer, t0=t0, mode="direct_response")}
 
     if _should_use_math_direct_llm(question):
         logger.info("Direct: math_chat [prior=%d, q_len=%d]", len(prior_messages), len(question))
@@ -1476,7 +2087,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
             HumanMessage(content=question),
             AIMessage(content=generation),
         ]
-        return {**state, "generation": generation, "messages": new_messages}
+        return {**state, "generation": generation, "messages": new_messages, **_final_answer_fields(state, generation, t0=t0, mode="direct_response")}
 
     # Hızlı yol — araç gerektirmeyen kısa sohbet/genel direct yanıtlar.
     # ReAct agent tool şemalarını prompt'a eklediği için küçük yerel modellerde
@@ -1512,7 +2123,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
             HumanMessage(content=question),
             AIMessage(content=generation),
         ]
-        return {**state, "generation": generation, "messages": new_messages}
+        return {**state, "generation": generation, "messages": new_messages, **_final_answer_fields(state, generation, t0=t0, mode="direct_response")}
 
     # Normal yol — araçlı ReAct agent (backend capability dependent)
     from langgraph.prebuilt import create_react_agent
@@ -1555,7 +2166,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
             HumanMessage(content=question),
             AIMessage(content=generation),
         ]
-        return {**state, "generation": generation, "messages": new_messages}
+        return {**state, "generation": generation, "messages": new_messages, **_final_answer_fields(state, generation, t0=t0, mode="direct_response")}
 
     logger.info(
         "Direct: react_agent [tools=%d, prior=%d, backend=%s]",
@@ -1590,7 +2201,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
         HumanMessage(content=question),
         AIMessage(content=generation),
     ]
-    return {**state, "generation": generation, "messages": new_messages}
+    return {**state, "generation": generation, "messages": new_messages, **_final_answer_fields(state, generation, t0=t0, mode="direct_response")}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
