@@ -231,53 +231,68 @@ def auth_callback(username: str, password: str):
 
 @cl.on_chat_resume
 async def on_chat_resume(thread):
-    steps = thread.get("steps", []) if isinstance(thread, dict) else []
-    history: list[dict] = []
-    def _to_text(v) -> str:
-        if v is None:
-            return ""
-        if isinstance(v, str):
-            return v
-        try:
-            return json.dumps(v, ensure_ascii=False)
-        except Exception:
-            return str(v)
+    try:
+        steps = thread.get("steps", []) if isinstance(thread, dict) else []
+        history: list[dict] = []
+        def _to_text(v) -> str:
+            if v is None:
+                return ""
+            if isinstance(v, str):
+                return v
+            try:
+                return json.dumps(v, ensure_ascii=False)
+            except Exception:
+                return str(v)
 
-    for s in steps:
-        s_type = (s.get("type") or "").lower()
-        if s_type in {"user_message", "user"}:
-            content = _to_text(s.get("input")).strip()
-            if content:
-                history.append({"role": "user", "content": content})
-        elif s_type in {"assistant_message", "assistant"}:
-            content = _to_text(s.get("output")).strip()
-            if content:
-                history.append({"role": "assistant", "content": content})
-    trimmed = _trim_chat_history(history)
-    cl.user_session.set("chat_history", trimmed)
-    if trimmed:
-        cl.user_session.set("_resume_msg_count", len(trimmed))
+        for s in steps:
+            s_type = (s.get("type") or "").lower()
+            if s_type in {"user_message", "user"}:
+                content = (_to_text(s.get("input")) or _to_text(s.get("output"))).strip()
+                if content:
+                    history.append({"role": "user", "content": content})
+            elif s_type in {"assistant_message", "assistant"}:
+                content = (_to_text(s.get("output")) or _to_text(s.get("input"))).strip()
+                if content:
+                    history.append({"role": "assistant", "content": content})
 
-    # Önceki oturumdan thread-scoped memory yükle (legacy summary destekli).
-    meta = thread.get("metadata", {}) if isinstance(thread, dict) else {}
-    memory = ThreadMemory.from_metadata(meta if isinstance(meta, dict) else {})
-    _set_thread_memory(memory)
-    uploads = []
-    if isinstance(meta, dict):
-        uploads = [
-            str(item) for item in (meta.get("session_uploads") or [])
-            if str(item or "").strip()
-        ]
-    cl.user_session.set("session_uploads", uploads)
-    if memory.rolling_summary or memory.pinned_facts:
-        logger.info(
-            "on_chat_resume: memory yüklendi [summary=%dch, pins=%d]",
-            len(memory.rolling_summary), len(memory.pinned_facts),
-        )
-    if memory.last_topic:
-        await cl.Message(content=f"💬 Kaldığımız yer: {memory.last_topic}", author="Frappe").send()
-    if uploads:
-        logger.info("on_chat_resume: upload kaynakları yüklendi [count=%d]", len(uploads))
+        meta = thread.get("metadata", {}) if isinstance(thread, dict) else {}
+        if not history and isinstance(meta, dict) and isinstance(meta.get("chat_history"), list):
+            history = [
+                {"role": str(item.get("role") or ""), "content": str(item.get("content") or "")}
+                for item in meta.get("chat_history", [])
+                if isinstance(item, dict) and str(item.get("content") or "").strip()
+            ]
+
+        trimmed = _trim_chat_history(history)
+        cl.user_session.set("chat_history", trimmed)
+        if trimmed:
+            cl.user_session.set("_resume_msg_count", len(trimmed))
+
+        # Önceki oturumdan thread-scoped memory yükle (legacy summary destekli).
+        memory = ThreadMemory.from_metadata(meta if isinstance(meta, dict) else {})
+        _set_thread_memory(memory)
+        uploads = []
+        if isinstance(meta, dict):
+            uploads = [
+                str(item) for item in (meta.get("session_uploads") or [])
+                if str(item or "").strip()
+            ]
+        cl.user_session.set("session_uploads", uploads)
+        if memory.rolling_summary or memory.pinned_facts:
+            logger.info(
+                "on_chat_resume: memory yüklendi [summary=%dch, pins=%d]",
+                len(memory.rolling_summary), len(memory.pinned_facts),
+            )
+        if memory.last_topic:
+            await cl.Message(content=f"💬 Kaldığımız yer: {memory.last_topic}", author="Frappe").send()
+        if uploads:
+            logger.info("on_chat_resume: upload kaynakları yüklendi [count=%d]", len(uploads))
+        logger.info("on_chat_resume: thread restored [messages=%d, uploads=%d]", len(trimmed), len(uploads))
+    except Exception as exc:
+        logger.error("on_chat_resume failed; starting with empty in-memory history: %s", exc, exc_info=True)
+        cl.user_session.set("chat_history", [])
+        cl.user_session.set("session_uploads", [])
+        _set_thread_memory(ThreadMemory.empty())
 
 
 # ── Whisper / STT ──

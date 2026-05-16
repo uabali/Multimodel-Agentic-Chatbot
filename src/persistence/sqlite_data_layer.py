@@ -23,6 +23,33 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _json_loads(value: Any, default: Any = None) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return value
+    if value == "":
+        return default
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def _as_text(value: Any) -> str:
+    loaded = _json_loads(value, "")
+    if loaded is None:
+        return ""
+    if isinstance(loaded, str):
+        return loaded
+    try:
+        return json.dumps(loaded, ensure_ascii=False)
+    except Exception:
+        return str(loaded)
+
+
 class SQLiteDataLayer(BaseDataLayer):
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
@@ -221,7 +248,8 @@ class SQLiteDataLayer(BaseDataLayer):
                      json.dumps(step_dict.get("output")) if step_dict.get("output") is not None else None,
                      json.dumps(step_dict.get("metadata") or {}),
                      step_dict.get("createdAt") or _now_iso(),
-                     step_dict.get("startTime"), step_dict.get("endTime"),
+                     step_dict.get("start") or step_dict.get("startTime"),
+                     step_dict.get("end") or step_dict.get("endTime"),
                      json.dumps(step_dict.get("tags") or [])))
                 conn.commit()
         await self._run(_c)
@@ -312,20 +340,49 @@ class SQLiteDataLayer(BaseDataLayer):
                 if not t:
                     return None
                 cur.execute("SELECT * FROM steps WHERE threadId=? ORDER BY createdAt ASC", (thread_id,))
-                steps = [{
-                    "id": s["id"], "threadId": s["threadId"], "parentId": s["parentId"],
-                    "name": s["name"], "type": s["type"],
-                    "input": json.loads(s["input"]) if s["input"] else None,
-                    "output": json.loads(s["output"]) if s["output"] else None,
-                    "metadata": json.loads(s["metadata"] or "{}"),
-                    "createdAt": s["createdAt"], "startTime": s["startTime"],
-                    "endTime": s["endTime"], "tags": json.loads(s["tags"] or "[]"),
-                } for s in cur.fetchall()]
+                steps = []
+                for s in cur.fetchall():
+                    input_text = _as_text(s["input"])
+                    output_text = _as_text(s["output"])
+                    # Chainlit stores user_message text in output for this data layer.
+                    # Mirror it into input as well so resume rendering/history works.
+                    if s["type"] == "user_message" and not input_text and output_text:
+                        input_text = output_text
+                    steps.append({
+                        "id": s["id"],
+                        "threadId": s["threadId"],
+                        "parentId": s["parentId"],
+                        "name": s["name"] or "",
+                        "type": s["type"] or "undefined",
+                        "input": input_text,
+                        "output": output_text,
+                        "metadata": _json_loads(s["metadata"], {}) or {},
+                        "createdAt": s["createdAt"],
+                        "start": s["startTime"] or s["createdAt"],
+                        "end": s["endTime"] or s["createdAt"],
+                        "tags": _json_loads(s["tags"], []) or [],
+                        "streaming": False,
+                        "waitForAnswer": None,
+                        "isError": False,
+                        "command": None,
+                        "modes": None,
+                        "generation": None,
+                        "showInput": None,
+                        "defaultOpen": None,
+                        "autoCollapse": None,
+                        "language": None,
+                        "icon": None,
+                        "feedback": None,
+                    })
+                cur.execute("SELECT data FROM elements WHERE threadId=? ORDER BY createdAt ASC", (thread_id,))
+                elements = [_json_loads(row["data"], {}) for row in cur.fetchall()]
             return {
                 "id": t["id"], "name": t["name"], "userId": t["userId"],
                 "userIdentifier": t["userIdentifier"], "createdAt": t["createdAt"],
                 "updatedAt": t["updatedAt"], "tags": json.loads(t["tags"] or "[]"),
-                "metadata": json.loads(t["metadata"] or "{}"), "steps": steps,
+                "metadata": _json_loads(t["metadata"], {}) or {},
+                "steps": steps,
+                "elements": elements,
             }
         return await self._run(_g)
 
@@ -349,6 +406,8 @@ class SQLiteDataLayer(BaseDataLayer):
                             user_id: Optional[str] = None, metadata: Optional[Dict] = None,
                             tags: Optional[List[str]] = None):
         def _u():
+            user_identifier = self._get_user_identifier_by_id(user_id) if user_id else None
+            self._ensure_thread(thread_id, user_id, user_identifier)
             fields, params = [], []
             if name is not None:
                 fields.append("name=?"); params.append(name)
