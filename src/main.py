@@ -42,18 +42,16 @@ from src.rag.ingest import ingest_file
 from src.rag.llm import count_tokens
 from src.agent.routing import is_direct_support_query, is_web_query
 from src.persistence.sqlite_data_layer import SQLiteDataLayer
-from src.api.router import router as _api_router
+from src.observability.app_logging import configure_app_logging, log_event, new_turn_id
 from src.tts import synthesize as tts_synthesize
+
+configure_app_logging()
+
+from src.api.router import router as _api_router
 
 _cl_app.include_router(_api_router)
 logger_bootstrap = logging.getLogger("api.mount")
-logger_bootstrap.info("FastAPI admin router /api/* mount edildi. Docs: /docs")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(name)-25s | %(levelname)-7s | %(message)s",
-    datefmt="%H:%M:%S",
-)
+log_event(logger_bootstrap, "api_mount")
 logger = logging.getLogger(__name__)
 
 
@@ -79,12 +77,14 @@ def _langsmith_trace_context(
     *,
     image_count: int = 0,
     attempt: str = "primary",
+    turn_id: str = "",
 ) -> dict:
     """Build safe per-turn trace context; raw values are hashed by observability."""
     return {
         "channel": channel,
         "input_type": input_type,
         "session_id": cl.user_session.get("id") or cl.user_session.get("_session_id_short", ""),
+        "turn_id": turn_id or cl.user_session.get("_current_turn_id", ""),
         "image_count": image_count,
         "attempt": attempt,
     }
@@ -110,6 +110,24 @@ def _hash_password(password: str, salt: str) -> str:
 def _constant_time_eq(a: str, b: str) -> bool:
     """Kısa: `_constant_time_eq` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+def _chat_history_turns_for_log(chat_history: list | None) -> int:
+    count = 0
+    for item in chat_history or []:
+        role = item.get("role") if isinstance(item, dict) else getattr(item, "role", "")
+        if str(role).lower() in {"user", "human"}:
+            count += 1
+    return count
+
+
+def _message_attachment_count(message: cl.Message) -> int:
+    count = 0
+    for attr in ("elements", "files", "attachments"):
+        items = getattr(message, attr, None) or []
+        if isinstance(items, list):
+            count += len(items)
+    return count
 
 
 _ensure_auth_secret()
@@ -589,10 +607,13 @@ async def on_chat_start():
     """Kısa: `on_chat_start` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     session_id = cl.user_session.get("id") or uuid.uuid4().hex
     sid = session_id[:8]
-    logger.info(
-        "[%s] session_start [llm=%s, embed=%s, qdrant=%s, ctx=%dtok, rerank=%s]",
-        sid, settings.llm_model, settings.embedding_model,
-        settings.qdrant_url, settings.llm_context_size, settings.use_rerank,
+    log_event(
+        logger,
+        "session_start",
+        sid=sid,
+        model=settings.llm_model_name,
+        backend=settings.llm_backend,
+        ctx=settings.llm_context_size,
     )
     cl.user_session.set("_session_id_short", session_id[:8])
     user = cl.user_session.get("user")
@@ -1298,13 +1319,37 @@ async def on_message(message: cl.Message):
     """Kısa: `on_message` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     import time as _time
     _t0 = _time.perf_counter()
-    question = message.content
+    question = message.content or ""
     sid = cl.user_session.get("_session_id_short", "?")
     chat_history = cl.user_session.get("chat_history", [])
-    n_attach = len(getattr(message, "elements", None) or [])
-    logger.info(
-        "[%s] → msg [len=%dch, history=%d, attachments=%d] '%.80s'",
-        sid, len(question), len(chat_history), n_attach, question,
+    history_turns = _chat_history_turns_for_log(chat_history)
+    n_attach = _message_attachment_count(message)
+    turn_id = new_turn_id()
+    cl.user_session.set("_current_turn_id", turn_id)
+    final_route = ""
+    final_input_type = "text"
+    final_max_tokens = int(cl.user_session.get("max_tokens", _max_token_ceiling()) or _max_token_ceiling())
+    final_docs = 0
+    final_used_chunks = ""
+    final_cache = "skip"
+    final_fallback: bool | str = False
+    final_error_type = ""
+    final_ttft_ms: float | None = None
+    final_llm_ms: float | None = None
+    final_rag_ms: float | None = None
+    log_event(
+        logger,
+        "turn_start",
+        sid=sid,
+        turn_id=turn_id,
+        input_type=final_input_type,
+        q_chars=len(question),
+        history_turns=history_turns,
+        attachments=n_attach,
+        model=settings.llm_model_name,
+        backend=settings.llm_backend,
+        ctx=settings.llm_context_size,
+        max_tokens=final_max_tokens,
     )
     thinking_msg = cl.Message(content="")
     await thinking_msg.send()
@@ -1316,7 +1361,7 @@ async def on_message(message: cl.Message):
 
         if cmd.lower().startswith("/models"):
             thinking_msg.content = (
-                f"**LLM:** `{settings.llm_model}`\n"
+                f"**LLM:** `{settings.llm_model_name}`\n"
                 f"**Vision:** `{settings.vision_model or 'disabled'}`\n"
                 f"**Embedding:** `{settings.embedding_model}`\n"
                 f"**STT:** `{settings.stt_model or 'disabled'}`\n"
@@ -1521,7 +1566,7 @@ async def on_message(message: cl.Message):
                 ).send()
                 thinking_msg.content = ""
                 await thinking_msg.update()
-                logger.info("Görsel pending olarak saklandı, sesli/yazılı soru bekleniyor: %s", 
+                logger.debug("Görsel pending olarak saklandı, sesli/yazılı soru bekleniyor: %s",
                            [p.name for p in image_paths])
                 return
             else:
@@ -1648,7 +1693,7 @@ async def on_message(message: cl.Message):
                         break
                 reuse_q = pending_q or last_user_q
                 if reuse_q:
-                    logger.info("Dosya tek başına yüklendi → son soru yeniden kullanılıyor: %s", reuse_q[:80])
+                    logger.debug("Dosya tek başına yüklendi; son soru yeniden kullanılıyor.")
                     question = reuse_q
                     cl.user_session.set("pending_question", "")
 
@@ -1672,11 +1717,12 @@ async def on_message(message: cl.Message):
                 else:
                     cl.user_session.set("_vision_reuse_left", 0)
             elif reuse_left > 0:
-                logger.info("Vision follow-up değil; önceki görsel bu turda kullanılmadı [q=%.60s]", question)
+                logger.debug("Vision follow-up değil; önceki görsel bu turda kullanılmadı.")
             else:
                 cl.user_session.set("last_vision_images", [])
 
         agent_input_type = "image" if agent_image_data else "text"
+        final_input_type = agent_input_type
         
         thinking_msg.content = ""
         await thinking_msg.update()
@@ -1685,6 +1731,7 @@ async def on_message(message: cl.Message):
         latest_full_generation = ""
         last_route: str | None = None
         last_documents: list = []
+        last_doc_count = 0
         stream_hit_length_limit = False
         tts_streamer = _TtsStreamer.make(cl.user_session.get("tts_enabled", False))
 
@@ -1696,6 +1743,7 @@ async def on_message(message: cl.Message):
             input_type=agent_input_type,
             force_web_search=_sess_force_web,
         )
+        final_max_tokens = _sess_max_tok
         _allowed_strategies = {"hybrid", "similarity", "mmr", "threshold"}
         _sess_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
         if _sess_strategy not in _allowed_strategies:
@@ -1705,6 +1753,7 @@ async def on_message(message: cl.Message):
             "chainlit_text",
             agent_input_type,
             image_count=len(agent_image_data),
+            turn_id=turn_id,
         )
 
         try:
@@ -1733,8 +1782,30 @@ async def on_message(message: cl.Message):
                             if isinstance(delta, dict):
                                 if delta.get("route"):
                                     last_route = str(delta["route"])
+                                    final_route = last_route
                                 if delta.get("documents") is not None:
                                     last_documents = list(delta["documents"])
+                                    last_doc_count = len(last_documents)
+                                    final_docs = last_doc_count
+                                if delta.get("document_count") is not None:
+                                    try:
+                                        last_doc_count = int(delta["document_count"])
+                                        final_docs = last_doc_count
+                                    except (TypeError, ValueError):
+                                        pass
+                                if delta.get("used_chunks"):
+                                    final_used_chunks = str(delta["used_chunks"])
+                                if delta.get("cache"):
+                                    final_cache = str(delta["cache"])
+                                latency = delta.get("latency_ms_by_stage")
+                                if isinstance(latency, dict):
+                                    total = latency.get("total")
+                                    if _node_name == "retriever" and total is not None:
+                                        final_rag_ms = float(total)
+                                    if _node_name in {"generator", "direct_response", "vision"}:
+                                        llm_value = latency.get("llm", total)
+                                        if llm_value is not None:
+                                            final_llm_ms = float(llm_value)
                                 gen = delta.get("generation")
                                 if isinstance(gen, str) and gen.strip():
                                     latest_full_generation = gen
@@ -1772,6 +1843,17 @@ async def on_message(message: cl.Message):
                         stream_hit_length_limit = True
                     content = getattr(chunk, "content", None)
                     if isinstance(content, str) and _should_stream(chunk, meta, content):
+                        if final_ttft_ms is None:
+                            final_ttft_ms = round((_time.perf_counter() - _t0) * 1000, 2)
+                            log_event(
+                                logger,
+                                "stream",
+                                sid=sid,
+                                turn_id=turn_id,
+                                route=last_route or final_route or "?",
+                                input_type=agent_input_type,
+                                ttft_ms=final_ttft_ms,
+                            )
                         await thinking_msg.stream_token(content)
                         final_parts.append(content)
                         if tts_streamer:
@@ -1783,7 +1865,19 @@ async def on_message(message: cl.Message):
                     if isinstance(gen, str) and gen.strip():
                         latest_full_generation = gen
                     continue
-        except Exception:
+        except Exception as exc:
+            final_fallback = "exception"
+            final_error_type = type(exc).__name__
+            log_event(
+                logger,
+                "fallback",
+                sid=sid,
+                turn_id=turn_id,
+                route=last_route or final_route or "?",
+                input_type=agent_input_type,
+                fallback=final_fallback,
+                error_type=final_error_type,
+            )
             answer = await arun_agent(
                 question=question,
                 chat_history=lc_history,
@@ -1801,6 +1895,17 @@ async def on_message(message: cl.Message):
             )
             final_parts = [answer]
             for i in range(0, len(answer), 24):
+                if final_ttft_ms is None:
+                    final_ttft_ms = round((_time.perf_counter() - _t0) * 1000, 2)
+                    log_event(
+                        logger,
+                        "stream",
+                        sid=sid,
+                        turn_id=turn_id,
+                        route=last_route or final_route or "?",
+                        input_type=agent_input_type,
+                        ttft_ms=final_ttft_ms,
+                    )
                 await thinking_msg.stream_token(answer[i:i + 24])
             # Feed fallback answer into TTS streamer so audio isn't silently dropped
             if tts_streamer:
@@ -1810,7 +1915,16 @@ async def on_message(message: cl.Message):
 
         # Streaming boş geldiyse ainvoke fallback
         if not answer:
-            logger.warning("Stream içerik üretemedi, ainvoke fallback çalışıyor")
+            final_fallback = "empty_stream"
+            log_event(
+                logger,
+                "fallback",
+                sid=sid,
+                turn_id=turn_id,
+                route=last_route or final_route or "?",
+                input_type=agent_input_type,
+                fallback=final_fallback,
+            )
             try:
                 answer = await arun_agent(
                     question=question,
@@ -1828,11 +1942,21 @@ async def on_message(message: cl.Message):
                     **_identity,
                 )
             except Exception as exc:
+                final_error_type = type(exc).__name__
                 logger.error("Fallback ainvoke de başarısız: %s", exc)
             answer = (answer or "").strip() or "Bir hata oluştu, lütfen tekrar deneyin."
 
         if stream_hit_length_limit or _looks_truncated(answer, _sess_max_tok):
-            logger.warning("Yanıt kesilmiş görünüyor, geniş bütçeli fallback çalışıyor")
+            final_fallback = "truncated_stream"
+            log_event(
+                logger,
+                "fallback",
+                sid=sid,
+                turn_id=turn_id,
+                route=last_route or final_route or "?",
+                input_type=agent_input_type,
+                fallback=final_fallback,
+            )
             try:
                 repaired = await arun_agent(
                     question=question,
@@ -1855,12 +1979,15 @@ async def on_message(message: cl.Message):
                     final_parts = [answer]
                     stream_hit_length_limit = False
             except Exception as exc:
+                final_error_type = type(exc).__name__
                 logger.error("Kesilmiş yanıt fallback başarısız: %s", exc)
 
         # RAG kaynakları — Chainlit Text elementleri olarak ekle (açılır/kapanır)
         source_elements: list[cl.Text] = []
         if last_route in {"rag", "web"} and last_documents:
             source_elements = _build_source_elements(last_documents)
+        final_route = last_route or final_route or "?"
+        final_docs = last_doc_count or len(last_documents)
 
         thinking_msg.content = answer
         if source_elements:
@@ -1878,10 +2005,6 @@ async def on_message(message: cl.Message):
             ]
             await thinking_msg.update()
 
-        logger.info(
-            "[%s] ← msg [route=%s, ans_len=%dch, total_t=%.3fs]",
-            sid, last_route or "?", len(answer), _time.perf_counter() - _t0,
-        )
         answer_tokens = count_tokens(answer)
         cl.user_session.set("last_answer_token_count", answer_tokens)
         cl.user_session.set("last_answer_token_budget", _sess_max_tok)
@@ -1904,15 +2027,39 @@ async def on_message(message: cl.Message):
         await _persist_thread_state(thread_id, _get_thread_memory(), chat_history)
 
     except Exception as e:
-        logger.error(
-            "[%s] ✗ msg [err=%s, total_t=%.3fs]",
-            sid, type(e).__name__, _time.perf_counter() - _t0, exc_info=True,
-        )
+        final_error_type = type(e).__name__
+        logger.error("turn failed: %s", e, exc_info=True)
         thinking_msg.content = f"Error: {e}"
         await thinking_msg.update()
         chat_history.append({"role": "user", "content": question})
         chat_history.append({"role": "assistant", "content": f"[Hata oluştu: {e}]"})
         cl.user_session.set("chat_history", _trim_chat_history(chat_history))
+    finally:
+        log_event(
+            logger,
+            "turn_end",
+            sid=sid,
+            turn_id=turn_id,
+            route=final_route or "?",
+            input_type=final_input_type,
+            q_chars=len(question or ""),
+            history_turns=history_turns,
+            attachments=n_attach,
+            model=settings.llm_model_name,
+            backend=settings.llm_backend,
+            ctx=settings.llm_context_size,
+            max_tokens=final_max_tokens,
+            ttft_ms=final_ttft_ms,
+            llm_ms=final_llm_ms,
+            rag_ms=final_rag_ms,
+            total_ms=round((_time.perf_counter() - _t0) * 1000, 2),
+            docs=final_docs,
+            used_chunks=final_used_chunks,
+            cache=final_cache,
+            fallback=final_fallback,
+            error_type=final_error_type,
+        )
+        cl.user_session.set("_current_turn_id", "")
 
 
 @cl.action_callback("action_tts")
@@ -1962,16 +2109,13 @@ async def on_settings_update(settings_dict: dict):
     await cl.Message(content="\n".join(lines)).send()
 
     sid = cl.user_session.get("_session_id_short", "?")
-    logger.info(
-        "[%s] settings_update [tts=%s, voice=%s, temp=%.2f, max_tokens=%d, strategy=%s, rerank=%s]",
-        sid, tts_now, tts_voice, temp, max_tok, strategy, rerank,
-    )
+    log_event(logger, "settings_update", sid=sid, max_tokens=max_tok)
 
 
 @cl.on_stop
 async def on_stop():
     """Kısa: `on_stop` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-    logger.info("User stopped generation.")
+    log_event(logger, "generation_stop", sid=cl.user_session.get("_session_id_short", "?"))
 
 
 @cl.on_chat_end
@@ -1986,7 +2130,7 @@ async def on_chat_end():
 
     if session_uploads:
         await _persist_thread_uploads(cl.user_session.get("id"))
-        logger.info(
+        logger.debug(
             "[%s] session_cleanup: qdrant retained for thread resume [files=%d]",
             sid, len(session_uploads),
         )
@@ -1997,8 +2141,8 @@ async def on_chat_end():
         if p.exists() and p.is_dir():
             try:
                 shutil.rmtree(p)
-                logger.info("[%s] session_cleanup: upload_dir [%s]", sid, p)
+                logger.debug("[%s] session_cleanup: upload_dir [%s]", sid, p)
             except Exception as exc:
                 logger.warning("[%s] session_cleanup: rmtree_error [%s]", sid, exc)
 
-    logger.info("[%s] session_end [turns=%d, uploads=%d]", sid, n_turns, len(session_uploads))
+    log_event(logger, "session_end", sid=sid, history_turns=n_turns)

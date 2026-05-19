@@ -65,6 +65,9 @@ class AgentState(TypedDict):
     # Input tipi ipucu: "text" | "image" | "audio"
     input_type: str
 
+    # Terminal log correlation id for this user turn.
+    turn_id: str
+
     # vision_rag_node tarafından doldurulur: görselden çıkarılan metin/yapı
     # Generator, bunu belge bağlamına [Görsel Analizi] kaynağı olarak ekler
     vision_context: str

@@ -196,6 +196,33 @@ def test_rerank_fast_mode_uses_mini_model(monkeypatch):
     assert captured["model_name"] == "fast"
 
 
+def test_fast_rag_mac_defaults_are_latency_oriented():
+    from src.config import settings
+
+    assert settings.rerank_fast_mode is True
+    assert settings.rerank_top_n <= 8
+    assert settings.embedding_device == "mps"
+    assert settings.reranker_device == "mps"
+
+
+def test_retriever_score_lookup_is_gated_by_detailed_logging(monkeypatch):
+    from src.agent import nodes
+
+    monkeypatch.setattr(nodes.settings, "retriever_score_lookup", None)
+    monkeypatch.setattr(nodes.settings, "app_log_level", "INFO")
+    monkeypatch.setattr(nodes.logger, "isEnabledFor", lambda level: False)
+    assert nodes._retriever_score_lookup_enabled() is False
+
+    monkeypatch.setattr(nodes.settings, "app_log_level", "DEBUG")
+    assert nodes._retriever_score_lookup_enabled() is True
+
+    monkeypatch.setattr(nodes.settings, "retriever_score_lookup", False)
+    assert nodes._retriever_score_lookup_enabled() is False
+
+    monkeypatch.setattr(nodes.settings, "retriever_score_lookup", True)
+    assert nodes._retriever_score_lookup_enabled() is True
+
+
 @pytest.mark.anyio
 async def test_weak_dense_gate_grader_refuses_without_llm(monkeypatch):
     from src.agent import nodes

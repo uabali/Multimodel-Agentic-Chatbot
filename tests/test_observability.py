@@ -15,6 +15,35 @@ def test_langsmith_disabled_is_noop(monkeypatch):
     assert obs.record_observation("x") is None
 
 
+def test_terminal_log_event_uses_stable_safe_fields(caplog):
+    import logging
+    from src.observability import app_logging
+
+    logger = logging.getLogger("tests.app_logging")
+
+    with caplog.at_level(logging.INFO, logger="tests.app_logging"):
+        app_logging.log_event(
+            logger,
+            "turn_end",
+            sid="session-1",
+            turn_id="turn-1",
+            route="rag",
+            q_chars=42,
+            prompt="raw prompt must not be logged",
+            error_type="api_key=supersecretvalue123",
+        )
+
+    line = caplog.messages[-1]
+    assert app_logging.allowed_log_fields()[:4] == ("event", "sid", "turn_id", "route")
+    assert "event=turn_end" in line
+    assert "sid=session-1" in line
+    assert "q_chars=42" in line
+    assert "prompt" not in line
+    assert "raw prompt" not in line
+    assert "supersecretvalue123" not in line
+    assert "api_key=[redacted-secret]" in line
+
+
 def test_langsmith_metadata_and_payload_are_redacted():
     from src.observability import langsmith as obs
 
@@ -182,7 +211,9 @@ async def test_semantic_cache_hit_records_manual_observation(monkeypatch):
 
     assert captured["cached_answer"] == cached_answer
     assert captured["trace_context"]["channel"] == "unit"
-    assert events[0] == ("updates", {"generator": {"generation": cached_answer}})
+    assert events[0][0] == "updates"
+    assert events[0][1]["generator"]["generation"] == cached_answer
+    assert events[0][1]["generator"]["cache"] == "hit"
 
 
 @pytest.mark.anyio

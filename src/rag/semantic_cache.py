@@ -91,7 +91,7 @@ class SemanticCache:
                         distance=models.Distance.COSINE,
                     ),
                 )
-                logger.info("SemanticCache: koleksiyon oluşturuldu (dim=%d)", dim)
+                logger.debug("SemanticCache: koleksiyon oluşturuldu (dim=%d)", dim)
             self._collection_ready = True
             self._warned_unavailable = False
         except Exception as exc:
@@ -144,9 +144,9 @@ class SemanticCache:
             if results:
                 score = results[0].score
                 cached = results[0].payload.get("response", "")
-                logger.info(
-                    "SemanticCache: hit [score=%.3f, threshold=%.3f, ctx=%.12s, q=%.60s]",
-                    score, settings.semantic_cache_threshold, cache_ctx or "none", question,
+                logger.debug(
+                    "SemanticCache: hit [score=%.3f, threshold=%.3f, ctx=%.12s]",
+                    score, settings.semantic_cache_threshold, cache_ctx or "none",
                 )
                 return cached
         except Exception as exc:
@@ -186,9 +186,9 @@ class SemanticCache:
                     )
                 ],
             )
-            logger.info(
-                "SemanticCache: kaydedildi [ctx=%.12s, q=%.60s, resp=%dch]",
-                cache_ctx or "none", question, len(response),
+            logger.debug(
+                "SemanticCache: kaydedildi [ctx=%.12s, resp=%dch]",
+                cache_ctx or "none", len(response),
             )
         except Exception as exc:
             logger.warning("SemanticCache store hatası: %s", exc)

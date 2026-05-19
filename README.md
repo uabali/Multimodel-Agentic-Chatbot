@@ -95,7 +95,7 @@ Storage and models
 | LLM server | llama.cpp `llama-server` |
 | macOS | Apple Silicon with Metal recommended |
 | Linux | NVIDIA GPU recommended for llama.cpp CUDA |
-| RAM | 16 GB minimum, 32 GB recommended |
+| RAM | 16 GB minimum, 24 GB+ recommended for local multimodal use |
 
 System packages:
 
@@ -125,6 +125,12 @@ cmake --build build --config Release -j$(nproc 2>/dev/null || sysctl -n hw.logic
 ```
 
 Set `LLAMA_SERVER_BIN` in `.env` to the built `llama-server` binary.
+
+`llama.cpp` remains the default local backend. `LLM_BACKEND=mlx` is treated as
+a compatibility-gated MLX-LM path: start an MLX server on a separate port, run
+`uv run python scripts/benchmark_llm_backends.py`, and switch only if streaming,
+vision/tool behavior, and `/v1/chat/completions` compatibility pass for your
+exact model.
 
 ## Setup
 
@@ -219,7 +225,7 @@ RAG_CONTEXT_SAFETY_MARGIN_TOKENS=700
 
 # Embeddings
 EMBEDDING_MODEL=BAAI/bge-m3
-EMBEDDING_DEVICE=cpu
+EMBEDDING_DEVICE=mps
 
 # Qdrant
 QDRANT_URL=http://localhost:6333
@@ -234,6 +240,13 @@ RETRIEVAL_STRATEGY=hybrid
 BASE_K=4
 USE_RERANK=true
 RERANK_TOP_N=8
+RERANK_FAST_MODE=true
+RERANKER_DEVICE=mps
+
+# Terminal logs
+APP_LOG_LEVEL=INFO
+APP_LOG_PREVIEW_CHARS=96
+APP_LOG_STAGE_TIMINGS=true
 
 # Dense gate
 RAG_MIN_DENSE_SIMILARITY=0.45
@@ -394,7 +407,7 @@ uv run pytest
 Current expected result:
 
 ```text
-62 passed
+111 passed
 ```
 
 Runtime probe:

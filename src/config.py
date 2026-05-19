@@ -8,7 +8,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # ── LLM backend (OpenAI-compatible) ──
     # Backends:
-    #  - llama.cpp: `llama-server` (recommended for local multimodal Gemma)
+    #  - llama.cpp: `llama-server` (recommended stable default on Apple Silicon)
+    #  - mlx: MLX-LM OpenAI-like server; benchmark/compatibility-gated
     #  - vLLM: `vllm/vllm-openai` (great for fast text + tool-calling models)
     llm_backend: str = Field(
         default="llama.cpp",
@@ -56,9 +57,9 @@ class Settings(BaseSettings):
     agent_max_tokens: int = 1536
 
     # ── Embedding (HuggingFace) ──
-    # vLLM GPU'yu yönettiğinden default cpu. docker-compose'da app'a GPU eklenirse cuda.
+    # Mac single-user fast profile defaults to Apple Metal via MPS.
     embedding_model: str = "BAAI/bge-m3"
-    embedding_device: str = "cpu"
+    embedding_device: str = "mps"
     embedding_vector_size: Optional[int] = None
 
     # ── Vision (optional — vLLM multimodal endpoint) ──
@@ -105,12 +106,16 @@ class Settings(BaseSettings):
     # ── Reranker ──
     use_rerank: bool = True
     reranker_model: str = "BAAI/bge-reranker-base"
-    # vLLM GPU'yu yönettiğinden default cpu
-    reranker_device: str = "cpu"
-    rerank_top_n: int = 12
+    reranker_device: str = "mps"
+    rerank_top_n: int = 8
     rerank_fast_mode: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("RERANK_FAST_MODE"),
+    )
+    retriever_score_lookup: Optional[bool] = Field(
+        default=None,
+        description="When unset, extra retriever score lookup runs only under detailed DEBUG logging.",
+        validation_alias=AliasChoices("RETRIEVER_SCORE_LOOKUP"),
     )
 
     # ── Web Search ──
@@ -194,6 +199,15 @@ class Settings(BaseSettings):
     app_langsmith_max_doc_previews: int = Field(
         default=6,
         validation_alias=AliasChoices("APP_LANGSMITH_MAX_DOC_PREVIEWS"),
+    )
+    app_log_level: str = Field(default="INFO", validation_alias=AliasChoices("APP_LOG_LEVEL"))
+    app_log_preview_chars: int = Field(
+        default=96,
+        validation_alias=AliasChoices("APP_LOG_PREVIEW_CHARS"),
+    )
+    app_log_stage_timings: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("APP_LOG_STAGE_TIMINGS"),
     )
 
     # ── Auth ──

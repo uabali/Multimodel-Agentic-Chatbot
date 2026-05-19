@@ -284,6 +284,7 @@ def build_common_metadata(
     channel = _trace_context_value(trace_context, "channel", "unknown")
     image_count = int(_trace_context_value(trace_context, "image_count", len(image_data or [])) or 0)
     history_turn_count = int(_trace_context_value(trace_context, "history_turn_count", 0) or 0)
+    turn_id = str(_trace_context_value(trace_context, "turn_id", "") or "")
     metadata: dict[str, Any] = {
         "app": "frappe-rag-agent",
         "env": settings.app_env,
@@ -291,6 +292,7 @@ def build_common_metadata(
         "input_type": input_type,
         "input_summary": f"{input_type}; images={image_count}; uploads={len(uploads)}",
         "history_turn_count": history_turn_count,
+        "turn_id": turn_id,
         "has_image": bool(image_data) or image_count > 0,
         "image_count": image_count,
         "has_source_filter": bool(source_filter),

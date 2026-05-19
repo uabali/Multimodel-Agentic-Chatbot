@@ -115,6 +115,9 @@ def main() -> int:
     if llm_backend.lower().startswith("llama") and ":8000" in base:
         print("WARN: llm_backend is llama.cpp but URL looks like a vLLM default (port 8000).")
         print("      If you switched to llama-server, set LLM_SERVER_URL=http://localhost:8080/v1")
+    if llm_backend.lower() == "mlx":
+        print("NOTE: MLX-LM server compatibility is benchmark-gated for this app.")
+        print("      Run scripts/benchmark_llm_backends.py before switching the default backend.")
 
     try:
         req = Request(

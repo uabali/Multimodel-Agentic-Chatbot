@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 from langgraph.graph import END, StateGraph
@@ -57,6 +58,7 @@ from src.observability.langsmith import (
     record_semantic_cache_hit,
     record_semantic_cache_miss,
 )
+from src.observability.app_logging import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +316,7 @@ def _init_state(
         "session_uploads": list(session_uploads or []),
         "image_data": image_data or [],
         "input_type": input_type,
+        "turn_id": "",
         "vision_context": "",
         "temperature": temperature if temperature is not None else _s.chat_temperature,
         "max_tokens": max_tokens if max_tokens is not None else _s.chat_max_tokens,
@@ -367,6 +370,14 @@ def _trace_with_history(trace_context: dict | None, chat_history: list | None) -
     if trace_context is None:
         return None
     return {**trace_context, "history_turn_count": _history_turn_count(chat_history)}
+
+
+def _cache_log_ids(trace_context: dict | None) -> dict[str, str]:
+    trace_context = trace_context or {}
+    return {
+        "sid": str(trace_context.get("session_id") or "?")[:8] or "?",
+        "turn_id": str(trace_context.get("turn_id") or ""),
+    }
 
 
 def _graph_config(
@@ -433,6 +444,7 @@ def run_agent(
         session_uploads, user_id, thread_id, memory_context,
         temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
     )
+    state["turn_id"] = str((trace_context or {}).get("turn_id") or "")
     config = _graph_config(
         run_name="frappe.sync_run",
         question=question,
@@ -475,6 +487,7 @@ async def arun_agent(
         session_uploads, user_id, thread_id, memory_context,
         temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
     )
+    state["turn_id"] = str((trace_context or {}).get("turn_id") or "")
     config = _graph_config(
         run_name=_turn_run_name("frappe.chat_turn", trace_context),
         question=question,
@@ -552,24 +565,52 @@ async def astream_agent(
         from langchain_core.messages import AIMessageChunk
 
         cache_ctx = _build_cache_ctx()
+        t_cache = time.perf_counter()
         cached = await SemanticCache.get().lookup(question, cache_ctx=cache_ctx)
+        cache_lookup_ms = round((time.perf_counter() - t_cache) * 1000, 2)
         if cached:
             if _looks_cacheable_generation(cached):
+                log_event(
+                    logger,
+                    "cache",
+                    **_cache_log_ids(trace_context),
+                    input_type=input_type,
+                    cache="hit",
+                    total_ms=cache_lookup_ms,
+                )
                 record_semantic_cache_hit(
                     question=question,
                     cached_answer=cached,
                     cache_ctx=cache_ctx,
                     trace_context=trace_context,
                 )
-                yield ("updates", {"generator": {"generation": cached}})
+                yield ("updates", {"generator": {
+                    "generation": cached,
+                    "cache": "hit",
+                    "latency_ms_by_stage": {"total": cache_lookup_ms},
+                }})
                 chunk_size = 20
                 for i in range(0, len(cached), chunk_size):
                     yield ("messages", (AIMessageChunk(content=cached[i:i + chunk_size]),
                                         {"langgraph_node": "generator"}))
                 return
-            logger.info(
-                "SemanticCache: stale/low-quality hit ignored [ctx=%.12s, q=%.60s, resp=%dch]",
-                cache_ctx or "none", question, len(cached),
+            log_event(
+                logger,
+                "cache",
+                **_cache_log_ids(trace_context),
+                input_type=input_type,
+                cache="stale",
+                total_ms=cache_lookup_ms,
+            )
+            logger.debug("SemanticCache: stale/low-quality hit ignored [resp=%dch]", len(cached))
+        else:
+            log_event(
+                logger,
+                "cache",
+                **_cache_log_ids(trace_context),
+                input_type=input_type,
+                cache="miss",
+                total_ms=cache_lookup_ms,
             )
         record_semantic_cache_miss(
             question=question,
@@ -585,6 +626,7 @@ async def astream_agent(
         session_uploads, user_id, thread_id, memory_context,
         temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
     )
+    state["turn_id"] = str((trace_context or {}).get("turn_id") or "")
     config = _graph_config(
         run_name=_turn_run_name("frappe.chat_turn", trace_context),
         question=question,

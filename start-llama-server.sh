@@ -20,15 +20,22 @@ LLAMA_PORT="${LLAMA_PORT:-8080}"
 # If you want to force a local mmproj file, set this to an absolute path and we'll pass `--mmproj`.
 LLAMA_MMPROJ="${LLAMA_MMPROJ:-}"
 # Parallel inference slots — each slot gets ctx_size / parallel tokens of context.
-# With ctx=32768 and parallel=4, each user gets ~8192 tokens. Increase if you have VRAM.
-LLAMA_PARALLEL="${LLAMA_PARALLEL:-4}"
+# Mac/local default is single-user lowest latency; increase only for concurrent users.
+LLAMA_PARALLEL="${LLAMA_PARALLEL:-1}"
+
+OS_NAME="$(uname -s 2>/dev/null || echo unknown)"
+ARCH_NAME="$(uname -m 2>/dev/null || echo unknown)"
+IS_APPLE_SILICON=0
+if [[ "$OS_NAME" == "Darwin" && "$ARCH_NAME" == "arm64" ]]; then
+  IS_APPLE_SILICON=1
+fi
 
 # ── Validate binary path ────────────────────────────────────────────────────
 if [[ -z "$LLAMA_SERVER_BIN" ]]; then
   echo "ERROR: LLAMA_SERVER_BIN is not set."
   echo ""
   echo "  Set the absolute path to your llama-server binary in .env:"
-  echo "    LLAMA_SERVER_BIN=/home/you/llama.cpp/build/bin/llama-server"
+  echo "    LLAMA_SERVER_BIN=/Users/you/llama.cpp/build/bin/llama-server"
   echo ""
   echo "  Or export it before running this script:"
   echo "    export LLAMA_SERVER_BIN=/path/to/llama-server"
@@ -41,27 +48,26 @@ if [[ ! -x "$LLAMA_SERVER_BIN" ]]; then
   exit 1
 fi
 
-# ── VRAM budget planner ───────────────────────────────────────────────────────
-# Gemma-4-E4B Q4_K_M approximate VRAM breakdown:
+# ── Memory budget planner ─────────────────────────────────────────────────────
+# Apple Silicon uses unified memory; there is no separate NVIDIA-style VRAM pool.
+# Gemma-4-E4B Q4_K_M approximate memory breakdown:
 #   Model weights : ~3.0 GB
 #   mmproj        : ~0.4 GB
-#   KV cache      : ~(ctx_size * 340 KB) → heavily depends on ctx and parallel
-#   OS/driver     : ~0.5 GB overhead
+#   KV cache      : ~(ctx_size * 340 KB) -> heavily depends on ctx
+#   Runtime/OS    : ~0.5 GB overhead
 #
-# Formula (conservative): VRAM_needed ≈ 3.4 + 0.5 + (CTX_SIZE / 1024 * 0.33) GB
+# Formula (conservative): memory_needed ~= 3.4 + 0.5 + (CTX_SIZE / 1024 * 0.33) GB
 #
 # Examples:
-#   ctx=32768  np=4 → ~14.5 GB total (needs 16 GB GPU)
-#   ctx=16384  np=4 → ~9.0  GB total (fits 12 GB GPU comfortably)
-#   ctx=8192   np=4 → ~6.3  GB total (fits 8 GB GPU)
-#   ctx=8192   np=2 → ~6.3  GB total (same — KV cache is total, not per-slot)
-#   ctx=4096   np=4 → ~5.0  GB total (fits most GPUs)
+#   ctx=32768  np=1 -> ~14.5 GB total
+#   ctx=16384  np=1 -> ~9.0  GB total
+#   ctx=8192   np=1 -> ~6.3  GB total
+#   ctx=4096   np=1 -> ~5.0  GB total
 #
 # NOTE: --parallel N splits the context window across N slots.
-#       Each user gets ctx_size/N tokens. So ctx=16384 np=4 → 4096 per user.
-#       For RAG workloads (short queries + retrieved context), 4096 per user is fine.
+#       For one local developer/user, LLAMA_PARALLEL=1 preserves the full context.
 
-_estimate_vram() {
+_estimate_memory() {
   local ctx=$1
   # Rough estimate in GB: model_base + ctx_contribution
   local model_base="3.9"
@@ -72,12 +78,21 @@ _estimate_vram() {
   echo "$total"
 }
 
-ESTIMATED_VRAM=$(_estimate_vram "$LLAMA_CTX_SIZE")
+ESTIMATED_MEMORY=$(_estimate_memory "$LLAMA_CTX_SIZE")
 
-# Detect available GPU VRAM (nvidia-smi)
-DETECTED_VRAM=""
-if command -v nvidia-smi &>/dev/null; then
+# Detect available memory. On Apple Silicon this is unified memory; elsewhere,
+# nvidia-smi is only used when available.
+DETECTED_MEMORY_GB=""
+MEMORY_LABEL="system memory"
+if [[ "$IS_APPLE_SILICON" == "1" ]]; then
+  DETECTED_MEMORY_GB=$(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.1f", $1 / 1024 / 1024 / 1024}')
+  MEMORY_LABEL="unified memory"
+elif command -v nvidia-smi &>/dev/null; then
   DETECTED_VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+  if [[ -n "$DETECTED_VRAM" ]]; then
+    DETECTED_MEMORY_GB=$(awk "BEGIN {printf \"%.1f\", $DETECTED_VRAM / 1024}")
+    MEMORY_LABEL="GPU VRAM"
+  fi
 fi
 
 # ── Launch ───────────────────────────────────────────────────────────────────
@@ -91,33 +106,37 @@ echo "  port       : $LLAMA_PORT"
 echo "  parallel   : $LLAMA_PARALLEL"
 echo "  per-user   : $(( LLAMA_CTX_SIZE / LLAMA_PARALLEL )) tokens"
 echo "  endpoint   : http://localhost:${LLAMA_PORT}/v1"
+if [[ "$IS_APPLE_SILICON" == "1" ]]; then
+  echo "  platform   : Apple Silicon / Metal (${ARCH_NAME})"
+else
+  echo "  platform   : ${OS_NAME}/${ARCH_NAME}"
+fi
 echo ""
-echo "  VRAM estimate : ~${ESTIMATED_VRAM} GB needed"
-if [[ -n "$DETECTED_VRAM" ]]; then
-  DETECTED_GB=$(awk "BEGIN {printf \"%.1f\", $DETECTED_VRAM / 1024}")
-  echo "  GPU VRAM      : ${DETECTED_GB} GB detected"
-  # Warn if estimate exceeds detected VRAM
-  OVER=$(awk "BEGIN {print ($ESTIMATED_VRAM > $DETECTED_GB) ? 1 : 0}")
+echo "  memory estimate : ~${ESTIMATED_MEMORY} GB needed"
+if [[ -n "$DETECTED_MEMORY_GB" ]]; then
+  echo "  ${MEMORY_LABEL} : ${DETECTED_MEMORY_GB} GB detected"
+  # Warn if estimate is tight for the detected memory pool.
+  LIMIT=$(awk "BEGIN {printf \"%.1f\", $DETECTED_MEMORY_GB * 0.75}")
+  OVER=$(awk "BEGIN {print ($ESTIMATED_MEMORY > $LIMIT) ? 1 : 0}")
   if [[ "$OVER" == "1" ]]; then
     echo ""
-    echo "  ⚠  WARNING: Estimated VRAM (~${ESTIMATED_VRAM} GB) exceeds GPU capacity (${DETECTED_GB} GB)!"
+    echo "  WARNING: Estimated model memory (~${ESTIMATED_MEMORY} GB) is tight for ${MEMORY_LABEL} (${DETECTED_MEMORY_GB} GB)."
     echo "     Recommendations:"
-    echo "       - Reduce context: LLAMA_CTX_SIZE=16384  (or 8192 for tight GPUs)"
-    echo "       - Reduce parallel: LLAMA_PARALLEL=2"
-    echo "       - Example safe config for ${DETECTED_GB} GB GPU:"
-    if awk "BEGIN {exit ($DETECTED_GB >= 12) ? 0 : 1}"; then
-      echo "         LLAMA_CTX_SIZE=16384  LLAMA_PARALLEL=4  (per-user: 4096 tokens)"
-    elif awk "BEGIN {exit ($DETECTED_GB >= 8) ? 0 : 1}"; then
-      echo "         LLAMA_CTX_SIZE=8192   LLAMA_PARALLEL=2  (per-user: 4096 tokens)"
+    echo "       - Reduce context: LLAMA_CTX_SIZE=8192"
+    echo "       - Keep single-user parallelism: LLAMA_PARALLEL=1"
+    echo "       - Close memory-heavy apps before launching."
+    echo "       - Example safe config for ${DETECTED_MEMORY_GB} GB ${MEMORY_LABEL}:"
+    if awk "BEGIN {exit ($DETECTED_MEMORY_GB >= 16) ? 0 : 1}"; then
+      echo "         LLAMA_CTX_SIZE=16384  LLAMA_PARALLEL=1"
     else
-      echo "         LLAMA_CTX_SIZE=4096   LLAMA_PARALLEL=2  (per-user: 2048 tokens)"
+      echo "         LLAMA_CTX_SIZE=8192   LLAMA_PARALLEL=1"
     fi
     echo ""
     echo "  Continuing anyway in 5 seconds... (Ctrl+C to abort)"
     sleep 5
   fi
 else
-  echo "  GPU VRAM      : (nvidia-smi not found — cannot detect)"
+  echo "  memory detected : unavailable"
 fi
 echo ""
 

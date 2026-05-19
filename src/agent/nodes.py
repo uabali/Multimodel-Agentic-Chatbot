@@ -68,15 +68,74 @@ from src.agent.prompts import (
     select_vision_prompt,
 )
 from src.config import settings
+from src.observability.app_logging import detailed_trace_enabled, log_event, stage_timings_enabled
 from src.rag.llm import count_message_tokens, count_tokens
 from src.security.url_guard import URLFetchError, fetch_public_url_text
 
 logger = logging.getLogger(__name__)
 
 
+_OBSERVATION_LOG_EVENTS = {
+    "frappe.router_decision": "router",
+    "frappe.retriever_result": "retriever",
+    "frappe.grader_decision": "grader",
+    "frappe.generator_result": "generator",
+    "frappe.direct_response_result": "generator",
+    "frappe.vision_result": "generator",
+}
+
+
 def _history_turn_count(messages: list) -> int:
     """Kısa: `_history_turn_count` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return sum(1 for m in messages if isinstance(m, HumanMessage))
+
+
+def _float_or_none(value) -> float | None:
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sid_for_log(state: AgentState) -> str:
+    return str(state.get("thread_id") or "?")[:8] or "?"
+
+
+def _log_node_stage(name: str, state: AgentState, outputs: dict | None, error: str | None) -> None:
+    event = _OBSERVATION_LOG_EVENTS.get(name)
+    if not event:
+        return
+    outputs = outputs or {}
+    latency = outputs.get("latency_ms_by_stage")
+    if not isinstance(latency, dict):
+        latency = {}
+
+    route = str(outputs.get("route") or state.get("route") or "?")
+    fields: dict[str, object] = {
+        "sid": _sid_for_log(state),
+        "turn_id": state.get("turn_id", ""),
+        "route": route,
+        "input_type": state.get("input_type", "text"),
+        "docs": outputs.get("document_count", len(state.get("documents") or [])),
+    }
+    if event == "router" and outputs.get("route"):
+        fields["route"] = outputs["route"]
+    if event == "generator" and outputs.get("used_chunks"):
+        fields["used_chunks"] = outputs.get("used_chunks")
+    if error:
+        fields["error_type"] = type(error).__name__ if not isinstance(error, str) else error.split(":", 1)[0]
+
+    if stage_timings_enabled():
+        total_ms = _float_or_none(latency.get("total") or outputs.get("elapsed_ms"))
+        if event == "retriever":
+            fields["rag_ms"] = total_ms
+        elif event == "generator":
+            fields["llm_ms"] = _float_or_none(latency.get("llm")) or total_ms
+            fields["total_ms"] = total_ms
+        else:
+            fields["total_ms"] = total_ms
+
+    log_event(logger, event, **fields)
 
 
 def _observe_node(
@@ -90,6 +149,7 @@ def _observe_node(
     error: str | None = None,
 ) -> None:
     """Best-effort node observation; disabled LangSmith is a cheap no-op."""
+    _log_node_stage(name, state, outputs, error)
     try:
         from src.observability.langsmith import record_observation, safe_preview, stable_hash
 
@@ -415,7 +475,7 @@ async def router_node(state: AgentState) -> AgentState:
     if state.get("image_data"):
         imgs = state["image_data"]
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info(
+        logger.debug(
             "Router → vision [images=%d, mimes=%s, q_len=%d, t=0.00s]",
             len(imgs),
             ",".join(img.get("mime", "?") for img in imgs),
@@ -437,7 +497,7 @@ async def router_node(state: AgentState) -> AgentState:
 
     if state.get("force_web_search"):
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info(
+        logger.debug(
             "Router → web [reason=force_web_search, uploads=%d, q_len=%d, t=%.3fs]",
             len(session_uploads), q_len, time.perf_counter() - t0,
         )
@@ -458,7 +518,7 @@ async def router_node(state: AgentState) -> AgentState:
     # Dosya yüklendiyse: deterministik RAG — keyword/LLM routing atlanır.
     if state.get("source_filter"):
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info(
+        logger.debug(
             "Router → rag [reason=source_filter, file='%s', q_len=%d, t=%.3fs]",
             state["source_filter"], q_len, time.perf_counter() - t0,
         )
@@ -479,7 +539,7 @@ async def router_node(state: AgentState) -> AgentState:
     fast_route = keyword_route(question, has_uploads=bool(session_uploads))
     if fast_route:
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info(
+        logger.debug(
             "Router → %s [reason=keyword, uploads=%d, q_len=%d, t=%.3fs]",
             fast_route, len(session_uploads), q_len, time.perf_counter() - t0,
         )
@@ -500,7 +560,7 @@ async def router_node(state: AgentState) -> AgentState:
     if session_uploads:
         if is_web_query(question):
             elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-            logger.info(
+            logger.debug(
                 "Router → web [reason=web_override+uploads, uploads=%d, q_len=%d, t=%.3fs]",
                 len(session_uploads), q_len, time.perf_counter() - t0,
             )
@@ -518,7 +578,7 @@ async def router_node(state: AgentState) -> AgentState:
             )
             return {**state, "route": "web"}
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info(
+        logger.debug(
             "Router → rag [reason=uploads_bias, uploads=%d, q_len=%d, t=%.3fs]",
             len(session_uploads), q_len, time.perf_counter() - t0,
         )
@@ -536,7 +596,7 @@ async def router_node(state: AgentState) -> AgentState:
         )
         return {**state, "route": "rag"}
 
-    logger.info(
+    logger.debug(
         "Router → LLM [prior_msgs=%d, q_len=%d, max_tokens=%d]",
         len(prior_messages), q_len, settings.router_max_tokens,
     )
@@ -555,7 +615,7 @@ async def router_node(state: AgentState) -> AgentState:
 
     llm_elapsed = time.perf_counter() - t_llm
     total_elapsed = time.perf_counter() - t0
-    logger.info(
+    logger.debug(
         "Router → %s [reason=llm, llm_t=%.3fs, total_t=%.3fs]",
         route, llm_elapsed, total_elapsed,
     )
@@ -644,7 +704,7 @@ async def rewriter_node(state: AgentState) -> AgentState:
     prior_messages = list(state.get("messages", []))
 
     if _should_skip_rewrite(question, prior_messages):
-        logger.info(
+        logger.debug(
             "Rewriter: skip [reason=short_clear, q_len=%d, t=%.3fs]",
             len(question), time.perf_counter() - t0,
         )
@@ -689,10 +749,10 @@ async def rewriter_node(state: AgentState) -> AgentState:
         )
         return state
 
-    logger.info(
-        "Rewriter: rewritten [%d→%dch, prior=%d, t=%.3fs] '%.80s'",
+    logger.debug(
+        "Rewriter: rewritten [%d→%dch, prior=%d, t=%.3fs]",
         len(question), len(rewritten), len(prior_messages),
-        time.perf_counter() - t0, rewritten,
+        time.perf_counter() - t0,
     )
     return {**state, "question": rewritten}
 
@@ -902,7 +962,7 @@ async def retriever_node(state: AgentState) -> AgentState:
             dense_score = 1.0
             retrieval_gate = "skip"
             filter_desc = f"source_filter='{source_filter}'" if source_filter else f"uploads={session_uploads}"
-            logger.info("Retriever: dense_gate=skip [%s]", filter_desc)
+            logger.debug("Retriever: dense_gate=skip [%s]", filter_desc)
         else:
             t_gate = time.perf_counter()
             try:
@@ -913,7 +973,7 @@ async def retriever_node(state: AgentState) -> AgentState:
                 logger.warning("Dense gate failed: %s — skipping gate", exc)
                 dense_score = settings.rag_min_dense_similarity
             latency_ms["dense_gate"] = round((time.perf_counter() - t_gate) * 1000, 2)
-            logger.info(
+            logger.debug(
                 "Retriever: dense_gate=%.3f [weak=%.3f, pass=%.3f, t=%.3fs]",
                 dense_score, settings.rag_min_dense_similarity, settings.rag_dense_pass_similarity,
                 time.perf_counter() - t_gate,
@@ -924,7 +984,7 @@ async def retriever_node(state: AgentState) -> AgentState:
                 retrieval_gate = "soft"
             else:
                 retrieval_gate = "weak"
-            logger.info("Retriever: dense_gate=%s [score=%.3f]", retrieval_gate, dense_score)
+            logger.debug("Retriever: dense_gate=%s [score=%.3f]", retrieval_gate, dense_score)
 
         retriever = create_retriever(
             vectorstore=store.store,
@@ -957,28 +1017,29 @@ async def retriever_node(state: AgentState) -> AgentState:
                     max_docs=max(settings.top_k, min(settings.rerank_top_n, settings.top_k + len(overview_docs))),
                 )
             latency_ms["overview_fetch"] = round((time.perf_counter() - t_overview) * 1000, 2)
-            logger.info(
+            logger.debug(
                 "Retriever: overview_boost [overview_docs=%d, final_docs=%d, t=%.3fs]",
                 len(overview_docs), len(documents), time.perf_counter() - t_overview,
             )
         t_fetch_elapsed = time.perf_counter() - t_fetch
         latency_ms["fetch"] = round(t_fetch_elapsed * 1000, 2)
 
-        # Hybrid (fused) skorları paralel similarity_search_with_score ile çek
-        # ve chunk_id üzerinden eşle. Mevcut retriever score'u yutuyor; bu ekstra
-        # sorgu Qdrant'ta hızlıdır (~30-100ms).
+        # Hybrid (fused) skorları yalnızca ayrıntılı trace gerektiğinde çekilir.
+        # Bu ikinci Qdrant sorgusu açıklanabilirlik içindir; düşük gecikme
+        # varsayılanında kritik yanıt yolundan çıkar.
         hybrid_scores: dict[str, float] = {}
-        try:
-            search_k = max(settings.rerank_top_n, settings.top_k * 2)
-            t_score = time.perf_counter()
-            scored_pairs = await asyncio.to_thread(
-                _score_lookup_with_filter, store.store, question, search_k, qdrant_filter,
-            )
-            latency_ms["score_lookup"] = round((time.perf_counter() - t_score) * 1000, 2)
-            for d, s in scored_pairs:
-                hybrid_scores[chunk_id(d)] = float(s)
-        except Exception as exc:
-            logger.debug("hybrid score lookup failed: %s", exc)
+        if _retriever_score_lookup_enabled():
+            try:
+                search_k = max(settings.rerank_top_n, settings.top_k * 2)
+                t_score = time.perf_counter()
+                scored_pairs = await asyncio.to_thread(
+                    _score_lookup_with_filter, store.store, question, search_k, qdrant_filter,
+                )
+                latency_ms["score_lookup"] = round((time.perf_counter() - t_score) * 1000, 2)
+                for d, s in scored_pairs:
+                    hybrid_scores[chunk_id(d)] = float(s)
+            except Exception as exc:
+                logger.debug("hybrid score lookup failed: %s", exc)
 
         # Trace inşası — her dökümana hybrid skorunu metadata'ya yaz
         retrieval_trace: list[dict] = []
@@ -994,25 +1055,17 @@ async def retriever_node(state: AgentState) -> AgentState:
                 "used_in_context": False,
             })
 
-        # Kaynak dağılımını özetle
-        sources: dict[str, int] = {}
-        for doc in documents:
-            meta = getattr(doc, "metadata", {}) or {}
-            src = meta.get("display_name") or meta.get("source_file", meta.get("source", "?"))
-            sources[src] = sources.get(src, 0) + 1
-        src_summary = ", ".join(f"{s}×{n}" for s, n in sources.items())
-
-        logger.info(
-            "Retriever: docs=%d [strategy=%s, rerank=%s, dense=%.3f, fetch_t=%.3fs, total_t=%.3fs] {%s}",
+        logger.debug(
+            "Retriever: docs=%d [strategy=%s, rerank=%s, dense=%.3f, fetch_t=%.3fs, total_t=%.3fs]",
             len(documents), strategy, use_rerank_val, dense_score,
-            t_fetch_elapsed, time.perf_counter() - t0, src_summary,
+            t_fetch_elapsed, time.perf_counter() - t0,
         )
-        if retrieval_trace:
+        if retrieval_trace and detailed_trace_enabled(logger):
             trace_parts = [
                 f"{t['chunk_id']} hybrid={_fmt_score(t['hybrid_score'])} rerank={_fmt_score(t['rerank_score'])}"
                 for t in retrieval_trace
             ]
-            logger.info("Retriever: trace [%s]", " | ".join(trace_parts))
+            logger.debug("Retriever: trace [%s]", " | ".join(trace_parts))
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         latency_ms["total"] = elapsed_ms
         from src.observability.langsmith import (
@@ -1082,6 +1135,14 @@ def _score_lookup_with_filter(vectorstore, query: str, k: int, qdrant_filter):
         return vectorstore.similarity_search_with_score(query, k=k, **kwargs)
     except TypeError:
         return vectorstore.similarity_search_with_score(query, k=k)
+
+
+def _retriever_score_lookup_enabled() -> bool:
+    """Extra score lookup is useful for explainability, not default latency."""
+    override = settings.retriever_score_lookup
+    if override is not None:
+        return bool(override)
+    return detailed_trace_enabled(logger)
 
 
 def _record_to_web_document(record, *, provider: str, query: str, retrieved_at: str) -> Document:
@@ -1412,7 +1473,7 @@ async def grader_node(state: AgentState) -> AgentState:
 
     if not documents:
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info("Grader: no_docs → relevance=no [t=%.3fs]", time.perf_counter() - t0)
+        logger.debug("Grader: no_docs → relevance=no [t=%.3fs]", time.perf_counter() - t0)
         _observe_node(
             "frappe.grader_decision",
             state,
@@ -1439,7 +1500,7 @@ async def grader_node(state: AgentState) -> AgentState:
             confidence = estimate_confidence(question, documents)
             if confidence >= _grader_conf_high():
                 elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-                logger.info(
+                logger.debug(
                     "Grader: relevance=yes [mode=file_high_conf, conf=%.3f>=%.3f, docs=%d, t=%.3fs]",
                     confidence, _grader_conf_high(), len(documents), time.perf_counter() - t0,
                 )
@@ -1463,7 +1524,7 @@ async def grader_node(state: AgentState) -> AgentState:
                     tags=["frappe", "grader", "yes"],
                 )
                 return {**state, "relevance": "yes", "grader_reason": "sufficient"}
-            logger.info(
+            logger.debug(
                 "Grader: file context requires LLM [conf=%.3f<%.3f, docs=%d]",
                 confidence, _grader_conf_high(), len(documents),
             )
@@ -1480,7 +1541,7 @@ async def grader_node(state: AgentState) -> AgentState:
             ])
             response_text = _coerce_llm_text(response)
             relevance, reason = _parse_grader_payload(response_text)
-            logger.info(
+            logger.debug(
                 "Grader: relevance=%s reason=%s [mode=file_llm, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
                 relevance, reason or "-", len(top_docs), len(documents), doc_chars,
                 time.perf_counter() - t_llm, time.perf_counter() - t0,
@@ -1517,7 +1578,7 @@ async def grader_node(state: AgentState) -> AgentState:
     if retrieval_gate == "weak" and not scoped:
         if confidence < _grader_conf_high():
             elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-            logger.info(
+            logger.debug(
                 "Grader: relevance=no [mode=weak_dense_gate, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
                 confidence, _grader_conf_high(), len(documents), time.perf_counter() - t0,
             )
@@ -1548,7 +1609,7 @@ async def grader_node(state: AgentState) -> AgentState:
             }
     elif confidence >= _grader_conf_high():
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info(
+        logger.debug(
             "Grader: relevance=yes [mode=high_conf, conf=%.3f>=%.3f, docs=%d, t=%.3fs]",
             confidence, _grader_conf_high(), len(documents), time.perf_counter() - t0,
         )
@@ -1575,7 +1636,7 @@ async def grader_node(state: AgentState) -> AgentState:
 
     if confidence < _grader_conf_low():
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info(
+        logger.debug(
             "Grader: relevance=no [mode=low_conf, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
             confidence, _grader_conf_low(), len(documents), time.perf_counter() - t0,
         )
@@ -1612,7 +1673,7 @@ async def grader_node(state: AgentState) -> AgentState:
         ])
         response_text = _coerce_llm_text(response)
         relevance, reason = _parse_grader_payload(response_text)
-        logger.info(
+        logger.debug(
             "Grader: relevance=%s reason=%s [mode=mid_conf, conf=%.3f, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
             relevance, reason or "-", confidence, len(top_docs), len(documents), doc_chars,
             time.perf_counter() - t_llm, time.perf_counter() - t0,
@@ -1677,7 +1738,7 @@ async def vision_node(state: AgentState) -> AgentState:
     )
 
     img_sizes = [len(img.get("base64", "")) * 3 // 4 for img in image_data]
-    logger.info(
+    logger.debug(
         "Vision: images=%d [mimes=%s, sizes=%s], prior=%d, temp=0.2",
         len(image_data),
         ",".join(img.get("mime", "?") for img in image_data),
@@ -1694,7 +1755,7 @@ async def vision_node(state: AgentState) -> AgentState:
     try:
         response = await llm.ainvoke(messages_to_send)
         generation = response.content or ""
-        logger.info(
+        logger.debug(
             "Vision: done [ans_len=%dch, t=%.3fs]",
             len(generation), time.perf_counter() - t0,
         )
@@ -1734,7 +1795,7 @@ async def vision_rag_node(state: AgentState) -> AgentState:
         "Sonuç RAG sistemi için kaynak olarak kullanılacak.",
     )
 
-    logger.info(
+    logger.debug(
         "Vision-RAG: %d görsel analiz ediliyor (prompt=%s)",
         len(image_data), system_prompt[:40].replace("\n", " "),
     )
@@ -1749,7 +1810,7 @@ async def vision_rag_node(state: AgentState) -> AgentState:
         logger.warning("Vision-RAG görsel analizi başarısız: %s", exc)
         vision_context = ""
 
-    logger.info("Vision-RAG: analiz tamamlandı (%d karakter)", len(vision_context))
+    logger.debug("Vision-RAG: analiz tamamlandı (%d karakter)", len(vision_context))
     return {**state, "vision_context": vision_context}
 
 
@@ -1780,7 +1841,7 @@ async def vision_search_node(state: AgentState) -> AgentState:
         "Sonuç gerçek zamanlı web verileriyle birleştirilecek.",
     )
 
-    logger.info("Vision-Search: %d görsel analiz ediliyor", len(image_data))
+    logger.debug("Vision-Search: %d görsel analiz ediliyor", len(image_data))
     llm = _get_rag_llm(temperature=0.1)
 
     try:
@@ -1792,7 +1853,7 @@ async def vision_search_node(state: AgentState) -> AgentState:
         logger.warning("Vision-Search görsel analizi başarısız: %s", exc)
         vision_context = ""
 
-    logger.info("Vision-Search: görsel analizi tamamlandı (%d karakter)", len(vision_context))
+    logger.debug("Vision-Search: görsel analizi tamamlandı (%d karakter)", len(vision_context))
 
     # ── Adım 2: Web araması ─────────────────────────────────────────────────
     original_q = state.get("original_question") or question
@@ -2291,7 +2352,7 @@ async def generator_node(state: AgentState) -> AgentState:
                 len(assembly.context), settings.llm_context_size,
             )
 
-        logger.info(
+        logger.debug(
             "Generator: ctx_budget=%dtok/%dch, used=%dch, docs=%d/%d, vision=%s, prior=%d, "
             "n_ctx=%d, output_max=%dtok, overhead=%dtok",
             input_budget_tokens, budget_chars, used_chars,
@@ -2299,7 +2360,7 @@ async def generator_node(state: AgentState) -> AgentState:
             len(rag_history), settings.llm_context_size, output_tokens, overhead_tokens,
         )
 
-        if used_chunk_ids:
+        if used_chunk_ids and detailed_trace_enabled(logger):
             id_to_entry = {e["chunk_id"]: e for e in retrieval_trace}
             final_parts = []
             for cid in used_chunk_ids:
@@ -2311,10 +2372,10 @@ async def generator_node(state: AgentState) -> AgentState:
                     )
                 else:
                     final_parts.append(cid)
-            logger.info("Generator: final_used [n=%d] [%s]", len(used_chunk_ids), ", ".join(final_parts))
+            logger.debug("Generator: final_used [n=%d] [%s]", len(used_chunk_ids), ", ".join(final_parts))
     else:
         system_content = RAG_NO_CONTEXT_SYSTEM_PROMPT
-        logger.info(
+        logger.debug(
             "Generator: no_context [prior=%d, n_ctx=%d, output_max=%dtok]",
             len(rag_history), settings.llm_context_size,
             state.get("max_tokens") or settings.rag_max_tokens,
@@ -2348,7 +2409,7 @@ async def generator_node(state: AgentState) -> AgentState:
                 prior_messages=prior_messages,
                 vision_context=vision_context,
             )
-            logger.info(
+            logger.debug(
                 "Generator: compact_retry done [ans_len=%dch, t=%.3fs]",
                 len(generation), time.perf_counter() - t_retry,
             )
@@ -2361,7 +2422,7 @@ async def generator_node(state: AgentState) -> AgentState:
         retry_summary["retry_path"] = "compact_retry>micro_retry"
         try:
             generation = await _micro_answer_retry(answer_question, documents)
-            logger.info("Generator: micro_retry done [ans_len=%dch]", len(generation))
+            logger.debug("Generator: micro_retry done [ans_len=%dch]", len(generation))
             retry_summary["micro_retry_answer_chars"] = len(generation)
         except Exception as exc:
             logger.warning("Generator: micro_retry failed: %s", exc)
@@ -2382,7 +2443,7 @@ async def generator_node(state: AgentState) -> AgentState:
 
     llm_elapsed = time.perf_counter() - t_llm
     total_elapsed = time.perf_counter() - t0
-    logger.info(
+    logger.debug(
         "Generator: done [ans_len=%dch, temp=%.2f, llm_t=%.3fs, total_t=%.3fs]",
         len(generation), session_temp,
         llm_elapsed, total_elapsed,
@@ -2758,14 +2819,14 @@ async def direct_response_node(state: AgentState) -> AgentState:
     if is_web_query(question):
         service = _get_web_search_service()
         search_query = _build_contextual_web_query(question, prior_messages)
-        logger.info(
-            "Direct: web_fast [query='%.80s', prior=%d]",
-            search_query, len(prior_messages),
+        logger.debug(
+            "Direct: web_fast [query_chars=%d, prior=%d]",
+            len(search_query), len(prior_messages),
         )
         t_search = time.perf_counter()
         web_result = await service.search(search_query) if service else None
         if web_result:
-            logger.info(
+            logger.debug(
                 "Direct: web_result [provider=%s, chars=%d, search_t=%.3fs]",
                 web_result.provider, len(web_result.text),
                 time.perf_counter() - t_search,
@@ -2773,7 +2834,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
             t_sum = time.perf_counter()
             if settings.weather_specialization_enabled and is_weather_query(question) and _is_pure_weather_query(question):
                 answer = WebResultFormatter.format_weather(question, web_result.text)
-                logger.info("Direct: weather_format [ans_len=%dch, t=%.3fs]", len(answer), time.perf_counter() - t_sum)
+                logger.debug("Direct: weather_format [ans_len=%dch, t=%.3fs]", len(answer), time.perf_counter() - t_sum)
             else:
                 answer = await _fast_web_summarize(
                     question,
@@ -2783,7 +2844,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
                 )
                 if not answer.strip():
                     answer = _web_fallback_answer(question, _web_docs_from_result(web_result, query=search_query))
-                logger.info(
+                logger.debug(
                     "Direct: web_summarize [ans_len=%dch, llm_t=%.3fs, total_t=%.3fs]",
                     len(answer), time.perf_counter() - t_sum, time.perf_counter() - t0,
                 )
@@ -2820,7 +2881,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
                       7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
         _days_tr = {0:"Pazartesi",1:"Salı",2:"Çarşamba",3:"Perşembe",4:"Cuma",5:"Cumartesi",6:"Pazar"}
         answer = f"{_today.day} {_months_tr[_today.month]} {_today.year}, {_days_tr[_today.weekday()]}."
-        logger.info("Direct: date_fast [ans='%s', total_t=%.3fs]", answer, time.perf_counter() - t0)
+        logger.debug("Direct: date_fast [ans='%s', total_t=%.3fs]", answer, time.perf_counter() - t0)
         new_messages = [*prior_messages, HumanMessage(content=question), AIMessage(content=answer)]
         return {**state, "generation": answer, "messages": new_messages, **_final_answer_fields(state, answer, t0=t0, mode="direct_response")}
 
@@ -2829,7 +2890,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
             answer = _safe_eval_math_expr(question)
         except Exception as exc:
             answer = f"Hesaplama hatası: {exc}"
-        logger.info("Direct: calc_fast [q_len=%d, total_t=%.3fs]", len(question), time.perf_counter() - t0)
+        logger.debug("Direct: calc_fast [q_len=%d, total_t=%.3fs]", len(question), time.perf_counter() - t0)
         new_messages = [
             *prior_messages,
             HumanMessage(content=question),
@@ -2838,7 +2899,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
         return {**state, "generation": answer, "messages": new_messages, **_final_answer_fields(state, answer, t0=t0, mode="direct_response")}
 
     if _should_use_math_direct_llm(question):
-        logger.info("Direct: math_chat [prior=%d, q_len=%d]", len(prior_messages), len(question))
+        logger.debug("Direct: math_chat [prior=%d, q_len=%d]", len(prior_messages), len(question))
         system_prompt = (
             "Sen kısa ve doğru matematik çözen bir asistansın.\n"
             "Kullanıcının dilinde yanıt ver. Gereken ara adımları kısa göster.\n"
@@ -2851,7 +2912,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
             HumanMessage(content=question),
         ])
         generation = getattr(response, "content", "") or ""
-        logger.info(
+        logger.debug(
             "Direct: math_done [ans_len=%dch, llm_t=%.3fs, total_t=%.3fs]",
             len(generation), time.perf_counter() - t_math, time.perf_counter() - t0,
         )
@@ -2866,7 +2927,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
     # ReAct agent tool şemalarını prompt'a eklediği için küçük yerel modellerde
     # basit mesajlarda gereksiz gecikme yaratır.
     if _should_use_plain_direct_llm(question):
-        logger.info("Direct: plain_chat [prior=%d, q_len=%d]", len(prior_messages), len(question))
+        logger.debug("Direct: plain_chat [prior=%d, q_len=%d]", len(prior_messages), len(question))
         _today = datetime.date.today()
         _months_tr = {1:"Ocak",2:"Şubat",3:"Mart",4:"Nisan",5:"Mayıs",6:"Haziran",
                       7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
@@ -2892,7 +2953,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
         t_plain = time.perf_counter()
         response = await llm.ainvoke(messages_to_send)
         generation = getattr(response, "content", "") or ""
-        logger.info(
+        logger.debug(
             "Direct: plain_done [ans_len=%dch, llm_t=%.3fs, total_t=%.3fs]",
             len(generation), time.perf_counter() - t_plain, time.perf_counter() - t0,
         )
@@ -2933,7 +2994,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
     backend = (settings.llm_backend or "").lower().strip()
 
     if backend in {"llama.cpp", "llamacpp", "llama"} and needs_mcp_tools(question):
-        logger.info("Direct: react_skip [reason=llamacpp_no_tools, prior=%d]", len(prior_messages))
+        logger.debug("Direct: react_skip [reason=llamacpp_no_tools, prior=%d]", len(prior_messages))
         messages_to_send = [SystemMessage(content=system_prompt)]
         messages_to_send.extend(direct_history)
         messages_to_send.append(HumanMessage(content=question))
@@ -2946,7 +3007,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
         ]
         return {**state, "generation": generation, "messages": new_messages, **_final_answer_fields(state, generation, t0=t0, mode="direct_response")}
 
-    logger.info(
+    logger.debug(
         "Direct: react_agent [tools=%d, prior=%d, backend=%s]",
         len(all_tools), len(prior_messages), backend,
     )
@@ -2970,7 +3031,7 @@ async def direct_response_node(state: AgentState) -> AgentState:
     result = await agent.ainvoke({"messages": direct_history + [HumanMessage(content=question)]})
 
     generation = result["messages"][-1].content
-    logger.info(
+    logger.debug(
         "Direct: react_done [ans_len=%dch, react_t=%.3fs, total_t=%.3fs]",
         len(generation), time.perf_counter() - t_react, time.perf_counter() - t0,
     )
