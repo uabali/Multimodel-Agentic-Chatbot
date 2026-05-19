@@ -14,6 +14,7 @@ from typing import Any
 
 
 def list_uploaded_files() -> list[str]:
+    """Kısa: `list_uploaded_files` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     root = Path("uploads")
     if not root.exists():
         return []
@@ -23,6 +24,7 @@ def list_uploaded_files() -> list[str]:
 
 
 def get_system_info() -> dict[str, Any]:
+    """Kısa: `get_system_info` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return {
         "platform": platform.platform(),
         "python": platform.python_version(),
@@ -31,6 +33,7 @@ def get_system_info() -> dict[str, Any]:
 
 
 def main():
+    """Kısa: `main` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     from mcp.server.fastmcp import FastMCP
 
     mcp = FastMCP("rag-agent-local-mcp")

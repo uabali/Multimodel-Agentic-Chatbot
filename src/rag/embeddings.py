@@ -1,10 +1,3 @@
-"""
-Embedding helpers — HuggingFace GPU embeddings as primary backend.
-
-OllamaEmbeddings is removed; all embedding is done locally on GPU via
-sentence-transformers / langchain-huggingface.  This is faster than round-
-tripping through an Ollama HTTP server and keeps the Docker stack self-contained.
-"""
 
 import logging
 from functools import lru_cache
@@ -15,7 +8,6 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Known embedding model output dimensions — avoids an extra inference probe call.
 _KNOWN_DIMS: dict[str, int] = {
     "bge-m3": 1024,
     "bge-large": 1024,

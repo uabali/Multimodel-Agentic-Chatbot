@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 
 
 def _history_turn_count(messages: list) -> int:
+    """Kısa: `_history_turn_count` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return sum(1 for m in messages if isinstance(m, HumanMessage))
 
 
@@ -147,9 +148,6 @@ def select_recent_history(messages: list, *, mode: str = "rag") -> list:
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM fabrika erişimleri — DIP: node'lar doğrudan ChatOpenAI yaratmaz
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 _router_llm_cache = None
@@ -274,6 +272,7 @@ _SAFE_MATH_OPS = {
 def _safe_eval_math_expr(expression: str) -> str:
     """Saf aritmetik ifadeleri LLM/ReAct'e gitmeden hesapla."""
     def _eval(node):
+        """Kısa: `_eval` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if isinstance(node, ast.Expression):
             return _eval(node.body)
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
@@ -318,9 +317,6 @@ def _should_use_math_direct_llm(question: str) -> bool:
     return bool(_MATH_WORD_RE.search(q)) and not is_web_query(q) and not needs_mcp_tools(q)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Reranker kayıt defteri — modül-level global state'i kapsüller (SRP)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 _RERANKER_FAILED = object()
@@ -334,6 +330,7 @@ class _RerankerRegistry:
 
     @classmethod
     def get(cls):
+        """Kısa: `get` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if cls._instance is _RERANKER_FAILED:
             return None
         if cls._instance is not None:
@@ -357,15 +354,13 @@ class _RerankerRegistry:
         return cls._instance if cls._instance is not _RERANKER_FAILED else None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WebSearchService singleton — her çağrıda provider listesi yeniden kurulmaz
-# ─────────────────────────────────────────────────────────────────────────────
 
 _web_search_service = None
 _web_search_service_loaded = False
 
 
 def _get_web_search_service():
+    """Kısa: `_get_web_search_service` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     global _web_search_service, _web_search_service_loaded
     if not _web_search_service_loaded:
         _web_search_service = WebSearchService.from_settings()
@@ -373,9 +368,6 @@ def _get_web_search_service():
     return _web_search_service
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 1 — Router
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _parse_route(text: str, default: str = "direct") -> str:
@@ -562,11 +554,7 @@ async def router_node(state: AgentState) -> AgentState:
     return {**state, "route": route}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 2 — Query Rewriter
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Çok-turlu follow-up sorgularında rewriter gereklidir (referans çözümlemesi).
 _FOLLOW_UP_MARKERS: frozenset[str] = frozenset({
     "bunu", "buna", "bunda", "bunun", "bunları", "bunlari", "bununla",
     "önceki", "onceki", "bahsettiğin", "bahsettigin",
@@ -574,7 +562,6 @@ _FOLLOW_UP_MARKERS: frozenset[str] = frozenset({
     "this", "that", "it", "these", "those", "above", "previous",
 })
 
-# Kısa sorgularda soru kelimesi varsa rewriter'a gerek yok.
 _QUESTION_WORDS: frozenset[str] = frozenset({
     "ne", "nedir", "nasıl", "nasil", "neden", "kim", "hangi",
     "kaç", "kac", "nerede", "ne zaman",
@@ -645,6 +632,7 @@ async def rewriter_node(state: AgentState) -> AgentState:
 
     # Dense gate embedding ve LLM rewrite paralelde — retriever_node LRU cache'ten hızlı alır
     async def _warm_embed_cache():
+        """Kısa: `_warm_embed_cache` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         try:
             from src.rag.vectorstore import _cached_embed_query
             await asyncio.to_thread(_cached_embed_query, question)
@@ -678,9 +666,6 @@ async def rewriter_node(state: AgentState) -> AgentState:
     return {**state, "question": rewritten}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 3 — Retriever (hybrid + dense gate + reranking)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _build_source_filter(source_filter: str, session_uploads: list[str] | None = None):
@@ -711,6 +696,108 @@ def _build_source_filter(source_filter: str, session_uploads: list[str] | None =
             ]
         )
     return None
+
+
+_DOCUMENT_OVERVIEW_RE = re.compile(
+    r"\b("
+    r"ana\s+konu|konusu|önemli\s+bulgu\w*|onemli\s+bulgu\w*|bulgu\w*|"
+    r"yöntem|yontem|metod|method|methodology|"
+    r"özet|ozet|summarize|summary|abstract|"
+    r"sonuç|sonuc|conclusion|giriş|giris|introduction"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_OVERVIEW_SECTION_RE = re.compile(
+    r"\b("
+    r"abstract|özet|ozet|giriş|giris|introduction|"
+    r"yöntem|yontem|methodology|method|"
+    r"bulgular|findings|sonuç|sonuc|conclusion|"
+    r"tartışma|tartisma|discussion"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_document_overview_question(state: AgentState) -> bool:
+    """Kısa: `_is_document_overview_question` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    q = " ".join(
+        str(part or "")
+        for part in (state.get("original_question"), state.get("question"))
+    )
+    return bool(_DOCUMENT_OVERVIEW_RE.search(q))
+
+
+def _payload_to_document(payload: dict | None) -> Document | None:
+    """Kısa: `_payload_to_document` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    payload = payload or {}
+    content = (
+        payload.get("page_content")
+        or payload.get("content")
+        or payload.get("text")
+        or payload.get("document")
+        or ""
+    )
+    if not isinstance(content, str) or not content.strip():
+        return None
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    extra_meta = {
+        k: v for k, v in payload.items()
+        if k not in {"page_content", "content", "text", "document", "metadata"}
+    }
+    return Document(page_content=content, metadata={**extra_meta, **metadata})
+
+
+def _chunk_sort_key(doc: Document) -> tuple[int, int, str]:
+    """Kısa: `_chunk_sort_key` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    from src.rag.retriever import chunk_id
+
+    meta = getattr(doc, "metadata", {}) or {}
+    raw_idx = meta.get("chunk_index")
+    idx = 10**9
+    if isinstance(raw_idx, int):
+        idx = raw_idx
+    elif isinstance(raw_idx, str):
+        m = re.search(r"\d+", raw_idx)
+        if m:
+            idx = int(m.group(0))
+    try:
+        page = int(meta.get("page") or 10**9)
+    except (TypeError, ValueError):
+        page = 10**9
+    return idx, page, chunk_id(doc)
+
+
+def _fetch_document_overview_chunks(store, qdrant_filter, *, limit: int = 96, max_docs: int = 4) -> list[Document]:
+    """Fetch opening/section/closing chunks for broad document questions."""
+    if qdrant_filter is None:
+        return []
+    try:
+        records, _ = store.client.scroll(
+            collection_name=settings.qdrant_collection,
+            scroll_filter=qdrant_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception as exc:
+        logger.debug("overview chunk fetch failed: %s", exc)
+        return []
+
+    docs = [doc for rec in records if (doc := _payload_to_document(getattr(rec, "payload", None)))]
+    if not docs:
+        return []
+    docs.sort(key=_chunk_sort_key)
+
+    selected: list[Document] = []
+    selected.extend(docs[:2])
+    selected.extend(doc for doc in docs if _OVERVIEW_SECTION_RE.search(doc.page_content or ""))
+    if len(docs) > 2:
+        selected.extend(docs[-2:])
+
+    from src.rag.retriever import deduplicate_documents
+
+    return deduplicate_documents(selected, max_docs=max_docs)
 
 
 async def retriever_node(state: AgentState) -> AgentState:
@@ -776,6 +863,24 @@ async def retriever_node(state: AgentState) -> AgentState:
         t_fetch = time.perf_counter()
         documents = await asyncio.to_thread(run_retriever, retriever, question)
         documents = deduplicate_documents(documents, max_docs=settings.top_k)
+        if _is_document_overview_question(state):
+            t_overview = time.perf_counter()
+            overview_docs = await asyncio.to_thread(
+                _fetch_document_overview_chunks,
+                store,
+                qdrant_filter,
+                max_docs=4,
+            )
+            if overview_docs:
+                documents = deduplicate_documents(
+                    [*overview_docs, *documents],
+                    max_docs=max(settings.top_k, min(settings.rerank_top_n, settings.top_k + len(overview_docs))),
+                )
+            latency_ms["overview_fetch"] = round((time.perf_counter() - t_overview) * 1000, 2)
+            logger.info(
+                "Retriever: overview_boost [overview_docs=%d, final_docs=%d, t=%.3fs]",
+                len(overview_docs), len(documents), time.perf_counter() - t_overview,
+            )
         t_fetch_elapsed = time.perf_counter() - t_fetch
         latency_ms["fetch"] = round(t_fetch_elapsed * 1000, 2)
 
@@ -884,6 +989,7 @@ async def retriever_node(state: AgentState) -> AgentState:
 
 
 def _fmt_score(s) -> str:
+    """Kısa: `_fmt_score` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return f"{s:.3f}" if isinstance(s, (int, float)) else "?"
 
 
@@ -938,6 +1044,7 @@ def _published_sort_key(published: str) -> tuple[int, str]:
 
 
 def _web_domain(url: str) -> str:
+    """Kısa: `_web_domain` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     try:
         return urlparse(url).netloc.lower()
     except Exception:
@@ -945,6 +1052,7 @@ def _web_domain(url: str) -> str:
 
 
 def _hash_text(text: str) -> str:
+    """Kısa: `_hash_text` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     try:
         from src.observability.langsmith import stable_hash
         return stable_hash(text)
@@ -953,6 +1061,7 @@ def _hash_text(text: str) -> str:
 
 
 def _web_docs_from_result(result, *, query: str, limit: int | None = None) -> list[Document]:
+    """Kısa: `_web_docs_from_result` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     retrieved_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     records = list(getattr(result, "records", None) or [])
     if not records:
@@ -986,21 +1095,20 @@ def _web_docs_from_result(result, *, query: str, limit: int | None = None) -> li
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 4 — Grader (CRAG-style belge alaka değerlendirmesi)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
-# Confidence eşikleri: yüksek/düşük durumda LLM atlanır (~3s kazanç).
 def _grader_conf_high() -> float:
+    """Kısa: `_grader_conf_high` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return float(settings.grader_conf_high)
 
 
 def _grader_conf_low() -> float:
+    """Kısa: `_grader_conf_low` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return float(settings.grader_conf_low)
 
 
 def _grader_max_docs() -> int:
+    """Kısa: `_grader_max_docs` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return int(settings.grader_max_docs)
 
 
@@ -1073,28 +1181,37 @@ async def grader_node(state: AgentState) -> AgentState:
         if is_web_query(original_q):
             pass  # Web sorguları için grader LLM'i çalıştır — needs_live_data döndürebilir
         else:
-            # source_filter aktif → kullanıcı dosyayı açıkça belirtti, doğrudan kabul et
             confidence = estimate_confidence(question, documents)
-            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+            if confidence >= _grader_conf_high():
+                elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+                logger.info(
+                    "Grader: relevance=yes [mode=file_high_conf, conf=%.3f>=%.3f, docs=%d, t=%.3fs]",
+                    confidence, _grader_conf_high(), len(documents), time.perf_counter() - t0,
+                )
+                _observe_node(
+                    "frappe.grader_decision",
+                    state,
+                    outputs={
+                        "relevance": "yes",
+                        "grader_reason": "sufficient",
+                        "mode": "file_high_conf",
+                        "confidence": confidence,
+                        "high_threshold": _grader_conf_high(),
+                        "document_count": len(documents),
+                        "latency_ms_by_stage": {"total": elapsed_ms},
+                    },
+                    metadata={
+                        "grader_mode": "file_high_conf",
+                        "grader_confidence": confidence,
+                        "grader_high_threshold": _grader_conf_high(),
+                    },
+                    tags=["frappe", "grader", "yes"],
+                )
+                return {**state, "relevance": "yes", "grader_reason": "sufficient"}
             logger.info(
-                "Grader: relevance=yes [mode=file_direct, conf=%.3f, docs=%d, t=%.3fs]",
-                confidence, len(documents), time.perf_counter() - t0,
+                "Grader: file context requires LLM [conf=%.3f<%.3f, docs=%d]",
+                confidence, _grader_conf_high(), len(documents),
             )
-            _observe_node(
-                "frappe.grader_decision",
-                state,
-                outputs={
-                    "relevance": "yes",
-                    "grader_reason": "sufficient",
-                    "mode": "file_direct",
-                    "confidence": confidence,
-                    "document_count": len(documents),
-                    "latency_ms_by_stage": {"total": elapsed_ms},
-                },
-                metadata={"grader_mode": "file_direct", "grader_confidence": confidence},
-                tags=["frappe", "grader", "yes"],
-            )
-            return {**state, "relevance": "yes", "grader_reason": "sufficient"}
 
         top_docs = documents[:_grader_max_docs()]
         doc_texts = "\n---\n".join(doc.page_content for doc in top_docs)
@@ -1242,9 +1359,6 @@ async def grader_node(state: AgentState) -> AgentState:
     return {**state, "relevance": relevance, "grader_reason": reason}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 5 — Vision (Gemma 4 multimodal görsel analiz)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _build_vision_content_parts(image_data: list[dict], text: str) -> list[dict]:
@@ -1312,9 +1426,6 @@ async def vision_node(state: AgentState) -> AgentState:
     return {**state, "generation": generation, "messages": new_messages, **_final_answer_fields(state, generation, t0=t0, mode="vision")}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 5b — Vision-RAG (Hibrit: görsel analizi → RAG pipeline'ına ilet)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def vision_rag_node(state: AgentState) -> AgentState:
@@ -1355,9 +1466,6 @@ async def vision_rag_node(state: AgentState) -> AgentState:
     return {**state, "vision_context": vision_context}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 5c — Vision-Search (Görsel + Web Arama kombinasyonu)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def vision_search_node(state: AgentState) -> AgentState:
@@ -1420,9 +1528,6 @@ async def vision_search_node(state: AgentState) -> AgentState:
     return {**state, "vision_context": vision_context, "documents": web_docs}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 6 — Generator (RAG yanıtı üretir)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _coerce_llm_text(response) -> str:
@@ -1484,10 +1589,12 @@ class RAGContextAssembly:
 
 
 def _estimate_history_tokens(messages: list) -> int:
+    """Kısa: `_estimate_history_tokens` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return count_message_tokens(messages)
 
 
 def _source_header(index: int, doc: Document) -> str:
+    """Kısa: `_source_header` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     meta = getattr(doc, "metadata", {}) or {}
     src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
     page = meta.get("page", "")
@@ -1592,6 +1699,7 @@ def assemble_rag_context(
 
 
 def _source_list_line(index: int, doc: Document) -> str:
+    """Kısa: `_source_list_line` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     meta = getattr(doc, "metadata", {}) or {}
     title = meta.get("display_name") or meta.get("title") or meta.get("source_file") or meta.get("source") or f"Kaynak {index}"
     url = meta.get("url") or (meta.get("source") if meta.get("type") == "web_search" else "")
@@ -1632,6 +1740,7 @@ def _final_answer_fields(
     mode: str,
     extra_latency: dict | None = None,
 ) -> dict:
+    """Kısa: `_final_answer_fields` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     from src.observability.langsmith import safe_preview
 
     latency = {"total": round((time.perf_counter() - t0) * 1000, 2), **(extra_latency or {})}
@@ -1994,9 +2103,6 @@ async def generator_node(state: AgentState) -> AgentState:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 7 — Web Search (Tavily-only policy)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def web_search_node(state: AgentState) -> AgentState:
@@ -2082,9 +2188,6 @@ async def web_search_node(state: AgentState) -> AgentState:
     return {**state, "documents": existing_docs + web_docs}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 8 — Direct Response (ReAct agent — araç destekli hızlı yanıt)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 _COMPOUND_QUERY_MARKERS = re.compile(
@@ -2127,6 +2230,7 @@ _CURRENCY_ENTITY_RE = re.compile(
 
 
 def _message_text(message: object) -> str:
+    """Kısa: `_message_text` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if isinstance(message, dict):
         return str(message.get("content") or "")
     content = getattr(message, "content", "")
@@ -2136,6 +2240,7 @@ def _message_text(message: object) -> str:
 
 
 def _clean_subject(subject: str) -> str:
+    """Kısa: `_clean_subject` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     subject = re.split(r"\bKaynaklar?:|\bSources:", subject, maxsplit=1, flags=re.IGNORECASE)[0]
     subject = re.sub(r"\s*\[?Kaynak\s+\d+\]?.*$", "", subject, flags=re.IGNORECASE).strip()
     subject = re.sub(r"\s+", " ", subject).strip(" .,:;\"'`")
@@ -2201,6 +2306,7 @@ def _compact_web_query(query: str, *, max_chars: int = _WEB_QUERY_MAX_CHARS) -> 
 
 
 def _web_fallback_answer(question: str, documents: list[Document]) -> str:
+    """Kısa: `_web_fallback_answer` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     web_docs = [d for d in documents if (getattr(d, "metadata", {}) or {}).get("type") == "web_search"]
     if not web_docs:
         return ""
@@ -2506,9 +2612,6 @@ async def direct_response_node(state: AgentState) -> AgentState:
     return {**state, "generation": generation, "messages": new_messages, **_final_answer_fields(state, generation, t0=t0, mode="direct_response")}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Yardımcılar
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _dedupe_tools(tools: list) -> list:

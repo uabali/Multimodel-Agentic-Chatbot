@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-# ─── file_reader: path traversal ─────────────────────────────────────────────
 
 
 def _make_upload_dir(tmp_path: Path) -> Path:
@@ -64,7 +63,6 @@ def test_safe_file_readable(tmp_path):
         assert "hello" in result
 
 
-# ─── rate_limiter: sliding window ────────────────────────────────────────────
 
 
 def test_rate_limiter_allows_under_limit():
@@ -98,7 +96,6 @@ def test_rate_limiter_separate_keys():
     assert allowed_b
 
 
-# ─── rate_limiter: X-Forwarded-For only trusted from known proxies ──────────
 
 
 def test_xff_ignored_from_untrusted_client():
@@ -127,7 +124,6 @@ def test_xff_trusted_from_known_proxy():
     assert ip == "5.6.7.8", f"Should use forwarded IP, got {ip}"
 
 
-# ─── API router: admin auth dependency ───────────────────────────────────────
 
 
 def _make_settings(username="admin", password="s3cr3t", salt="testsalt"):
@@ -188,7 +184,6 @@ async def test_require_admin_correct_credentials():
     assert result is None  # dependency returns None on success
 
 
-# ─── API router: integration with TestClient ─────────────────────────────────
 
 
 def _make_app():
@@ -255,7 +250,6 @@ def test_health_endpoint_public():
     assert resp.status_code == 200
 
 
-# ─── URL ingest: SSRF guard ─────────────────────────────────────────────────
 
 
 def test_url_guard_blocks_loopback_ip():

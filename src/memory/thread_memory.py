@@ -32,10 +32,12 @@ _MEMORY_COMMAND_RE = re.compile(
 
 
 def _now_iso() -> str:
+    """Kısa: `_now_iso` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _clean_text(text: str, max_chars: int) -> str:
+    """Kısa: `_clean_text` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
     if len(cleaned) > max_chars:
         cleaned = cleaned[:max_chars].rstrip() + "..."
@@ -43,6 +45,7 @@ def _clean_text(text: str, max_chars: int) -> str:
 
 
 def _clean_summary(text: str) -> str:
+    """Kısa: `_clean_summary` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     cleaned = _clean_text(text, MAX_SUMMARY_TOKENS * 8)
     try:
         from src.rag.llm import count_tokens
@@ -67,6 +70,7 @@ class ThreadMemory:
 
     @classmethod
     def empty(cls) -> "ThreadMemory":
+        """Kısa: `empty` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return cls(updated_at=_now_iso())
 
     @classmethod
@@ -95,6 +99,7 @@ class ThreadMemory:
         return cls.empty()
 
     def to_metadata(self) -> dict[str, Any]:
+        """Kısa: `to_metadata` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return {
             "version": self.version,
             "rolling_summary": self.rolling_summary,
@@ -104,6 +109,7 @@ class ThreadMemory:
         }
 
     def with_summary(self, summary: str) -> "ThreadMemory":
+        """Kısa: `with_summary` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return ThreadMemory(
             version=self.version,
             rolling_summary=_clean_summary(summary),
@@ -113,6 +119,7 @@ class ThreadMemory:
         )
 
     def with_pin(self, fact: str) -> "ThreadMemory":
+        """Kısa: `with_pin` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         fact = _clean_text(fact, MAX_PIN_CHARS)
         if not fact:
             return self
@@ -129,6 +136,7 @@ class ThreadMemory:
         )
 
     def with_last_topic(self, topic: str) -> "ThreadMemory":
+        """Kısa: `with_last_topic` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return ThreadMemory(
             version=self.version,
             rolling_summary=self.rolling_summary,
@@ -147,6 +155,7 @@ def metadata_patch(memory: ThreadMemory) -> dict[str, Any]:
 
 
 def memory_hash(memory: ThreadMemory | Mapping[str, Any] | None) -> str:
+    """Kısa: `memory_hash` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if not isinstance(memory, ThreadMemory):
         memory = ThreadMemory.from_metadata(memory)
     payload = json.dumps(
@@ -162,6 +171,7 @@ def memory_hash(memory: ThreadMemory | Mapping[str, Any] | None) -> str:
 
 
 def extract_memory_pin(text: str) -> str | None:
+    """Kısa: `extract_memory_pin` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     text = text or ""
     for pattern in _PIN_PATTERNS:
         match = pattern.match(text)
@@ -171,10 +181,12 @@ def extract_memory_pin(text: str) -> str | None:
 
 
 def is_memory_command(text: str) -> bool:
+    """Kısa: `is_memory_command` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return bool(_MEMORY_COMMAND_RE.match(text or ""))
 
 
 def format_memory_context(memory: ThreadMemory | None) -> str:
+    """Kısa: `format_memory_context` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if not memory:
         return ""
     parts: list[str] = []

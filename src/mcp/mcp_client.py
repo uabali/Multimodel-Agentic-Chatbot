@@ -22,15 +22,16 @@ logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).resolve().parent / "mcp_config.json"
 
-# Process-level cache (survives new Chainlit threads / on_chat_start)
 _mcp_tools_cache: list | None = None
 
 
 def is_mcp_tools_cache_warm() -> bool:
+    """Kısa: `is_mcp_tools_cache_warm` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return _mcp_tools_cache is not None
 
 
 def invalidate_mcp_tools_cache() -> None:
+    """Kısa: `invalidate_mcp_tools_cache` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     global _mcp_tools_cache
     _mcp_tools_cache = None
 
@@ -54,16 +55,19 @@ def _sync_mcp_env_from_settings() -> None:
 
 
 def _substitute_env_in_text(raw: str) -> str:
+    """Kısa: `_substitute_env_in_text` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     for key, val in os.environ.items():
         raw = raw.replace(f"${{{key}}}", val)
     return raw
 
 
 def _parse_config_dict(raw_text: str) -> dict[str, Any]:
+    """Kısa: `_parse_config_dict` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return json.loads(raw_text)
 
 
 def _filesystem_root() -> str:
+    """Kısa: `_filesystem_root` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     try:
         from src.config import settings
 

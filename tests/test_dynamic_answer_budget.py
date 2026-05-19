@@ -34,6 +34,19 @@ def test_dynamic_budget_respects_short_and_long_intent(monkeypatch):
     assert long_budget <= main._max_token_ceiling()
 
 
+def test_document_summary_budget_is_not_clamped_as_short_answer(monkeypatch):
+    import src.main as main
+
+    monkeypatch.setattr(main.settings, "llm_context_size", 8192)
+    monkeypatch.setattr(main.settings, "rag_context_safety_margin_tokens", 700)
+
+    budget = main._dynamic_answer_token_budget("Belgedeki önemli bulguları özetle.", cap=1536)
+    topic_budget = main._dynamic_answer_token_budget("Bu belgenin ana konusu nedir?", cap=1536)
+
+    assert budget >= 1024
+    assert topic_budget >= 1024
+
+
 def test_dynamic_budget_runtime_context_ceiling(monkeypatch):
     import src.main as main
 

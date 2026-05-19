@@ -1,4 +1,5 @@
 from langchain_core.documents import Document
+import pytest
 
 from src.rag.retriever import (
     auto_select_strategy,
@@ -20,6 +21,17 @@ def test_confidence_uses_turkish_normalization():
     docs = [Document(page_content="Ucus bileti kalkis Istanbul ve varis Ankara olarak gorunuyor.")]
 
     assert estimate_confidence("Uçuş biletinin kalkış ve varış bilgisi nedir?", docs) > 0
+
+
+def test_tiny_rerank_score_does_not_create_high_confidence():
+    docs = [
+        Document(
+            page_content="Bu parça alakasız kısa bir metindir.",
+            metadata={"rerank_score": 0.001},
+        )
+    ]
+
+    assert estimate_confidence("Belgedeki önemli bulguları özetle", docs) < 0.35
 
 
 def test_deduplicate_documents_removes_repeated_chunks():
@@ -98,6 +110,65 @@ def test_parse_grader_reason_supports_extended_enum():
     assert _parse_grader_reason('{"relevant":"yes","reason":"sufficient"}') == "sufficient"
     assert _parse_grader_reason('{"relevant":"no","reason":"partial"}') == "partial"
     assert _parse_grader_reason('{"relevant":"no","reason":"insufficient_context"}') == "insufficient_context"
+
+
+@pytest.mark.anyio
+async def test_source_filter_low_confidence_uses_llm_grader(monkeypatch):
+    from src.agent import nodes
+
+    calls = {"llm": 0}
+
+    class FakeLLM:
+        async def ainvoke(self, messages):
+            calls["llm"] += 1
+
+            class Response:
+                content = '{"relevant":"yes","reason":"sufficient"}'
+
+            return Response()
+
+    monkeypatch.setattr(nodes, "_get_rag_llm", lambda temperature=0.0, max_tokens=None: FakeLLM())
+    monkeypatch.setattr(nodes, "_observe_node", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nodes.settings, "grader_conf_high", 0.75)
+
+    result = await nodes.grader_node({
+        "question": "Belgedeki önemli bulguları özetle",
+        "original_question": "Belgedeki önemli bulguları özetle",
+        "source_filter": "uploaded.pdf",
+        "session_uploads": ["uploaded.pdf"],
+        "documents": [
+            Document(
+                page_content="Bu parça alakasız kısa bir metindir.",
+                metadata={"source_file": "uploaded.pdf", "chunk_index": 9, "rerank_score": 0.001},
+            )
+        ],
+    })
+
+    assert calls["llm"] == 1
+    assert result["relevance"] == "yes"
+
+
+def test_document_overview_fetch_adds_opening_and_section_chunks():
+    from types import SimpleNamespace
+    from src.agent.nodes import _fetch_document_overview_chunks
+
+    payloads = [
+        {"page_content": "Sonuç bölümünde sistemin başarımı tartışılır.", "metadata": {"source_file": "a.pdf", "chunk_index": 5}},
+        {"page_content": "Kapak ve proje adı.", "metadata": {"source_file": "a.pdf", "chunk_index": 0}},
+        {"page_content": "Yöntem bölümünde hibrit RAG mimarisi anlatılır.", "metadata": {"source_file": "a.pdf", "chunk_index": 3}},
+        {"page_content": "Özet bölümünde belgenin ana konusu verilir.", "metadata": {"source_file": "a.pdf", "chunk_index": 1}},
+    ]
+
+    class FakeClient:
+        def scroll(self, **kwargs):
+            return [SimpleNamespace(payload=p) for p in payloads], None
+
+    class FakeStore:
+        client = FakeClient()
+
+    docs = _fetch_document_overview_chunks(FakeStore(), object(), max_docs=4)
+
+    assert [doc.metadata["chunk_index"] for doc in docs] == [0, 1, 3, 5]
 
 
 def test_rag_context_assembly_truncates_for_small_context(monkeypatch):

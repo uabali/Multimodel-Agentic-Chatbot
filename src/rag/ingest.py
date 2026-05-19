@@ -27,7 +27,6 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── Desteklenen format → loader sınıfı eşlemesi (OCP kapısı) ──────────────────
 
 LOADER_MAP: dict[str, type] = {}
 
@@ -63,23 +62,21 @@ try:
 except ImportError:
     logger.warning("CSVLoader bulunamadı; CSV desteği devre dışı.")
 
-# PDF belgelerinde daha iyi parçalama için özelleştirilmiş ayraçlar
 _PDF_SEPARATORS: list[str] = ["\n\n\n", "\n\n", "\n", ". ", "? ", "! ", "; ", ", ", " ", ""]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DocumentLoader — SRP: yalnızca belge yükleme
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class DocumentLoader:
     """Dosya uzantısına göre doğru loader'ı seçer ve belgeleri yükler."""
 
     def __init__(self, loader_map: dict[str, type] | None = None) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self._loader_map = loader_map or LOADER_MAP
 
     @property
     def supported_extensions(self) -> list[str]:
+        """Kısa: `supported_extensions` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return list(self._loader_map.keys())
 
     def load(self, file_path: Path) -> list[Document]:
@@ -95,9 +92,6 @@ class DocumentLoader:
         return loader_cls(str(file_path)).load()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DocumentSplitter — SRP: yalnızca metni parçalara ayırma
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class DocumentSplitter:
@@ -109,6 +103,7 @@ class DocumentSplitter:
         chunk_overlap: int = 200,
         separators: list[str] | None = None,
     ) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self._splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -127,9 +122,6 @@ class DocumentSplitter:
         return cls(chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DocumentIngester — SRP: yalnızca indeksleme koordinasyonu
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class DocumentIngester:
@@ -144,6 +136,7 @@ class DocumentIngester:
         splitter: DocumentSplitter,
         vectorstore,
     ) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self._loader = loader
         self._splitter = splitter
         self._vectorstore = vectorstore
@@ -267,9 +260,6 @@ class DocumentIngester:
         return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VisualPageIngester — PDF sayfaları Gemma 4 multimodal ile analiz edilir
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class VisualPageIngester:
@@ -295,6 +285,7 @@ class VisualPageIngester:
     )
 
     def __init__(self, dpi: int = 150) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self._dpi = dpi
 
     @staticmethod
@@ -409,9 +400,6 @@ class VisualPageIngester:
         return docs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Geriye dönük uyumluluk — main.py kullanımı bozulmaz
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def ingest_file(

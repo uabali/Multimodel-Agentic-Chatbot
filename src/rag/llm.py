@@ -26,6 +26,7 @@ _runtime_context_checked = False
 
 @lru_cache(maxsize=1)
 def _token_encoding():
+    """Kısa: `_token_encoding` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return tiktoken.get_encoding("cl100k_base")
 
 
@@ -148,6 +149,7 @@ class DualLLM:
     """
 
     def __init__(self) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         negotiate_runtime_context_size()
         self._chat: ChatOpenAI | None = None
         self._rag: ChatOpenAI | None = None
@@ -155,6 +157,7 @@ class DualLLM:
 
     @property
     def chat_model(self) -> ChatOpenAI:
+        """Kısa: `chat_model` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if self._chat is None:
             self._chat = _make_openai_compat_client(
                 temperature=settings.chat_temperature,
@@ -165,6 +168,7 @@ class DualLLM:
 
     @property
     def rag_model(self) -> ChatOpenAI:
+        """Kısa: `rag_model` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if self._rag is None:
             self._rag = _make_openai_compat_client(
                 temperature=settings.rag_temperature,
@@ -186,6 +190,7 @@ class DualLLM:
         return self._agent
 
     def warm_up(self) -> None:
+        """Kısa: `warm_up` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         msg = HumanMessage(content="ping")
         try:
             self.chat_model.invoke([msg])
@@ -194,6 +199,7 @@ class DualLLM:
             logger.warning("LLM warm-up skipped: %s", exc)
 
     def benchmark_chat(self) -> dict[str, Any]:
+        """Kısa: `benchmark_chat` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         t0 = time.perf_counter()
         try:
             r = self.chat_model.invoke([HumanMessage(content="Say OK in one word.")])
@@ -208,6 +214,7 @@ _dual_llm: DualLLM | None = None
 
 
 def get_dual_llm() -> DualLLM:
+    """Kısa: `get_dual_llm` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     global _dual_llm
     if _dual_llm is None:
         _dual_llm = DualLLM()
@@ -226,10 +233,12 @@ def reset_llm_cache() -> None:
 
 
 def get_chat_llm() -> ChatOpenAI:
+    """Kısa: `get_chat_llm` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return get_dual_llm().chat_model
 
 
 def get_rag_llm() -> ChatOpenAI:
+    """Kısa: `get_rag_llm` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return get_dual_llm().rag_model
 
 

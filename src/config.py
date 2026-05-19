@@ -206,10 +206,12 @@ class Settings(BaseSettings):
     }
 
     def ensure_dirs(self):
+        """Kısa: `ensure_dirs` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self.upload_dir.mkdir(parents=True, exist_ok=True)
 
     @model_validator(mode="after")
     def reject_placeholder_secrets(self) -> "Settings":
+        """Kısa: `reject_placeholder_secrets` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         placeholders = {
             "change-me",
             "change-me-in-production",
@@ -234,10 +236,12 @@ class Settings(BaseSettings):
     # Backward-compat aliases for older code/docs that still say "vLLM".
     @property
     def vllm_server_url(self) -> str:  # pragma: no cover
+        """Kısa: `vllm_server_url` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return self.llm_server_url
 
     @property
     def vllm_model_name(self) -> str:  # pragma: no cover
+        """Kısa: `vllm_model_name` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return self.llm_model_name
 
 

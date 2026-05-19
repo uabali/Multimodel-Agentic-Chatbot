@@ -42,14 +42,17 @@ class SemanticCache:
 
     @classmethod
     def get(cls) -> "SemanticCache":
+        """Kısa: `get` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
     def _is_temporarily_disabled(self) -> bool:
+        """Kısa: `_is_temporarily_disabled` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return time.monotonic() < self._disabled_until
 
     def _mark_unavailable(self, exc: Exception) -> None:
+        """Kısa: `_mark_unavailable` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self._collection_ready = False
         self._disabled_until = time.monotonic() + self._cooldown_s
         if not self._warned_unavailable:
@@ -62,6 +65,7 @@ class SemanticCache:
             logger.debug("SemanticCache: Qdrant hâlâ kullanılamıyor: %s", exc)
 
     def _ensure_collection(self) -> None:
+        """Kısa: `_ensure_collection` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if self._collection_ready:
             return
         if self._is_temporarily_disabled():

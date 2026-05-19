@@ -21,6 +21,7 @@ _SAFE_OPS = {
 
 
 def _safe_eval(node):
+    """Kısa: `_safe_eval` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if isinstance(node, ast.Expression):
         return _safe_eval(node.body)
     if isinstance(node, ast.Constant):

@@ -156,10 +156,14 @@ async def test_semantic_cache_hit_records_manual_observation(monkeypatch):
     from src.rag.semantic_cache import SemanticCache
 
     captured = {}
+    cached_answer = (
+        "Bu belge FRAPPE sisteminin RAG mimarisini, retrieval stratejisini ve "
+        "değerlendirme bulgularını özetleyen tamamlanmış bir yanıttır. [Kaynak 1]"
+    )
 
     class FakeCache:
         async def lookup(self, question, cache_ctx=""):
-            return "cached answer"
+            return cached_answer
 
     monkeypatch.setattr(graph, "get_graph", lambda: None)
     monkeypatch.setattr(graph, "record_semantic_cache_hit", lambda **kwargs: captured.update(kwargs))
@@ -176,9 +180,9 @@ async def test_semantic_cache_hit_records_manual_observation(monkeypatch):
         )
     ]
 
-    assert captured["cached_answer"] == "cached answer"
+    assert captured["cached_answer"] == cached_answer
     assert captured["trace_context"]["channel"] == "unit"
-    assert events[0] == ("updates", {"generator": {"generation": "cached answer"}})
+    assert events[0] == ("updates", {"generator": {"generation": cached_answer}})
 
 
 @pytest.mark.anyio

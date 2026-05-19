@@ -22,9 +22,6 @@ from src.agent.routing import is_turkish_query, normalize_web_query
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Value objects
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -46,15 +43,13 @@ class WebSourceRecord(NamedTuple):
     published: str = ""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Tavily provider
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class WebSearchService:
     """Tavily API üzerinden web arama servisi."""
 
     def __init__(self, api_key: str, max_results: int = 5) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self._api_key = api_key
         self._max_results = max_results
         self._client = None
@@ -78,6 +73,7 @@ class WebSearchService:
 
     @staticmethod
     def _is_low_quality_result(result: dict) -> bool:
+        """Kısa: `_is_low_quality_result` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         title = re.sub(r"\s+", " ", str(result.get("title") or "")).strip().lower()
         content = re.sub(r"\s+", " ", str(result.get("content") or "")).strip()
         published = str(result.get("published_date") or "").strip().lower()
@@ -90,6 +86,7 @@ class WebSearchService:
 
     @staticmethod
     def _format_records(query: str, records: list[WebSourceRecord]) -> str:
+        """Kısa: `_format_records` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if not records:
             return ""
         parts = [f"Web search results for: {query}"]
@@ -109,6 +106,7 @@ class WebSearchService:
             import datetime
 
             def _call() -> list[WebSourceRecord]:
+                """Kısa: `_call` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
                 client = self._get_client()
                 # Zaman duyarlı sorgular için güncel tarih bilgisi eklenir.
                 today = datetime.date.today().isoformat()
@@ -155,9 +153,6 @@ class WebSearchService:
             return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Result formatter — SRP: yalnızca sunum mantığı
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class WebResultFormatter:
@@ -171,6 +166,7 @@ class WebResultFormatter:
         snippet_lines: list[str] = []
 
         def _flush() -> None:
+            """Kısa: `_flush` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             nonlocal current, snippet_lines
             if not current:
                 return
@@ -334,9 +330,6 @@ class WebResultFormatter:
         return WebResultFormatter.append_sources(" ".join(parts).strip(), web_text, question)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Util
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _is_time_sensitive(query: str) -> bool:

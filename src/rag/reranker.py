@@ -34,6 +34,7 @@ _rerank_cache: Optional[TTLCache] = None
 
 
 def _get_cache() -> Optional[TTLCache]:
+    """Kısa: `_get_cache` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     global _rerank_cache
     if _rerank_cache is None and _CACHE_OK:
         _rerank_cache = TTLCache(
@@ -44,12 +45,14 @@ def _get_cache() -> Optional[TTLCache]:
 
 
 def _cache_key(query: str, docs: List[Document], top_k: Optional[int]) -> str:
+    """Kısa: `_cache_key` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     parts = sorted(d.page_content[:200] for d in docs)
     raw = query + "||" + "||".join(parts) + f"||{top_k}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
 def resolve_model_name(name: Optional[str] = None) -> str:
+    """Kısa: `resolve_model_name` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if name:
         if name.lower() == "fast":
             return RERANKER_FAST
@@ -67,6 +70,7 @@ def resolve_model_name(name: Optional[str] = None) -> str:
 
 
 def create_reranker(model_name: Optional[str] = None, device: str = "cpu"):
+    """Kısa: `create_reranker` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if not _CE_OK:
         raise ImportError("sentence-transformers required for reranking.")
     resolved = resolve_model_name(model_name)
@@ -82,6 +86,7 @@ def rerank_documents(
     batch_size: int = 8,
     use_cache: bool = True,
 ) -> List[Document]:
+    """Kısa: `rerank_documents` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if not documents:
         return []
     if not _CE_OK:
@@ -122,6 +127,7 @@ def create_rerank_retriever(
     rerank_top_n: int = 20,
     batch_size: int = 8,
 ) -> List[Document]:
+    """Kısa: `create_rerank_retriever` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if hasattr(base_retriever, "invoke"):
         docs = base_retriever.invoke(query)
     elif callable(base_retriever):

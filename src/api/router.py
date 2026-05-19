@@ -34,6 +34,7 @@ _basic_security = HTTPBasic(auto_error=False)
 
 
 def _hash_pw(password: str, salt: str) -> str:
+    """Kısa: `_hash_pw` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 210_000)
     return dk.hex()
 
@@ -67,9 +68,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["LLM Config"])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Request / Response şemaları
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class LLMUrlUpdate(BaseModel):
@@ -118,9 +116,6 @@ class ProbeResponse(BaseModel):
     error: str | None = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Yardımcılar
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def _check_vllm(url: str, timeout: float = 5.0) -> dict:
@@ -156,9 +151,6 @@ async def _check_qdrant(url: str, timeout: float = 5.0) -> dict:
         return {"reachable": False, "error": str(exc), "latency_ms": elapsed_ms}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Endpoint'ler
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 @router.get(
@@ -169,6 +161,7 @@ async def _check_qdrant(url: str, timeout: float = 5.0) -> dict:
     dependencies=[Depends(rate_limit_chat)],
 )
 async def health_check() -> HealthResponse:
+    """Kısa: `health_check` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     from src.config import settings
 
     t0 = time.perf_counter()
@@ -210,6 +203,7 @@ async def health_check() -> HealthResponse:
     dependencies=[Depends(require_admin)],
 )
 async def get_config() -> LLMConfigResponse:
+    """Kısa: `get_config` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     from src.config import settings
 
     return LLMConfigResponse(
@@ -238,6 +232,7 @@ async def get_config() -> LLMConfigResponse:
 async def update_llm_config(
     payload: Annotated[LLMUrlUpdate, Body(embed=False)],
 ) -> LLMConfigResponse:
+    """Kısa: `update_llm_config` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     from src.config import settings
     from src.rag.llm import reset_llm_cache
 
@@ -286,9 +281,9 @@ async def update_llm_config(
     )
 
 
-# Backward-compat alias endpoint (older UI/docs).
 @router.put("/config/vllm", response_model=LLMConfigResponse, include_in_schema=False, dependencies=[Depends(require_admin)])
 async def update_vllm_config(payload: Annotated[LLMUrlUpdate, Body(embed=False)]) -> LLMConfigResponse:
+    """Kısa: `update_vllm_config` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return await update_llm_config(payload)
 
 
@@ -305,6 +300,7 @@ async def update_vllm_config(payload: Annotated[LLMUrlUpdate, Body(embed=False)]
 async def probe_vllm(
     url: str | None = None,
 ) -> ProbeResponse:
+    """Kısa: `probe_vllm` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     from src.config import settings
 
     target = (url or settings.llm_server_url).rstrip("/")

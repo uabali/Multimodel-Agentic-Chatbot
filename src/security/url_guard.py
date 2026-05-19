@@ -15,6 +15,7 @@ class URLFetchError(ValueError):
 
 
 def _is_public_ip(raw_ip: str) -> bool:
+    """Kısa: `_is_public_ip` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     try:
         ip = ipaddress.ip_address(raw_ip)
     except ValueError:
@@ -22,7 +23,16 @@ def _is_public_ip(raw_ip: str) -> bool:
     return ip.is_global
 
 
+def _parse_ip_literal(host: str) -> str | None:
+    """Kısa: `_parse_ip_literal` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    try:
+        return str(ipaddress.ip_address(host.strip("[]")))
+    except ValueError:
+        return None
+
+
 def _resolve_host(hostname: str) -> list[str]:
+    """Kısa: `_resolve_host` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     try:
         infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
@@ -45,12 +55,11 @@ def validate_public_http_url(url: str) -> str:
         raise URLFetchError("URLs with embedded credentials are not allowed.")
 
     host = parsed.hostname.strip()
-    try:
-        ip_literal = ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
+    ip_literal = _parse_ip_literal(host)
+    if ip_literal is None:
         ips = _resolve_host(host)
     else:
-        ips = [str(ip_literal)]
+        ips = [ip_literal]
 
     blocked = [ip for ip in ips if not _is_public_ip(ip)]
     if blocked:

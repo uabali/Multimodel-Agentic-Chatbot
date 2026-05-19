@@ -38,10 +38,10 @@ DENSE_VECTOR = "dense"
 SPARSE_VECTOR = "sparse"
 
 
-# ── Fingerprint-based smart reindex (from Frappe) ──
 
 
 def _fingerprint_docs(docs: list[Document]) -> str:
+    """Kısa: `_fingerprint_docs` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     h = hashlib.sha256()
     h.update(f"n={len(docs)}".encode())
     for doc in docs:
@@ -56,12 +56,14 @@ def _fingerprint_docs(docs: list[Document]) -> str:
 
 
 def _fingerprint_path(collection_name: str) -> Path:
+    """Kısa: `_fingerprint_path` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     base = Path(".rag_cache")
     base.mkdir(parents=True, exist_ok=True)
     return base / f"{collection_name}.fingerprint"
 
 
 def _load_fingerprint(collection_name: str) -> Optional[str]:
+    """Kısa: `_load_fingerprint` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     fp = _fingerprint_path(collection_name)
     if not fp.exists():
         return None
@@ -69,10 +71,12 @@ def _load_fingerprint(collection_name: str) -> Optional[str]:
 
 
 def _save_fingerprint(collection_name: str, fingerprint: str) -> None:
+    """Kısa: `_save_fingerprint` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     _fingerprint_path(collection_name).write_text(fingerprint, encoding="utf-8")
 
 
 def _unlink_fingerprint(collection_name: str) -> None:
+    """Kısa: `_unlink_fingerprint` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     try:
         fp = _fingerprint_path(collection_name)
         if fp.exists():
@@ -102,6 +106,7 @@ def _read_dense_vector_size(
 def _collection_has_sparse_vector(
     client: QdrantClient, collection_name: str, sparse_vector_name: str
 ) -> bool:
+    """Kısa: `_collection_has_sparse_vector` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     info = client.get_collection(collection_name=collection_name)
     sparse = info.config.params.sparse_vectors
     if sparse is None:
@@ -109,10 +114,10 @@ def _collection_has_sparse_vector(
     return sparse_vector_name in sparse
 
 
-# ── Qdrant startup wait (from Frappe) ──
 
 
 def _wait_for_qdrant(client: QdrantClient, timeout_s: float = 20.0, retry_s: float = 1.0) -> None:
+    """Kısa: `_wait_for_qdrant` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     deadline = time.monotonic() + max(0.0, timeout_s)
     last_exc: Exception | None = None
     while True:
@@ -134,6 +139,7 @@ _qdrant_lock = threading.Lock()
 
 
 def get_qdrant_client() -> QdrantClient:
+    """Kısa: `get_qdrant_client` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     global _qdrant_client
     if _qdrant_client is not None:
         return _qdrant_client
@@ -146,7 +152,6 @@ def get_qdrant_client() -> QdrantClient:
     return _qdrant_client
 
 
-# ── Hybrid vector store manager ──
 
 
 class HybridVectorStore:
@@ -156,12 +161,14 @@ class HybridVectorStore:
     """
 
     def __init__(self, client: Optional[QdrantClient] = None) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self.client = client or get_qdrant_client()
         self.embeddings = get_embeddings()
         self._sparse = self._init_sparse()
         self._store: Optional[QdrantVectorStore] = None
 
     def _init_sparse(self):
+        """Kısa: `_init_sparse` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         try:
             from langchain_qdrant import FastEmbedSparse
             return FastEmbedSparse(model_name="Qdrant/bm25", batch_size=64)
@@ -194,6 +201,7 @@ class HybridVectorStore:
         return ""
 
     def _rebuild_collection(self, reason: str) -> None:
+        """Kısa: `_rebuild_collection` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         logger.warning(
             "Deleting Qdrant collection %r and fingerprint cache: %s",
             settings.qdrant_collection,
@@ -208,6 +216,7 @@ class HybridVectorStore:
 
     @property
     def store(self) -> QdrantVectorStore:
+        """Kısa: `store` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if self._store is None:
             expected_dim = get_embedding_dim()
             use_hybrid = self._sparse is not None
@@ -235,6 +244,7 @@ class HybridVectorStore:
         return self._store
 
     def _ensure_collection(self) -> None:
+        """Kısa: `_ensure_collection` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if self.client.collection_exists(settings.qdrant_collection):
             return
 
@@ -258,6 +268,7 @@ class HybridVectorStore:
     # ── Ingest ──
 
     def add_documents(self, documents: list[Document], batch_size: int = 100) -> list[str]:
+        """Kısa: `add_documents` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         all_ids: list[str] = []
         for i in range(0, len(documents), batch_size):
             batch = documents[i: i + batch_size]
@@ -301,6 +312,7 @@ class HybridVectorStore:
         mode: Optional[RetrievalMode] = None,
         score_threshold: Optional[float] = None,
     ) -> list[Document]:
+        """Kısa: `similarity_search` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if k is None:
             k = settings.top_k
         effective_mode = mode if mode is not None else (
@@ -319,9 +331,11 @@ class HybridVectorStore:
         return tmp_store.similarity_search(query, k=k, score_threshold=score_threshold)
 
     def similarity_search_hybrid(self, query: str, k: Optional[int] = None) -> list[Document]:
+        """Kısa: `similarity_search_hybrid` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return self.similarity_search(query, k, RetrievalMode.HYBRID)
 
     def similarity_search_dense(self, query: str, k: Optional[int] = None) -> list[Document]:
+        """Kısa: `similarity_search_dense` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return self.similarity_search(query, k, RetrievalMode.DENSE)
 
     def max_dense_similarity(self, query: str, k: Optional[int] = None, qdrant_filter=None) -> float:
@@ -383,6 +397,7 @@ class HybridVectorStore:
             return 0
 
     def get_point_count(self) -> int:
+        """Kısa: `get_point_count` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         try:
             info = self.client.get_collection(settings.qdrant_collection)
             return getattr(info, "points_count", 0) or 0
@@ -390,6 +405,7 @@ class HybridVectorStore:
             return 0
 
     def optimize_storage(self) -> None:
+        """Kısa: `optimize_storage` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         try:
             self.client.update_collection(
                 collection_name=settings.qdrant_collection,
@@ -410,6 +426,7 @@ _hybrid_store_lock = threading.Lock()
 
 
 def get_hybrid_store() -> HybridVectorStore:
+    """Kısa: `get_hybrid_store` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     global _hybrid_store
     if _hybrid_store is not None:
         return _hybrid_store

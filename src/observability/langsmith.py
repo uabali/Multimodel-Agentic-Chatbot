@@ -66,10 +66,12 @@ def stable_hash(value: Any, length: int = 12) -> str:
 
 
 def is_langsmith_enabled() -> bool:
+    """Kısa: `is_langsmith_enabled` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return bool(settings.app_langsmith_enabled and settings.langsmith_api_key.strip())
 
 
 def _redact_text(text: str) -> str:
+    """Kısa: `_redact_text` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if text.startswith("data:image/") or "base64," in text[:120]:
         return _redacted_summary(text, "binary")
     text = _EMAIL_RE.sub("[redacted-email]", text)
@@ -82,6 +84,7 @@ def _redact_text(text: str) -> str:
 
 
 def _redacted_summary(value: str, label: str) -> str:
+    """Kısa: `_redacted_summary` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return f"[redacted-{label} chars={len(value)} sha256={stable_hash(value)}]"
 
 
@@ -104,6 +107,7 @@ def sanitize_payload(value: Any, key: str | None = None) -> Any:
 
 
 def anonymize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Kısa: `anonymize_payload` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     sanitized = sanitize_payload(payload)
     return sanitized if isinstance(sanitized, dict) else {"payload": sanitized}
 
@@ -124,10 +128,12 @@ def safe_preview(text: Any, max_chars: int | None = None) -> str:
 
 
 def _doc_source(meta: dict[str, Any]) -> str:
+    """Kısa: `_doc_source` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return str(meta.get("display_name") or meta.get("source_file") or meta.get("source") or "")
 
 
 def _doc_chunk_id(doc: Any, meta: dict[str, Any]) -> str:
+    """Kısa: `_doc_chunk_id` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     source = _doc_source(meta)
     chunk_index = meta.get("chunk_index")
     if source and chunk_index is not None:
@@ -180,6 +186,7 @@ def summarize_retrieval_trace(
     top = entries[:limit] if limit else []
 
     def _score(value: Any) -> float | None:
+        """Kısa: `_score` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return round(float(value), 6) if isinstance(value, (int, float)) else None
 
     top_chunks: list[str] = []
@@ -210,6 +217,7 @@ def summarize_retrieval_trace(
 
 
 def summarize_source_distribution(docs: list[Any] | tuple[Any, ...] | None) -> str:
+    """Kısa: `summarize_source_distribution` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     counts: Counter[str] = Counter()
     for doc in docs or []:
         meta = getattr(doc, "metadata", {}) or {}
@@ -249,6 +257,7 @@ def get_langsmith_tracer() -> LangChainTracer | None:
 
 
 def _trace_context_value(trace_context: dict[str, Any] | None, key: str, default: Any = None) -> Any:
+    """Kısa: `_trace_context_value` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if not trace_context:
         return default
     value = trace_context.get(key, default)
@@ -408,6 +417,7 @@ def record_semantic_cache_hit(
     cache_ctx: str,
     trace_context: dict[str, Any] | None = None,
 ) -> str | None:
+    """Kısa: `record_semantic_cache_hit` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     metadata = build_common_metadata(
         question=question,
         trace_context={**(trace_context or {}), "cache": "hit"},
@@ -431,6 +441,7 @@ def record_semantic_cache_miss(
     cache_ctx: str,
     trace_context: dict[str, Any] | None = None,
 ) -> str | None:
+    """Kısa: `record_semantic_cache_miss` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     metadata = build_common_metadata(
         question=question,
         trace_context={**(trace_context or {}), "cache": "miss"},
@@ -455,6 +466,7 @@ def record_ingest_observation(
     elapsed_s: float,
     error: str | None = None,
 ) -> str | None:
+    """Kısa: `record_ingest_observation` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     suffix = file_path.suffix.lower()
     try:
         size_mb = round(file_path.stat().st_size / (1024 * 1024), 3)

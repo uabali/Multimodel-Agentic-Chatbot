@@ -17,9 +17,6 @@ from __future__ import annotations
 from typing import Sequence
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Router
-# ─────────────────────────────────────────────────────────────────────────────
 
 ROUTER_SYSTEM_PROMPT = """\
 You are a routing assistant for a bilingual (Turkish/English) RAG system.
@@ -55,9 +52,6 @@ Respond ONLY with valid JSON — no markdown fences, no extra text:
 """
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Query Rewriter
-# ─────────────────────────────────────────────────────────────────────────────
 
 REWRITER_SYSTEM_PROMPT = """\
 Rewrite the user's question to improve vector database recall.
@@ -72,9 +66,6 @@ Rules:
 """
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Relevance Grader
-# ─────────────────────────────────────────────────────────────────────────────
 
 GRADER_SYSTEM_PROMPT = """\
 You are a sufficiency grader for a bilingual (Turkish/English) RAG system.
@@ -109,9 +100,6 @@ Respond ONLY with valid JSON — no markdown fences, no extra text:
 """
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RAG Generator — with retrieved context
-# ─────────────────────────────────────────────────────────────────────────────
 
 RAG_WITH_CONTEXT_SYSTEM_PROMPT = """\
 Adın Frappe, bir yapay zeka asistanısın. Yüklenen belgelerden bağlam sağlandı.
@@ -149,9 +137,6 @@ Bağlam:
 """
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RAG Generator — no documents uploaded yet
-# ─────────────────────────────────────────────────────────────────────────────
 
 RAG_NO_CONTEXT_SYSTEM_PROMPT = """\
 Adın Frappe, bir yapay zeka asistanısın. Henüz belge yüklenmemiş.
@@ -165,9 +150,6 @@ DAVRANIŞ KURALLARI:
 """
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Direct / ReAct Agent — tool-enabled bilingual assistant
-# ─────────────────────────────────────────────────────────────────────────────
 
 _DIRECT_AGENT_BASE = """\
 You are a helpful bilingual assistant (Turkish/English) with access to documents and tools.
@@ -233,9 +215,6 @@ def build_generator_prompt(tools: Sequence | None = None) -> str:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Vision — görsel analiz (genel + uzmanlaşmış promptlar)
-# ─────────────────────────────────────────────────────────────────────────────
 
 VISION_SYSTEM_PROMPT = """\
 Sen görsel analiz asistanısın. Kullanıcının yüklediği görseli analiz et.

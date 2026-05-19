@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
 import re
 
 from langchain_core.documents import Document
@@ -24,7 +23,6 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Güven hesabında göz ardı edilen yaygın kelimeler
 _STOPWORDS: frozenset[str] = frozenset({
     "ve", "ile", "icin", "için", "bu", "şu", "su", "bir", "o", "da", "de", "mi", "mu",
     "ne", "nedir", "nerede", "nereden", "nereye", "hangi", "kaç", "kac", "kim",
@@ -45,9 +43,6 @@ def normalize_query_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").translate(_TR_TRANSLATION).lower()).strip()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Dynamic K — sorunun karmaşıklığına göre kaç belge çekileceğini ayarlar
-# ─────────────────────────────────────────────────────────────────────────────
 
 _COMPLEXITY_KEYWORDS: list[str] = [
     "ve", "neden", "nasil", "hangi", "ne zaman", "kim", "karsilastir",
@@ -69,11 +64,7 @@ def calculate_dynamic_k(question: str, base_k: int = 8, max_k: int = 15) -> int:
     return base_k
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Auto Strategy — sorunun türüne göre retrieval stratejisi seçer (OCP)
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Yeni strateji eklemek → bu dict'e satır eklemek yeterli; başka yer değişmez.
 _STRATEGY_MAP: list[tuple[list[str], str]] = [
     (["nereden", "nereye", "kalkis", "varis", "pnr", "bilet", "ticket"], "hybrid"),
     (["kac", "sure", "ne zaman", "dakika", "tarih", "saat"], "hybrid"),
@@ -92,15 +83,13 @@ def auto_select_strategy(question: str) -> str:
 
 
 def _tokenize_for_overlap(text: str) -> list[str]:
+    """Kısa: `_tokenize_for_overlap` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return [
         t for t in re.findall(r"[\w]+", normalize_query_text(text), re.UNICODE)
         if len(t) >= 3 and t not in _STOPWORDS
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Confidence estimation
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def estimate_confidence(query: str, docs: list[Document]) -> float:
@@ -108,24 +97,23 @@ def estimate_confidence(query: str, docs: list[Document]) -> float:
     if not docs:
         return 0.0
 
-    # Rerank skoru varsa kullan — sigmoid ile normalize et (logit → [0,1])
-    raw_scores = [
-        doc.metadata.get("rerank_score")
-        for doc in docs[:3]
-        if doc.metadata.get("rerank_score") is not None
-    ]
+    # Cross-encoder skorları modele göre logit benzeri ham değerlerdir; mutlak
+    # güven skoru gibi sigmoidlemek 0.001 gibi zayıf skorları bile "orta güven"
+    # seviyesine taşır. Bu yüzden yalnızca açıkça güçlü pozitif skorları hızlı
+    # kabul sinyali olarak kullan, diğer durumlarda term-overlap fallback'e düş.
+    raw_scores = []
+    for doc in docs[:3]:
+        val = doc.metadata.get("rerank_score")
+        if val is None:
+            continue
+        try:
+            raw_scores.append(float(val))
+        except (TypeError, ValueError):
+            continue
     if raw_scores:
-        def _sigmoid(x: float) -> float:
-            x = max(-500.0, min(500.0, x))
-            return 1.0 / (1.0 + math.exp(-x))
-
-        top_scores = [_sigmoid(s) for s in raw_scores]
-        best = max(top_scores)
-        thresh = settings.local_search_conf_threshold
-        # best >= thresh → confidence [0.5, 1.0]; best < thresh → confidence [0.0, 0.5)
-        if best >= thresh:
-            return min(1.0, 0.5 + 0.5 * (best - thresh) / max(1.0 - thresh, 1e-6))
-        return max(0.0, 0.5 * best / max(thresh, 1e-6))
+        best = max(raw_scores)
+        if best >= 1.0:
+            return min(1.0, 0.75 + 0.25 * min(best, 5.0) / 5.0)
 
     # Fallback: term overlap — re.UNICODE Türkçe/Arapça/vb. karakterleri kapsar
     terms = _tokenize_for_overlap(query)
@@ -164,9 +152,6 @@ def deduplicate_documents(documents: list[Document], max_docs: int | None = None
     return unique
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# run_retriever — modern LangChain API
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def run_retriever(retriever, query: str) -> list[Document]:
@@ -193,9 +178,6 @@ def chunk_id(doc: Document) -> str:
     return f"{src}#{idx}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# create_retriever — ana fabrika fonksiyonu
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def create_retriever(
@@ -257,6 +239,7 @@ def create_retriever(
         from src.rag.reranker import create_rerank_retriever
 
         def _rerank_wrapper(q: str) -> list[Document]:
+            """Kısa: `_rerank_wrapper` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             return create_rerank_retriever(base, q, reranker, top_k=k, rerank_top_n=rerank_top_n)
 
         return _rerank_wrapper

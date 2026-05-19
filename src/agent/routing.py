@@ -16,10 +16,7 @@ from __future__ import annotations
 
 import re
 
-# ── Keyword pattern'leri ────────────────────────────────────────────────────
 
-# Belge zamiri kalıpları — "bu/şu cv/dosya/belge …" içeren her sorgu RAG'a gider.
-# _GENERAL_KNOWLEDGE_PATTERNS'dan ÖNCE kontrol edilir; "nedir" override'ını engeller.
 _DOCUMENT_PRONOUN_PATTERNS: list[str] = [
     # "bu/şu" + belge türü → kesinlikle yüklü dosyayla ilgili
     r"\b(bu|şu)\s+(cv|dosya|belge|pdf|rapor|doküman|döküman)\b",
@@ -32,8 +29,6 @@ _DOCUMENT_PRONOUN_PATTERNS: list[str] = [
     r"\b(e[- ]?mail|e-posta|eposta|telefon|adres|isim|ad[ıi])\s+(nedir|ne|kaç|var\s+m[ıi])\b",
 ]
 
-# RAG: kullanıcı açıkça belge İÇERİĞİNE atıfta bulunuyorsa LLM atlanır.
-# NOT: "dosya" gibi genel kelimeler burada YOK — sadece belge içeriği sorgulama kalıpları.
 _RAG_PATTERNS: list[str] = [
     r"(belgede|belgeden|belgedeki|dokümanda|dosyada|dosyadaki|dosyanın\s+içeriğinde|sözleşmede|raporda|metinde)\s",
     r"(belgeye göre|dokümana göre|dosyaya göre|rapora göre)",
@@ -46,11 +41,6 @@ _RAG_PATTERNS: list[str] = [
     r"(dosya|belge)nin?\s+(içeriği|içindeki|hakkında|konusu)",
 ]
 
-# Belge-bağımsız genel sorular — RAG pattern'lardan önce kontrol edilir (override)
-# Bu liste, belgede ilgili içerik olsa bile "direct" rotasına yönlendirir.
-# NOT: "X nedir?" kalıbı ^ ile anchor'lanmıştır. Aksi halde uzun çok-parçalı
-# sorularda ("... bağlantısı nedir?") false positive verir ve yüklü belgeyle
-# ilgili sorular web search'e yönlendirilir.
 _GENERAL_KNOWLEDGE_PATTERNS: list[str] = [
     # Genel tanım/açıklama soruları — "X nedir?", "what is X?"
     # ^ anchor: tüm soru kısa bir "X nedir?" formu olmalı; substring match yok.
@@ -167,7 +157,6 @@ _WEATHER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Pre-compiled lists — compiled once at module load, not per-request
 _DOCUMENT_PRONOUN_RE = [re.compile(p, re.IGNORECASE | re.UNICODE) for p in _DOCUMENT_PRONOUN_PATTERNS]
 _GENERAL_KNOWLEDGE_RE = [re.compile(p, re.IGNORECASE) for p in _GENERAL_KNOWLEDGE_PATTERNS]
 _RAG_RE = [re.compile(p, re.IGNORECASE) for p in _RAG_PATTERNS]
@@ -178,7 +167,16 @@ _MCP_RE = [re.compile(p, re.IGNORECASE) for p in _MCP_PATTERNS]
 _TURKISH_RE = [re.compile(p, re.IGNORECASE) for p in _TURKISH_PATTERNS]
 
 
-# ── Public helpers ──────────────────────────────────────────────────────────
+
+
+def _clean(question: str) -> str:
+    """Kısa: `_clean` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    return (question or "").strip()
+
+
+def _matches_any(patterns: list[re.Pattern[str]], text: str) -> bool:
+    """Kısa: `_matches_any` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    return any(rx.search(text) for rx in patterns)
 
 
 def keyword_route(question: str, *, has_uploads: bool = False) -> str | None:
@@ -198,26 +196,21 @@ def keyword_route(question: str, *, has_uploads: bool = False) -> str | None:
     Returns:
         "rag", "direct", ya da eşleşme yoksa None (LLM fallback tetiklenir).
     """
-    q = question.strip()
+    q = _clean(question)
     if len(q) > 2000:
         return None
-    for rx in _DOCUMENT_PRONOUN_RE:
-        if rx.search(q):
-            return "rag"
+    if _matches_any(_DOCUMENT_PRONOUN_RE, q):
+        return "rag"
     if is_direct_support_query(q):
         return "direct"
     if _has_web_intent(q):
         return "web"
-    if not has_uploads:
-        for rx in _GENERAL_KNOWLEDGE_RE:
-            if rx.search(q):
-                return "direct"
-    for rx in _RAG_RE:
-        if rx.search(q):
-            return "rag"
-    for rx in _DIRECT_RE:
-        if rx.search(q):
-            return "direct"
+    if not has_uploads and _matches_any(_GENERAL_KNOWLEDGE_RE, q):
+        return "direct"
+    if _matches_any(_RAG_RE, q):
+        return "rag"
+    if _matches_any(_DIRECT_RE, q):
+        return "direct"
     return None
 
 
@@ -228,32 +221,32 @@ def is_web_query(question: str) -> bool:
 
 def is_direct_support_query(question: str) -> bool:
     """Continuation, truncation complaints and assistant-meta questions stay direct."""
-    q = question.strip()
-    return any(rx.search(q) for rx in _DIRECT_SUPPORT_RE)
+    return _matches_any(_DIRECT_SUPPORT_RE, _clean(question))
 
 
 def _first_sentence(text: str) -> str:
+    """Kısa: `_first_sentence` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     first = re.split(r"[\n.!?。！？]", text.strip(), maxsplit=1)[0]
     return first.strip() or text.strip()
 
 
 def _has_web_intent(question: str) -> bool:
-    q = question.strip()
+    """Kısa: `_has_web_intent` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    q = _clean(question)
     if not q or is_direct_support_query(q):
         return False
     target = _first_sentence(q) if len(q) > 240 else q
-    return any(rx.search(target) for rx in _WEB_RE)
+    return _matches_any(_WEB_RE, target)
 
 
 def needs_mcp_tools(question: str) -> bool:
     """Sorunun MCP araçlarına ihtiyaç duyup duymadığını döner."""
-    q = question.strip()
-    return any(rx.search(q) for rx in _MCP_RE)
+    return _matches_any(_MCP_RE, _clean(question))
 
 
 def is_turkish_query(question: str) -> bool:
     """Sorgunun Türkçe olup olmadığını döner."""
-    return any(rx.search(question) for rx in _TURKISH_RE)
+    return _matches_any(_TURKISH_RE, question or "")
 
 
 def is_weather_query(question: str) -> bool:

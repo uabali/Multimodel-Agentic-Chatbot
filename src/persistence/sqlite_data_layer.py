@@ -20,10 +20,12 @@ from chainlit.user import PersistedUser, User
 
 
 def _now_iso() -> str:
+    """Kısa: `_now_iso` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _json_loads(value: Any, default: Any = None) -> Any:
+    """Kısa: `_json_loads` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if value is None:
         return default
     if isinstance(value, (dict, list)):
@@ -39,6 +41,7 @@ def _json_loads(value: Any, default: Any = None) -> Any:
 
 
 def _as_text(value: Any) -> str:
+    """Kısa: `_as_text` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     loaded = _json_loads(value, "")
     if loaded is None:
         return ""
@@ -52,10 +55,12 @@ def _as_text(value: Any) -> str:
 
 class SQLiteDataLayer(BaseDataLayer):
     def __init__(self, db_path: str | Path):
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self.db_path = str(db_path)
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
+        """Kısa: `_connect` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
@@ -64,6 +69,7 @@ class SQLiteDataLayer(BaseDataLayer):
         return conn
 
     def _init_db(self) -> None:
+        """Kısa: `_init_db` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             cur = conn.cursor()
@@ -117,15 +123,19 @@ class SQLiteDataLayer(BaseDataLayer):
             conn.commit()
 
     async def build_debug_url(self) -> str:
+        """Kısa: `build_debug_url` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return ""
 
     async def close(self) -> None:
+        """Kısa: `close` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return None
 
     async def _run(self, fn, *args, **kwargs):
+        """Kısa: `_run` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return await asyncio.to_thread(fn, *args, **kwargs)
 
     def _ensure_thread(self, thread_id: str, user_id: Optional[str], user_identifier: Optional[str]):
+        """Kısa: `_ensure_thread` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -141,6 +151,7 @@ class SQLiteDataLayer(BaseDataLayer):
             conn.commit()
 
     def _get_user_identifier_by_id(self, user_id: str) -> Optional[str]:
+        """Kısa: `_get_user_identifier_by_id` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute("SELECT identifier FROM users WHERE id=?", (user_id,))
@@ -148,7 +159,9 @@ class SQLiteDataLayer(BaseDataLayer):
             return row["identifier"] if row else None
 
     async def get_user(self, identifier: str) -> Optional[PersistedUser]:
+        """Kısa: `get_user` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _get():
+            """Kısa: `_get` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT * FROM users WHERE identifier=?", (identifier,))
@@ -160,7 +173,9 @@ class SQLiteDataLayer(BaseDataLayer):
         return await self._run(_get)
 
     async def create_user(self, user: User) -> Optional[PersistedUser]:
+        """Kısa: `create_user` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         async def _create():
+            """Kısa: `_create` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             existing = await self.get_user(user.identifier)
             with self._connect() as conn:
                 cur = conn.cursor()
@@ -175,8 +190,10 @@ class SQLiteDataLayer(BaseDataLayer):
         return await _create()
 
     async def upsert_feedback(self, feedback) -> str:
+        """Kısa: `upsert_feedback` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         fid = getattr(feedback, "id", None) or str(uuid.uuid4())
         def _up():
+            """Kısa: `_up` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             from dataclasses import asdict
             with self._connect() as conn:
                 conn.cursor().execute("INSERT OR REPLACE INTO feedback (id,data,createdAt) VALUES (?,?,?)",
@@ -186,7 +203,9 @@ class SQLiteDataLayer(BaseDataLayer):
         return fid
 
     async def delete_feedback(self, feedback_id: str) -> bool:
+        """Kısa: `delete_feedback` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _d():
+            """Kısa: `_d` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 cur = conn.cursor()
                 cur.execute("DELETE FROM feedback WHERE id=?", (feedback_id,))
@@ -195,12 +214,14 @@ class SQLiteDataLayer(BaseDataLayer):
         return await self._run(_d)
 
     async def create_element(self, element) -> None:
+        """Kısa: `create_element` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         ed: ElementDict = element.to_dict()
         eid = ed.get("id") or str(uuid.uuid4())
         tid = ed.get("threadId")
         if not tid:
             return
         def _c():
+            """Kısa: `_c` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 conn.cursor().execute("INSERT OR REPLACE INTO elements (id,threadId,data,createdAt) VALUES (?,?,?,?)",
                                       (eid, tid, json.dumps(ed), _now_iso()))
@@ -208,7 +229,9 @@ class SQLiteDataLayer(BaseDataLayer):
         await self._run(_c)
 
     async def get_element(self, thread_id: str, element_id: str) -> Optional[ElementDict]:
+        """Kısa: `get_element` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _g():
+            """Kısa: `_g` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT data FROM elements WHERE id=? AND threadId=?", (element_id, thread_id))
@@ -217,7 +240,9 @@ class SQLiteDataLayer(BaseDataLayer):
         return await self._run(_g)
 
     async def delete_element(self, element_id: str, thread_id: Optional[str] = None):
+        """Kısa: `delete_element` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _d():
+            """Kısa: `_d` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 cur = conn.cursor()
                 if thread_id:
@@ -228,7 +253,9 @@ class SQLiteDataLayer(BaseDataLayer):
         await self._run(_d)
 
     async def create_step(self, step_dict: StepDict):
+        """Kısa: `create_step` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _c():
+            """Kısa: `_c` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             tid = step_dict.get("threadId")
             if not tid:
                 return
@@ -255,20 +282,26 @@ class SQLiteDataLayer(BaseDataLayer):
         await self._run(_c)
 
     async def update_step(self, step_dict: StepDict):
+        """Kısa: `update_step` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         await self.create_step(step_dict)
 
     async def delete_step(self, step_id: str):
+        """Kısa: `delete_step` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _d():
+            """Kısa: `_d` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 conn.cursor().execute("DELETE FROM steps WHERE id=?", (step_id,))
                 conn.commit()
         await self._run(_d)
 
     async def get_favorite_steps(self, user_id: str) -> List[StepDict]:
+        """Kısa: `get_favorite_steps` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return []
 
     async def get_thread_author(self, thread_id: str) -> str:
+        """Kısa: `get_thread_author` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _g():
+            """Kısa: `_g` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT userIdentifier,userId FROM threads WHERE id=?", (thread_id,))
@@ -283,7 +316,9 @@ class SQLiteDataLayer(BaseDataLayer):
         return await self._run(_g)
 
     async def delete_thread(self, thread_id: str):
+        """Kısa: `delete_thread` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _d():
+            """Kısa: `_d` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 cur = conn.cursor()
                 cur.execute("DELETE FROM steps WHERE threadId=?", (thread_id,))
@@ -293,7 +328,9 @@ class SQLiteDataLayer(BaseDataLayer):
         await self._run(_d)
 
     async def list_threads(self, pagination: Pagination, filters: ThreadFilter) -> PaginatedResponse[ThreadDict]:
+        """Kısa: `list_threads` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _list():
+            """Kısa: `_list` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             user_id = filters.get("userId") if isinstance(filters, dict) else getattr(filters, "userId", None)
             search = filters.get("search") if isinstance(filters, dict) else getattr(filters, "search", None)
             limit = int(getattr(pagination, "first", None) or 20)
@@ -332,7 +369,9 @@ class SQLiteDataLayer(BaseDataLayer):
         return await self._run(_list)
 
     async def get_thread(self, thread_id: str) -> Optional[ThreadDict]:
+        """Kısa: `get_thread` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _g():
+            """Kısa: `_g` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT * FROM threads WHERE id=?", (thread_id,))
@@ -389,6 +428,7 @@ class SQLiteDataLayer(BaseDataLayer):
     async def patch_thread_metadata(self, thread_id: str, patch: Dict) -> None:
         """Mevcut thread metadata'sını değiştirmeden patch uygular (JSON merge)."""
         def _p():
+            """Kısa: `_p` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             with self._connect() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT metadata FROM threads WHERE id=?", (thread_id,))
@@ -405,7 +445,9 @@ class SQLiteDataLayer(BaseDataLayer):
     async def update_thread(self, thread_id: str, name: Optional[str] = None,
                             user_id: Optional[str] = None, metadata: Optional[Dict] = None,
                             tags: Optional[List[str]] = None):
+        """Kısa: `update_thread` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         def _u():
+            """Kısa: `_u` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             user_identifier = self._get_user_identifier_by_id(user_id) if user_id else None
             self._ensure_thread(thread_id, user_id, user_identifier)
             fields, params = [], []

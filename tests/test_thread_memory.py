@@ -117,6 +117,16 @@ def test_semantic_cache_context_changes_when_memory_changes():
     assert ctx_a != ctx_b
 
 
+def test_semantic_cache_rejects_short_or_fallback_answers():
+    from src.agent.graph import _looks_cacheable_generation
+
+    assert not _looks_cacheable_generation("Bu belge, bir yapay zeka sisteminin")
+    assert not _looks_cacheable_generation("Bu bilgi yüklenen belgelerde yer almamaktadır.")
+    assert _looks_cacheable_generation(
+        "Bu belge FRAPPE sisteminin RAG mimarisini, retrieval stratejisini ve değerlendirme sonuçlarını özetler. [Kaynak 1]\n\nKaynaklar:\n- [1] rapor.pdf"
+    )
+
+
 def test_thread_memory_last_topic_round_trip():
     memory = ThreadMemory.empty().with_summary("Özet").with_last_topic("Token-aware RAG bağlam bütçesi")
     restored = ThreadMemory.from_metadata({"memory": memory.to_metadata()})
@@ -152,3 +162,43 @@ async def test_memory_write_commands_skip_semantic_cache(monkeypatch):
     ]
 
     assert events == [("updates", {"direct_response": {"generation": "ok"}})]
+
+
+@pytest.mark.anyio
+async def test_low_quality_semantic_cache_hit_is_ignored(monkeypatch):
+    from src.agent import graph
+    from src.rag.semantic_cache import SemanticCache
+
+    stored = {"count": 0}
+
+    class LowQualityCache:
+        async def lookup(self, question, cache_ctx=""):
+            return "Bu belge, bir yapay zeka sisteminin"
+
+        async def store(self, question, response, cache_ctx=""):
+            stored["count"] += 1
+
+    class FakeGraph:
+        async def astream(self, state, **kwargs):
+            yield ("updates", {"generator": {"generation": "Bu cevap yeterince uzun ve tamamlanmış bir cevaptır. Kaynak bağlamı kullanır ve düzgün biter."}})
+
+    async def fake_get_graph_async():
+        return FakeGraph()
+
+    monkeypatch.setattr(SemanticCache, "get", classmethod(lambda cls: LowQualityCache()))
+    monkeypatch.setattr(graph, "get_graph_async", fake_get_graph_async)
+    monkeypatch.setattr(graph, "_graph_config", lambda **kwargs: None)
+    monkeypatch.setattr(graph, "record_semantic_cache_miss", lambda **kwargs: None)
+
+    events = [
+        event
+        async for event in graph.astream_agent(
+            "Belgedeki önemli bulguları özetle",
+            source_filter="doc.pdf",
+            session_uploads=["doc.pdf"],
+            memory_hash="abc",
+        )
+    ]
+
+    assert events == [("updates", {"generator": {"generation": "Bu cevap yeterince uzun ve tamamlanmış bir cevaptır. Kaynak bağlamı kullanır ve düzgün biter."}})]
+    assert stored["count"] == 1

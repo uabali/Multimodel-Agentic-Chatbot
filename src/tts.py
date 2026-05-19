@@ -22,7 +22,6 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# Recognised Turkish characters — used for auto language detection
 _TR_RE = re.compile(r"[çğıöşüÇĞİÖŞÜ]|(?:^|\s)(ve|ile|bir|bu|ne|da|de|mi|mu)\s", re.IGNORECASE)
 
 DEFAULT_VOICE_TR = "tr-TR-AhmetNeural"

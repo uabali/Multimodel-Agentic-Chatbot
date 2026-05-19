@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 
 from langgraph.graph import END, StateGraph
@@ -80,9 +81,25 @@ def build_semantic_cache_context(
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Koşullu kenar fonksiyonları — SRP: yalnızca geçiş kararı
-# ─────────────────────────────────────────────────────────────────────────────
+_CACHE_BAD_PREFIXES = (
+    "model bu turda boş yanıt döndürdü",
+    "bu soruyu yanıtlayabilecek yeterli bağlam",
+    "bu bilgi yüklenen belgelerde yer almamaktadır",
+    "belgeden (",
+)
+
+
+def _looks_cacheable_generation(answer: str) -> bool:
+    """Avoid persisting short, fallback, or likely truncated RAG answers."""
+    text = (answer or "").strip()
+    if len(text) < 80:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(_CACHE_BAD_PREFIXES):
+        return False
+    return bool(re.search(r"([.!?…\]]|```)\s*(?:\n\n(?:kaynaklar|sources):.*)?$", text, re.IGNORECASE | re.DOTALL))
+
+
 
 
 def _route_decision(state: AgentState) -> str:
@@ -136,9 +153,6 @@ def _grader_decision(state: AgentState) -> str:
     return "insufficient"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Graph yapısı
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def build_graph(checkpointer=None):
@@ -203,9 +217,6 @@ def build_graph(checkpointer=None):
     return app
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Singleton erişim — lazy init, thread-safe değil (tek süreç varsayımı)
-# ─────────────────────────────────────────────────────────────────────────────
 
 _graph = None
 _async_graph = None
@@ -255,9 +266,6 @@ async def get_graph_async():
     return _async_graph
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Initial state fabrikası
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _init_state(
@@ -272,6 +280,7 @@ def _init_state(
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
 ) -> AgentState:
+    """Kısa: `_init_state` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     from src.config import settings as _s
     return {
         "messages": chat_history or [],
@@ -312,6 +321,7 @@ def _init_state(
 
 
 def _turn_run_name(default: str, trace_context: dict | None = None) -> str:
+    """Kısa: `_turn_run_name` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if default == "frappe.sync_run":
         return default
     channel = str((trace_context or {}).get("channel") or "")
@@ -321,6 +331,7 @@ def _turn_run_name(default: str, trace_context: dict | None = None) -> str:
 
 
 def _history_turn_count(chat_history: list | None) -> int:
+    """Kısa: `_history_turn_count` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     count = 0
     for item in chat_history or []:
         role = getattr(item, "type", None) or getattr(item, "role", None)
@@ -332,6 +343,7 @@ def _history_turn_count(chat_history: list | None) -> int:
 
 
 def _trace_with_history(trace_context: dict | None, chat_history: list | None) -> dict | None:
+    """Kısa: `_trace_with_history` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if trace_context is None:
         return None
     return {**trace_context, "history_turn_count": _history_turn_count(chat_history)}
@@ -351,6 +363,7 @@ def _graph_config(
     use_rerank: bool | None,
     trace_context: dict | None,
 ) -> dict | None:
+    """Kısa: `_graph_config` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     config = build_graph_config(
         run_name=run_name,
         question=question,
@@ -373,9 +386,6 @@ def _graph_config(
     return {**config, "configurable": {**config.get("configurable", {}), "thread_id": thread_id}}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Public API
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def run_agent(
@@ -479,6 +489,7 @@ async def astream_agent(
     # Semantic cache bağlam anahtarı — aynı soru farklı belge setlerinde
     # yanlış cache dönmesini engeller.
     def _build_cache_ctx() -> str:
+        """Kısa: `_build_cache_ctx` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return build_semantic_cache_context(
             source_filter=source_filter,
             session_uploads=session_uploads,
@@ -487,6 +498,7 @@ async def astream_agent(
         )
 
     def _should_use_semantic_cache() -> bool:
+        """Kısa: `_should_use_semantic_cache` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if is_memory_command(question):
             return False
         if not (_s.semantic_cache_enabled and not image_data and input_type == "text"):
@@ -506,18 +518,23 @@ async def astream_agent(
         cache_ctx = _build_cache_ctx()
         cached = await SemanticCache.get().lookup(question, cache_ctx=cache_ctx)
         if cached:
-            record_semantic_cache_hit(
-                question=question,
-                cached_answer=cached,
-                cache_ctx=cache_ctx,
-                trace_context=trace_context,
+            if _looks_cacheable_generation(cached):
+                record_semantic_cache_hit(
+                    question=question,
+                    cached_answer=cached,
+                    cache_ctx=cache_ctx,
+                    trace_context=trace_context,
+                )
+                yield ("updates", {"generator": {"generation": cached}})
+                chunk_size = 20
+                for i in range(0, len(cached), chunk_size):
+                    yield ("messages", (AIMessageChunk(content=cached[i:i + chunk_size]),
+                                        {"langgraph_node": "generator"}))
+                return
+            logger.info(
+                "SemanticCache: stale/low-quality hit ignored [ctx=%.12s, q=%.60s, resp=%dch]",
+                cache_ctx or "none", question, len(cached),
             )
-            yield ("updates", {"generator": {"generation": cached}})
-            chunk_size = 20
-            for i in range(0, len(cached), chunk_size):
-                yield ("messages", (AIMessageChunk(content=cached[i:i + chunk_size]),
-                                    {"langgraph_node": "generator"}))
-            return
         record_semantic_cache_miss(
             question=question,
             cache_ctx=cache_ctx,
@@ -560,7 +577,6 @@ async def astream_agent(
 
     # Cache'e yaz (görsel/ses sorgular hariç). Tanısal fallback cevapları cache'leme;
     # aksi halde geçici bir boş-LLM durumu sonraki iyi denemeleri de kirletir.
-    is_diagnostic_fallback = collected_generation.startswith("Model bu turda boş yanıt döndürdü.")
-    if use_semantic_cache and collected_generation and not is_diagnostic_fallback:
+    if use_semantic_cache and _looks_cacheable_generation(collected_generation):
         from src.rag.semantic_cache import SemanticCache
         await SemanticCache.get().store(question, collected_generation, cache_ctx=cache_ctx)

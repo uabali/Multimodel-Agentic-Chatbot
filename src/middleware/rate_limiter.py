@@ -29,8 +29,6 @@ from typing import Deque
 
 from fastapi import Depends, HTTPException, Request, status
 
-# IPs whose X-Forwarded-For header is trusted (e.g. Cloudflare tunnel, nginx).
-# Set TRUSTED_PROXY_IPS=127.0.0.1,::1 in .env; leave empty to trust no proxy.
 _TRUSTED_PROXIES: frozenset[str] = frozenset(
     ip.strip()
     for ip in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",")
@@ -46,6 +44,7 @@ class SlidingWindowLimiter:
     """Per-key sliding window rate limiter backed by a deque of timestamps."""
 
     def __init__(self, max_requests: int, window_seconds: float) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self._buckets: dict[str, Deque[float]] = {}
@@ -74,16 +73,12 @@ class SlidingWindowLimiter:
         return True, 0.0
 
 
-# ── Limiter instances ──────────────────────────────────────────────────────
 
-# Chat messages: 30 requests / 60 seconds per IP (generous for real users)
 chat_rate_limiter = SlidingWindowLimiter(max_requests=30, window_seconds=60)
 
-# Config mutation: 10 requests / 60 seconds per IP (admin-only endpoint)
 config_rate_limiter = SlidingWindowLimiter(max_requests=10, window_seconds=60)
 
 
-# ── FastAPI dependency helpers ─────────────────────────────────────────────
 
 
 def _get_client_ip(request: Request) -> str:

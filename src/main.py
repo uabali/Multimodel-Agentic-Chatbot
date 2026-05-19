@@ -59,9 +59,6 @@ from src.persistence.sqlite_data_layer import SQLiteDataLayer
 from src.api.router import router as _api_router
 from src.tts import synthesize as tts_synthesize
 
-# ── FastAPI admin/config router'ı Chainlit'e mount et ──────────────────────
-# Swagger UI: http://localhost:7860/docs
-# Endpoints : http://localhost:7860/api/*
 _cl_app.include_router(_api_router)
 logger_bootstrap = logging.getLogger("api.mount")
 logger_bootstrap.info("FastAPI admin router /api/* mount edildi. Docs: /docs")
@@ -107,10 +104,10 @@ def _langsmith_trace_context(
     }
 
 
-# ── Auth helpers ──
 
 
 def _ensure_auth_secret():
+    """Kısa: `_ensure_auth_secret` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if os.getenv("CHAINLIT_AUTH_SECRET"):
         return
     secret = secrets.token_urlsafe(48)
@@ -119,23 +116,25 @@ def _ensure_auth_secret():
 
 
 def _hash_password(password: str, salt: str) -> str:
+    """Kısa: `_hash_password` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 210_000)
     return dk.hex()
 
 
 def _constant_time_eq(a: str, b: str) -> bool:
+    """Kısa: `_constant_time_eq` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 _ensure_auth_secret()
 
 
-# ── Data layer — singleton shared between Chainlit and internal summarizer ──
 
 _dl_singleton: "SQLiteDataLayer | None" = None
 
 
 def _get_shared_data_layer() -> "SQLiteDataLayer":
+    """Kısa: `_get_shared_data_layer` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     global _dl_singleton
     if _dl_singleton is None:
         _dl_singleton = SQLiteDataLayer(Path("data") / "chainlit.db")
@@ -143,6 +142,7 @@ def _get_shared_data_layer() -> "SQLiteDataLayer":
 
 
 def _coerce_thread_memory(value) -> ThreadMemory:
+    """Kısa: `_coerce_thread_memory` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if isinstance(value, ThreadMemory):
         return value
     if isinstance(value, dict):
@@ -153,17 +153,20 @@ def _coerce_thread_memory(value) -> ThreadMemory:
 
 
 def _get_thread_memory() -> ThreadMemory:
+    """Kısa: `_get_thread_memory` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return _coerce_thread_memory(
         cl.user_session.get("thread_memory") or cl.user_session.get("session_summary") or ""
     )
 
 
 def _set_thread_memory(memory: ThreadMemory) -> None:
+    """Kısa: `_set_thread_memory` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     cl.user_session.set("thread_memory", memory.to_metadata())
     cl.user_session.set("session_summary", memory.rolling_summary)
 
 
 async def _persist_thread_memory(thread_id: str | None, memory: ThreadMemory) -> None:
+    """Kısa: `_persist_thread_memory` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if not thread_id:
         return
     try:
@@ -173,6 +176,7 @@ async def _persist_thread_memory(thread_id: str | None, memory: ThreadMemory) ->
 
 
 def _thread_upload_metadata() -> dict:
+    """Kısa: `_thread_upload_metadata` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     uploads = [
         str(item) for item in (cl.user_session.get("session_uploads") or [])
         if str(item or "").strip()
@@ -181,6 +185,7 @@ def _thread_upload_metadata() -> dict:
 
 
 async def _persist_thread_uploads(thread_id: str | None = None) -> None:
+    """Kısa: `_persist_thread_uploads` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     thread_id = thread_id or cl.user_session.get("id")
     if not thread_id:
         return
@@ -191,6 +196,7 @@ async def _persist_thread_uploads(thread_id: str | None = None) -> None:
 
 
 def _ingest_metadata(original_name: str | None = None) -> dict:
+    """Kısa: `_ingest_metadata` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return {
         "thread_id": cl.user_session.get("id") or "",
         "user_id": cl.user_session.get("user_id") or "",
@@ -201,6 +207,7 @@ def _ingest_metadata(original_name: str | None = None) -> dict:
 
 
 def datetime_now_iso() -> str:
+    """Kısa: `datetime_now_iso` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -208,15 +215,16 @@ def datetime_now_iso() -> str:
 
 @cl.data_layer
 def data_layer():
+    """Kısa: `data_layer` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return _get_shared_data_layer()
 
 
 
-# ── Auth callback ──
 
 
 @cl.password_auth_callback
 def auth_callback(username: str, password: str):
+    """Kısa: `auth_callback` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if username != settings.app_admin_username:
         return None
     expected = _hash_password(settings.app_admin_password, settings.app_password_salt)
@@ -226,15 +234,16 @@ def auth_callback(username: str, password: str):
     return cl.User(identifier=username, metadata={"role": "admin", "provider": "credentials"})
 
 
-# ── Chat resume ──
 
 
 @cl.on_chat_resume
 async def on_chat_resume(thread):
+    """Kısa: `on_chat_resume` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     try:
         steps = thread.get("steps", []) if isinstance(thread, dict) else []
         history: list[dict] = []
         def _to_text(v) -> str:
+            """Kısa: `_to_text` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
             if v is None:
                 return ""
             if isinstance(v, str):
@@ -295,7 +304,6 @@ async def on_chat_resume(thread):
         _set_thread_memory(ThreadMemory.empty())
 
 
-# ── Whisper / STT ──
 
 
 _whisper_model = None
@@ -303,6 +311,7 @@ _whisper_loading = False
 
 
 def _get_whisper_model():
+    """Kısa: `_get_whisper_model` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     global _whisper_model
     if _whisper_model is not None:
         return _whisper_model
@@ -362,7 +371,6 @@ def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sa
     return wav_buffer.getvalue()
 
 
-# ── TTS helpers ──
 
 
 async def _write_audio_tmp(audio_bytes: bytes) -> str:
@@ -377,6 +385,7 @@ async def _write_audio_tmp(audio_bytes: bytes) -> str:
         session_dir = None
 
     def _write():
+        """Kısa: `_write` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False, dir=session_dir or None)
         tmp.write(audio_bytes)
         tmp.flush()
@@ -402,7 +411,6 @@ async def _send_tts(text: str, parent_msg: cl.Message | None = None) -> None:
         await cl.Message(content="", elements=[audio_el]).send()
 
 
-# ── Streaming TTS ──
 
 
 class _TtsStreamer:
@@ -423,6 +431,7 @@ class _TtsStreamer:
     _MIN_FIRST_CHARS = 150  # Bu kadar karakter birikince ilk chunk'ı arka planda başlat
 
     def __init__(self, voice: str | None) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self._voice = voice
         self._buf = ""
         self._first_task: asyncio.Task | None = None
@@ -469,7 +478,6 @@ class _TtsStreamer:
         return cls(voice=voice)
 
 
-# ── Vision helpers ──
 
 
 def _image_to_data(image_path: Path) -> dict:
@@ -481,7 +489,6 @@ def _image_to_data(image_path: Path) -> dict:
     return {"mime": mime, "base64": b64, "name": image_path.name}
 
 
-# ── Session upload tracking ──
 
 
 def _track_session_upload(filename: str) -> None:
@@ -507,7 +514,6 @@ def _session_scoped_filename(name: str) -> str:
     return f"{sid}_{uuid.uuid4().hex[:8]}_{stem}{suffix}"
 
 
-# ── URL ingest helper ──
 
 
 async def _ingest_url(url: str, sess_dir: Path) -> dict | None:
@@ -536,11 +542,11 @@ async def _ingest_url(url: str, sess_dir: Path) -> dict | None:
         return None
 
 
-# ── Chat start ──
 
 
 @cl.on_chat_start
 async def on_chat_start():
+    """Kısa: `on_chat_start` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     session_id = cl.user_session.get("id") or uuid.uuid4().hex
     sid = session_id[:8]
     logger.info(
@@ -653,6 +659,7 @@ async def on_chat_start():
 
 @cl.set_chat_profiles
 async def set_chat_profiles():
+    """Kısa: `set_chat_profiles` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return [
         cl.ChatProfile(
             name=f"Frappe  ·  {settings.llm_model_name}",
@@ -667,6 +674,7 @@ async def set_chat_profiles():
 
 @cl.set_starters
 async def set_starters():
+    """Kısa: `set_starters` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     starters = [
         cl.Starter(label="📎 Dosya yükle (PDF/DOCX/XLSX/ses/görsel...)", message="/upload"),
         cl.Starter(label="🌐 URL'den belge ingest et", message="/url https://"),
@@ -677,11 +685,11 @@ async def set_starters():
     return starters
 
 
-# ── Audio hooks ──
 
 
 @cl.on_audio_start
 async def on_audio_start():
+    """Kısa: `on_audio_start` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     cl.user_session.set("audio_buffer", bytearray())
     cl.user_session.set("audio_mime_type", "")
     return True
@@ -689,6 +697,7 @@ async def on_audio_start():
 
 @cl.on_audio_chunk
 async def on_audio_chunk(chunk):
+    """Kısa: `on_audio_chunk` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     buf = cl.user_session.get("audio_buffer", bytearray())
     if not isinstance(buf, (bytearray, bytes)):
         buf = bytearray()
@@ -699,6 +708,7 @@ async def on_audio_chunk(chunk):
 
 @cl.on_audio_end
 async def on_audio_end():
+    """Kısa: `on_audio_end` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if not settings.stt_model:
         await cl.Message(content="STT disabled. Set STT_MODEL in .env.").send()
         return
@@ -863,40 +873,29 @@ async def on_audio_end():
             cl.user_session.set("chat_history", _trim_chat_history(chat_history))
 
 
-# ── Helpers ──
 
 
-# ── Upload limitleri ──
 _MAX_FILES_PER_MESSAGE = 5    # Tek mesajda kabul edilecek maksimum dosya sayısı
 _MAX_FILE_SIZE_MB = 20        # Tek dosya için maksimum boyut (MB)
 
 MAX_HISTORY_TURNS = 20
 
-# Hard cap on stored chat_history dicts — prevents unbounded memory growth
-# in very long sessions. Kept larger than MAX_HISTORY_TURNS so session resume
-# has more context, but still bounded.
 _MAX_STORED_MESSAGES = 100
 
-# Approximate character budget for LLM context window history.
-# Per-user context = LLAMA_CTX_SIZE / LLAMA_PARALLEL (e.g. 16384/4 = 4096 tokens).
-# System prompt + RAG chunks already consume ~2000-3000 tokens.
-# Remaining ~1000-2000 tokens for history → ~4000-8000 chars (~4 chars/token).
-# This guard prevents sending more history than the context window can hold.
 _MAX_HISTORY_CHARS = 6000
 
 
-# Uzun süreli bellek: bu eşiği geçince eski mesajlar LLM ile özetlenir.
-# chat_history her turu 2 kayıtla temsil eder (user + assistant);
-# 32 mesaj = 16 konuşma turu.
 _SUMMARY_TRIGGER = 32       # Mesaj sayısı eşiği (2 × tur sayısı)
 _SUMMARY_KEEP_RECENT = 12   # Özetlemeden sonra canlı tutulan son mesaj sayısı (6 tur)
 
 
 def _max_token_ceiling() -> int:
+    """Kısa: `_max_token_ceiling` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return max(256, min(1536, settings.llm_context_size - settings.rag_context_safety_margin_tokens - 512))
 
 
 def _clamp_max_tokens(value: int | float | None) -> int:
+    """Kısa: `_clamp_max_tokens` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     try:
         raw = int(value if value is not None else settings.chat_max_tokens)
     except (TypeError, ValueError):
@@ -906,6 +905,13 @@ def _clamp_max_tokens(value: int | float | None) -> int:
 
 _SHORT_ANSWER_RE = re.compile(r"\b(k[ıi]sa|özet|ozet|tek\s+c[üu]mle|brief|short|summary)\b", re.IGNORECASE)
 _LONG_ANSWER_RE = re.compile(r"\b(detayl[ıi]|ayr[ıi]nt[ıi]l[ıi]|uzun|kapsaml[ıi]|devam\s+et|tamam[ıi]n[ıi]|t[üu]m[üu]n[üu]|detailed|continue)\b", re.IGNORECASE)
+_DOCUMENT_SUMMARY_RE = re.compile(
+    r"\b(belge\w*|belgedeki|dok[üu]man\w*|dosya\w*|pdf|rapor\w*|document|file)\b.*"
+    r"\b(özet|ozet|summary|ana\s+konu|konusu|bulgu\w*|yöntem|yontem|sonuç|sonuc|method|findings|conclusion)\b|"
+    r"\b(özet|ozet|summary|ana\s+konu|konusu|bulgu\w*|yöntem|yontem|sonuç|sonuc|method|findings|conclusion)\b.*"
+    r"\b(belge\w*|belgedeki|dok[üu]man\w*|dosya\w*|pdf|rapor\w*|document|file)\b",
+    re.IGNORECASE,
+)
 _SIMPLE_MATH_RE = re.compile(r"^[\d\s\+\-\*\/\(\)\^.,]+$|(\byar[ıi]s[ıi]\b|\bkat[ıi]\b|\bhesapla\b|\bcalculate\b)", re.IGNORECASE)
 
 
@@ -924,7 +930,9 @@ def _dynamic_answer_token_budget(question: str, *, cap: int | None = None, input
     else:
         desired = 1024
 
-    if _SHORT_ANSWER_RE.search(q):
+    if _DOCUMENT_SUMMARY_RE.search(q):
+        desired = max(desired, 1024)
+    elif _SHORT_ANSWER_RE.search(q):
         desired = min(desired, 512)
     if _LONG_ANSWER_RE.search(q):
         desired = max(desired, 1280)
@@ -934,6 +942,7 @@ def _dynamic_answer_token_budget(question: str, *, cap: int | None = None, input
 
 
 def _looks_truncated(answer: str, budget: int) -> bool:
+    """Kısa: `_looks_truncated` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if not answer.strip() or budget <= 0:
         return False
     token_count = count_tokens(answer)
@@ -1115,11 +1124,11 @@ async def _timed_stream(gen, timeout: float):
         raise
 
 
-# ── Main message handler ──
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
+    """Kısa: `on_message` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     import time as _time
     _t0 = _time.perf_counter()
     question = message.content
@@ -1551,6 +1560,7 @@ async def on_message(message: cl.Message):
                     continue
 
                 def _should_stream(chunk: object, meta: dict | None, content: str) -> bool:
+                    """Kısa: `_should_stream` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
                     if not content:
                         return False
                     if not isinstance(chunk, AIMessageChunk):
@@ -1742,11 +1752,13 @@ async def on_settings_update(settings_dict: dict):
 
 @cl.on_stop
 async def on_stop():
+    """Kısa: `on_stop` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     logger.info("User stopped generation.")
 
 
 @cl.on_chat_end
 async def on_chat_end():
+    """Kısa: `on_chat_end` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     import shutil
 
     sid = cl.user_session.get("_session_id_short", "?")
