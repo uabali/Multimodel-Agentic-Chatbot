@@ -1066,6 +1066,17 @@ def _looks_truncated(answer: str, budget: int) -> bool:
     return False
 
 
+def _stream_truncation_detected(answer: str, budget: int, *, hit_length_limit: bool = False) -> bool:
+    """Detect likely stream truncation without deciding to regenerate the answer."""
+    return bool(hit_length_limit or _looks_truncated(answer, budget))
+
+
+def _should_repair_truncated_stream(answer: str, budget: int, *, hit_length_limit: bool = False) -> bool:
+    """Policy hook: streamed answers are not regenerated after the user has seen them."""
+    _ = (answer, budget, hit_length_limit)
+    return False
+
+
 def _clean_excerpt(text: str, *, limit: int = 700) -> str:
     """Remove transport labels from source previews while keeping useful context."""
     raw = re.sub(r"\s+", " ", (text or "").strip())
@@ -1946,8 +1957,13 @@ async def on_message(message: cl.Message):
                 logger.error("Fallback ainvoke de başarısız: %s", exc)
             answer = (answer or "").strip() or "Bir hata oluştu, lütfen tekrar deneyin."
 
-        if stream_hit_length_limit or _looks_truncated(answer, _sess_max_tok):
-            final_fallback = "truncated_stream"
+        stream_was_truncated = _stream_truncation_detected(
+            answer,
+            _sess_max_tok,
+            hit_length_limit=stream_hit_length_limit,
+        )
+        if stream_was_truncated:
+            final_fallback = "truncated_stream_skipped"
             log_event(
                 logger,
                 "fallback",
@@ -1957,6 +1973,11 @@ async def on_message(message: cl.Message):
                 input_type=agent_input_type,
                 fallback=final_fallback,
             )
+        if stream_was_truncated and _should_repair_truncated_stream(
+            answer,
+            _sess_max_tok,
+            hit_length_limit=stream_hit_length_limit,
+        ):
             try:
                 repaired = await arun_agent(
                     question=question,
@@ -1978,6 +1999,7 @@ async def on_message(message: cl.Message):
                     answer = repaired
                     final_parts = [answer]
                     stream_hit_length_limit = False
+                    stream_was_truncated = False
             except Exception as exc:
                 final_error_type = type(exc).__name__
                 logger.error("Kesilmiş yanıt fallback başarısız: %s", exc)
@@ -2008,7 +2030,7 @@ async def on_message(message: cl.Message):
         answer_tokens = count_tokens(answer)
         cl.user_session.set("last_answer_token_count", answer_tokens)
         cl.user_session.set("last_answer_token_budget", _sess_max_tok)
-        cl.user_session.set("last_answer_was_truncated", stream_hit_length_limit or _looks_truncated(answer, _sess_max_tok))
+        cl.user_session.set("last_answer_was_truncated", stream_was_truncated)
         chat_history.append({"role": "user", "content": question})
         chat_history.append({"role": "assistant", "content": answer})
         thread_id = cl.user_session.get("id")

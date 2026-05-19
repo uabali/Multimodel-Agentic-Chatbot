@@ -102,6 +102,18 @@ def test_truncation_detector_does_not_retry_short_colon_answer(monkeypatch):
     assert not main._looks_truncated("Fiyatlar genel olarak şöyle:", 1536)
 
 
+def test_truncated_stream_detection_does_not_trigger_repair_policy(monkeypatch):
+    import src.main as main
+
+    monkeypatch.setattr(main, "count_tokens", lambda _text: 1400)
+    answer = "Yanıt devam edecek gibi görünen bir bağlaç ile"
+
+    assert main._stream_truncation_detected(answer, 1536)
+    assert main._stream_truncation_detected("Tam cevap.", 1536, hit_length_limit=True)
+    assert not main._should_repair_truncated_stream(answer, 1536)
+    assert not main._should_repair_truncated_stream("Tam cevap.", 1536, hit_length_limit=True)
+
+
 def test_finish_reason_length_detection():
     import src.main as main
 
