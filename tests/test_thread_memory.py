@@ -45,7 +45,7 @@ async def test_rolling_summary_uses_previous_summary(monkeypatch):
         memory=ThreadMemory(rolling_summary="Eski tercih: akademik dil.", pinned_facts=[]),
     )
 
-    assert len(recent) == main._SUMMARY_KEEP_RECENT
+    assert len(recent) == main._SUMMARY_KEEP_RECENT  # noqa: SLF001
     assert "Eski tercih: akademik dil." in captured["prompt"]
     assert "soru 0" in captured["prompt"]
     assert "Yeni karar" in updated.rolling_summary
@@ -238,3 +238,51 @@ async def test_low_quality_semantic_cache_hit_is_ignored(monkeypatch):
 
     assert events == [("updates", {"generator": {"generation": "Bu cevap yeterince uzun ve tamamlanmış bir cevaptır. Kaynak bağlamı kullanır ve düzgün biter."}})]
     assert stored["count"] == 1
+
+
+def test_merge_resume_histories_prefers_metadata_tail():
+    from src.memory.thread_memory import merge_resume_histories
+
+    steps = [{"role": "user", "content": f"q{i}"} for i in range(20)]
+    meta = steps[-6:] + [{"role": "assistant", "content": "fresh answer"}]
+
+    merged = merge_resume_histories(steps, meta)
+
+    assert merged[-1]["content"] == "fresh answer"
+    assert len(merged) >= len(meta)
+
+
+def test_chat_history_metadata_patch_caps_messages():
+    from src.memory.thread_memory import chat_history_metadata_patch
+
+    history = [{"role": "user", "content": f"m{i}"} for i in range(150)]
+    patch = chat_history_metadata_patch(history)
+
+    assert len(patch["chat_history"]) == 100
+
+
+def test_should_summarize_by_token_budget(monkeypatch):
+    import src.main as main
+
+    monkeypatch.setattr(main.settings, "summary_trigger_messages", 100)
+    monkeypatch.setattr(main.settings, "summary_trigger_tokens", 50)
+    monkeypatch.setattr(main, "count_tokens", lambda text: len(text) // 10)
+
+    long_history = [{"role": "user", "content": "x" * 400} for _ in range(10)]
+
+    assert main._should_summarize_history(long_history)
+
+
+def test_format_memory_preferences_excludes_last_topic():
+    from src.memory.thread_memory import format_memory_preferences
+
+    mem = ThreadMemory(
+        rolling_summary="Özet metin",
+        pinned_facts=["Kısa cevap"],
+        last_topic="Son konu başlığı",
+    )
+    prefs = format_memory_preferences(mem)
+
+    assert "Özet metin" in prefs
+    assert "Kısa cevap" in prefs
+    assert "Son konu" not in prefs

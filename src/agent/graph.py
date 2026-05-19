@@ -125,6 +125,18 @@ def _route_decision(state: AgentState) -> str:
     return route
 
 
+def _is_scoped_retrieval(state: AgentState) -> bool:
+    """True when retrieval is limited to uploads in this session."""
+    return bool(state.get("source_filter") or state.get("session_uploads"))
+
+
+def _weak_dense_gate_blocks_web(state: AgentState) -> bool:
+    """Global corpus weak dense gate: do not fall back to web search."""
+    if _is_scoped_retrieval(state):
+        return False
+    return (state.get("retrieval_gate") or "") == "weak"
+
+
 def _grader_decision(state: AgentState) -> str:
     """Grader node çıkışından geçiş kararı verir.
 
@@ -134,6 +146,8 @@ def _grader_decision(state: AgentState) -> str:
     source_filter aktifken iki senaryo:
     - reason="irrelevant": belge soruyla ilgisiz → generator "belgede yok" cevabı verir.
     - reason="needs_live_data": belge formülü içeriyor ama canlı veri eksik → web arama.
+
+    retrieval_gate=weak (global arama): partial/needs_live_data web'e gitmez → refuse.
     Reason belirsizse/yoksa: güvenli taraf olan "sufficient" seçilir.
     """
     if state.get("relevance") == "yes":
@@ -145,6 +159,8 @@ def _grader_decision(state: AgentState) -> str:
     if reason in {"irrelevant", "insufficient_context"}:
         return "refuse"
     if reason in {"partial", "needs_live_data"}:
+        if _weak_dense_gate_blocks_web(state):
+            return "refuse"
         return "insufficient"
     return "refuse"
 
@@ -271,6 +287,9 @@ def _init_state(
     image_data: list[dict] | None = None,
     input_type: str = "text",
     session_uploads: list[str] | None = None,
+    user_id: str = "",
+    thread_id: str = "",
+    memory_context: str = "",
     temperature: float | None = None,
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
@@ -289,6 +308,9 @@ def _init_state(
         "relevance": "",
         "grader_reason": "",
         "source_filter": source_filter,
+        "user_id": user_id or "",
+        "thread_id": thread_id or "",
+        "memory_context": memory_context or "",
         "session_uploads": list(session_uploads or []),
         "image_data": image_data or [],
         "input_type": input_type,
@@ -393,6 +415,9 @@ def run_agent(
     image_data: list[dict] | None = None,
     input_type: str = "text",
     session_uploads: list[str] | None = None,
+    user_id: str = "",
+    thread_id: str = "",
+    memory_context: str = "",
     temperature: float | None = None,
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
@@ -405,7 +430,8 @@ def run_agent(
     trace_context = _trace_with_history(trace_context, chat_history)
     state = _init_state(
         question, chat_history, source_filter, image_data, input_type,
-        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
+        session_uploads, user_id, thread_id, memory_context,
+        temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
     )
     config = _graph_config(
         run_name="frappe.sync_run",
@@ -431,6 +457,9 @@ async def arun_agent(
     image_data: list[dict] | None = None,
     input_type: str = "text",
     session_uploads: list[str] | None = None,
+    user_id: str = "",
+    thread_id: str = "",
+    memory_context: str = "",
     temperature: float | None = None,
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
@@ -443,7 +472,8 @@ async def arun_agent(
     trace_context = _trace_with_history(trace_context, chat_history)
     state = _init_state(
         question, chat_history, source_filter, image_data, input_type,
-        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
+        session_uploads, user_id, thread_id, memory_context,
+        temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
     )
     config = _graph_config(
         run_name=_turn_run_name("frappe.chat_turn", trace_context),
@@ -470,6 +500,9 @@ async def astream_agent(
     image_data: list[dict] | None = None,
     input_type: str = "text",
     session_uploads: list[str] | None = None,
+    user_id: str = "",
+    thread_id: str = "",
+    memory_context: str = "",
     temperature: float | None = None,
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
@@ -549,7 +582,8 @@ async def astream_agent(
     collected_generation = ""
     state = _init_state(
         question, chat_history, source_filter, image_data, input_type,
-        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
+        session_uploads, user_id, thread_id, memory_context,
+        temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
     )
     config = _graph_config(
         run_name=_turn_run_name("frappe.chat_turn", trace_context),

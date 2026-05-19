@@ -46,6 +46,13 @@ class AgentState(TypedDict):
     # Yüklenen dosyaya göre retrieval filtreleme (boş = tüm belgeler)
     source_filter: str
 
+    # Chainlit kullanıcı / thread — Qdrant tenant filtresi için
+    user_id: str
+    thread_id: str
+
+    # Generator RAG prompt'una eklenecek thread memory özeti + pin'ler
+    memory_context: str
+
     # Session boyunca yüklenmiş dosyaların adları (kümülatif).
     # source_filter boşsa retriever/grader bu listeyi kullanır; router da
     # "belge sahibi" sinyali olarak değerlendirir (follow-up sorular için kritik).

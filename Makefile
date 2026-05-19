@@ -1,4 +1,4 @@
-.PHONY: setup qdrant llm app dev check test stop clean help
+.PHONY: setup qdrant llm app dev check test index stop clean help
 
 SHELL := /bin/bash
 
@@ -76,6 +76,10 @@ check: ## Health-check all services + verify model ids
 test: ## Run automated tests
 	@echo "── test ───────────────────────────────────────────"
 	@. .venv/bin/activate && uv run pytest -q
+
+index: ## Index documents from DATA_DIR into Qdrant (default: data/)
+	@echo "── index ──────────────────────────────────────────"
+	@. .venv/bin/activate && uv run python scripts/index_corpus.py --dir $(or $(DATA_DIR),data)
 
 # ─────────────────────────────────────────────────────────────────────────────
 tunnel: ## Share Chainlit via ngrok (NGROK_AUTHTOKEN required in .env)

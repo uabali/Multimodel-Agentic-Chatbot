@@ -231,6 +231,7 @@ class HybridVectorStore:
                     )
                 self._rebuild_collection(reason)
             self._ensure_collection()
+            self._ensure_payload_indexes()
             mode = RetrievalMode.HYBRID if self._sparse else RetrievalMode.DENSE
             self._store = QdrantVectorStore(
                 client=self.client,
@@ -264,6 +265,28 @@ class HybridVectorStore:
             sparse_vectors_config=sparse_config if sparse_config else None,
         )
         logger.info("Created Qdrant collection '%s' (dim=%d)", settings.qdrant_collection, dim)
+        self._ensure_payload_indexes()
+
+    def _ensure_payload_indexes(self) -> None:
+        """Payload index for metadata filters (idempotent)."""
+        if not self.client.collection_exists(settings.qdrant_collection):
+            return
+        indexed_fields = (
+            ("metadata.source_file", models.PayloadSchemaType.KEYWORD),
+            ("metadata.user_id", models.PayloadSchemaType.KEYWORD),
+            ("metadata.thread_id", models.PayloadSchemaType.KEYWORD),
+        )
+        for field_name, field_schema in indexed_fields:
+            try:
+                self.client.create_payload_index(
+                    collection_name=settings.qdrant_collection,
+                    field_name=field_name,
+                    field_schema=field_schema,
+                )
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "already exists" not in msg and "already indexed" not in msg:
+                    logger.debug("Payload index %s skipped: %s", field_name, exc)
 
     # ── Ingest ──
 

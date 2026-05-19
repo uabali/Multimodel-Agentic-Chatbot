@@ -61,6 +61,7 @@ from src.agent.prompts import (
     REWRITER_SYSTEM_PROMPT,
     GRADER_SYSTEM_PROMPT,
     RAG_WITH_CONTEXT_SYSTEM_PROMPT,
+    RAG_MEMORY_PREFERENCES_BLOCK,
     WEB_WITH_CONTEXT_SYSTEM_PROMPT,
     RAG_NO_CONTEXT_SYSTEM_PROMPT,
     build_generator_prompt,
@@ -347,8 +348,10 @@ class _RerankerRegistry:
                 return cls._instance
             try:
                 from src.rag.reranker import create_reranker
+
+                model_name = "fast" if settings.rerank_fast_mode else settings.reranker_model
                 cls._instance = create_reranker(
-                    model_name=settings.reranker_model,
+                    model_name=model_name,
                     device=settings.reranker_device,
                 )
             except Exception as exc:
@@ -649,6 +652,11 @@ async def rewriter_node(state: AgentState) -> AgentState:
 
     llm = _get_rag_llm(temperature=0.0)
     messages_to_send = [SystemMessage(content=REWRITER_SYSTEM_PROMPT)]
+    memory_ctx = (state.get("memory_context") or "").strip()
+    if memory_ctx:
+        messages_to_send.append(
+            SystemMessage(content=f"Thread memory (rewrite için bağlam):\n{memory_ctx}")
+        )
     if prior_messages:
         messages_to_send.extend(prior_messages[-2:])
     messages_to_send.append(HumanMessage(content=question))
@@ -691,34 +699,75 @@ async def rewriter_node(state: AgentState) -> AgentState:
 
 
 
-def _build_source_filter(source_filter: str, session_uploads: list[str] | None = None):
+def _build_tenant_filter(user_id: str = "", thread_id: str = ""):
+    """Upload scope yokken kullanıcı izolasyonu — bulk corpus (boş user_id) opsiyonel."""
+    from qdrant_client import models as qmodels
+
+    _ = thread_id  # reserved for future per-thread purge APIs
+    if not settings.qdrant_tenant_filter_enabled:
+        return None
+
+    uid = (user_id or "").strip()
+    if not uid:
+        return None
+
+    should: list = [
+        qmodels.FieldCondition(
+            key="metadata.user_id",
+            match=qmodels.MatchValue(value=uid),
+        ),
+    ]
+    if settings.qdrant_include_shared_corpus:
+        should.append(
+            qmodels.IsEmptyCondition(
+                is_empty=qmodels.PayloadField(key="metadata.user_id"),
+            )
+        )
+    return qmodels.Filter(should=should)
+
+
+def _build_source_filter(
+    source_filter: str,
+    session_uploads: list[str] | None = None,
+    *,
+    user_id: str = "",
+    thread_id: str = "",
+):
     """source_filter veya session_uploads'dan Qdrant metadata filtresi oluşturur.
 
     source_filter verilmişse (mevcut yüklemenin dosya adı) → tek değer eşleşmesi.
     Yoksa ve session_uploads doluysa → bu dosyaların herhangi biriyle eşleşme.
-    İkisi de boşsa None döner (filtresiz arama).
+    İkisi de boşsa tenant filtresi (user_id / shared corpus) uygulanır.
     """
     from qdrant_client import models as qmodels
+
+    must: list = []
     if source_filter:
-        return qmodels.Filter(
-            must=[
-                qmodels.FieldCondition(
-                    key="metadata.source_file",
-                    match=qmodels.MatchValue(value=source_filter),
-                )
-            ]
+        must.append(
+            qmodels.FieldCondition(
+                key="metadata.source_file",
+                match=qmodels.MatchValue(value=source_filter),
+            )
         )
-    uploads = [s for s in (session_uploads or []) if s]
-    if uploads:
-        return qmodels.Filter(
-            must=[
+    else:
+        uploads = [s for s in (session_uploads or []) if s]
+        if uploads:
+            must.append(
                 qmodels.FieldCondition(
                     key="metadata.source_file",
                     match=qmodels.MatchAny(any=uploads),
                 )
-            ]
-        )
-    return None
+            )
+        else:
+            tenant = _build_tenant_filter(user_id, thread_id)
+            if tenant is not None:
+                must.append(tenant)
+
+    if not must:
+        return None
+    if len(must) == 1:
+        return qmodels.Filter(must=must)
+    return qmodels.Filter(must=must)
 
 
 _DOCUMENT_OVERVIEW_RE = re.compile(
@@ -842,7 +891,12 @@ async def retriever_node(state: AgentState) -> AgentState:
         from src.rag.retriever import create_retriever, deduplicate_documents, run_retriever, chunk_id
 
         store = get_hybrid_store()
-        qdrant_filter = _build_source_filter(source_filter, session_uploads)
+        qdrant_filter = _build_source_filter(
+            source_filter,
+            session_uploads,
+            user_id=state.get("user_id") or "",
+            thread_id=state.get("thread_id") or "",
+        )
 
         if source_filter or session_uploads:
             dense_score = 1.0
@@ -1457,8 +1511,42 @@ async def grader_node(state: AgentState) -> AgentState:
         return {**state, "relevance": relevance, "grader_reason": reason}
 
     confidence = estimate_confidence(question, documents)
+    retrieval_gate = state.get("retrieval_gate") or ""
+    scoped = bool(state.get("source_filter") or state.get("session_uploads"))
 
-    if confidence >= _grader_conf_high():
+    if retrieval_gate == "weak" and not scoped:
+        if confidence < _grader_conf_high():
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+            logger.info(
+                "Grader: relevance=no [mode=weak_dense_gate, conf=%.3f<%.3f, docs=%d, t=%.3fs]",
+                confidence, _grader_conf_high(), len(documents), time.perf_counter() - t0,
+            )
+            _observe_node(
+                "frappe.grader_decision",
+                state,
+                outputs={
+                    "relevance": "no",
+                    "grader_reason": "insufficient_context",
+                    "mode": "weak_dense_gate",
+                    "confidence": confidence,
+                    "high_threshold": _grader_conf_high(),
+                    "document_count": len(documents),
+                    "latency_ms_by_stage": {"total": elapsed_ms},
+                },
+                metadata={
+                    "grader_mode": "weak_dense_gate",
+                    "grader_confidence": confidence,
+                    "retrieval_gate": retrieval_gate,
+                },
+                tags=["frappe", "grader", "no", "gate:weak"],
+            )
+            return {
+                **state,
+                "relevance": "no",
+                "grader_reason": "insufficient_context",
+                "refusal_mode": True,
+            }
+    elif confidence >= _grader_conf_high():
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
             "Grader: relevance=yes [mode=high_conf, conf=%.3f>=%.3f, docs=%d, t=%.3fs]",
@@ -1871,6 +1959,7 @@ def assemble_rag_context(
     answer_question: str,
     retrieval_trace: list[dict],
     output_tokens: int,
+    memory_preferences: str = "",
 ) -> RAGContextAssembly:
     """Build bounded RAG context and mark retrieval_trace entries used in prompt."""
     context_parts: list[str] = []
@@ -1925,6 +2014,9 @@ def assemble_rag_context(
     )
     prompt_template = WEB_WITH_CONTEXT_SYSTEM_PROMPT if only_web_context else RAG_WITH_CONTEXT_SYSTEM_PROMPT
     system_content = prompt_template.replace("{context}", context)
+    prefs = (memory_preferences or "").strip()
+    if prefs and not only_web_context:
+        system_content += RAG_MEMORY_PREFERENCES_BLOCK.replace("{memory_preferences}", prefs)
 
     prior_chars = sum(len(getattr(m, "content", "") or "") for m in rag_history)
     total_prompt_chars = len(system_content) + prior_chars + len(answer_question)
@@ -2182,6 +2274,7 @@ async def generator_node(state: AgentState) -> AgentState:
             answer_question=answer_question,
             retrieval_trace=retrieval_trace,
             output_tokens=output_tokens,
+            memory_preferences=state.get("memory_context") or "",
         )
         system_content = assembly.system_content
         used_chunk_ids = assembly.used_chunk_ids

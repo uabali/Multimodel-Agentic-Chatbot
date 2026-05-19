@@ -137,6 +137,13 @@ Bağlam:
 """
 
 
+RAG_MEMORY_PREFERENCES_BLOCK = """
+
+KULLANICI TERCİHLERİ (bu sohbet thread'i için — yanıt stilini ve odak noktasını buna göre ayarla):
+{memory_preferences}\
+"""
+
+
 WEB_WITH_CONTEXT_SYSTEM_PROMPT = """\
 Adın Frappe, bir yapay zeka asistanısın. Güncel web arama sonuçlarından bağlam sağlandı.
 

@@ -109,3 +109,22 @@ def test_ingest_adds_thread_resume_metadata(tmp_path):
     meta = vectorstore.added_batches[0][0].metadata
     assert meta["thread_id"] == "thread-1"
     assert meta["uploaded_at"] == "2026-05-16T00:00:00Z"
+
+
+def test_index_directory_ingests_each_file(monkeypatch, tmp_path):
+    import src.rag.ingest as ingest
+
+    doc = tmp_path / "a.txt"
+    doc.write_text("hello", encoding="utf-8")
+    calls = []
+
+    def fake_ingest_file(path, **kwargs):
+        calls.append(path.name)
+        return {"file_name": path.name, "status": "success", "chunk_count": 1}
+
+    monkeypatch.setattr(ingest, "ingest_file", fake_ingest_file)
+
+    results = ingest.index_directory(str(tmp_path))
+
+    assert calls == ["a.txt"]
+    assert results[0]["status"] == "success"

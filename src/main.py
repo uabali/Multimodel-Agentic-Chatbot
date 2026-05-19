@@ -1,21 +1,3 @@
-"""
-Chainlit application entry point — unified from all three projects.
-
-Features:
-  - Password auth (PBKDF2-HMAC-SHA256)
-  - SQLite thread/step persistence
-  - MCP lifecycle (connect/disconnect/bridge)
-  - File upload + ingest to Qdrant (PDF/DOCX/TXT/MD/XLSX/CSV + audio file transcription + URL ingest)
-  - Vision (image upload → Gemma 4 multimodal via agent graph)
-  - STT via faster-whisper (mic input → text → agent, streaming)
-  - TTS via edge-tts (text → MP3 → cl.Audio, toggled per session)
-  - LangGraph streaming with smart node filtering
-  - Chat Profile (model adi gosterimi)
-  - Chat Settings (temperature, max_tokens, retrieval strategy, reranker, TTS)
-  - Action buttons (🔊 Sesli dinle — TTS aktif degilse gorünür)
-  - Starters for quick actions
-"""
-
 import asyncio
 import sys
 import logging
@@ -46,10 +28,13 @@ from src.config import settings
 from src.agent.graph import arun_agent, astream_agent
 from src.memory.thread_memory import (
     ThreadMemory,
+    chat_history_metadata_patch,
     extract_memory_pin,
     format_memory_context,
+    format_memory_preferences,
     is_memory_command,
     memory_hash,
+    merge_resume_histories,
     metadata_patch,
 )
 from src.mcp.mcp_client import get_mcp_tools, is_mcp_tools_cache_warm
@@ -168,12 +153,64 @@ def _set_thread_memory(memory: ThreadMemory) -> None:
 
 async def _persist_thread_memory(thread_id: str | None, memory: ThreadMemory) -> None:
     """Kısa: `_persist_thread_memory` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    await _persist_thread_state(thread_id, memory, chat_history=None)
+
+
+async def _persist_thread_state(
+    thread_id: str | None,
+    memory: ThreadMemory,
+    chat_history: list[dict] | None = None,
+) -> None:
+    """Thread memory ve opsiyonel chat_history slice'ını SQLite metadata'ya yazar."""
     if not thread_id:
         return
+    patch = metadata_patch(memory)
+    if chat_history is not None:
+        patch.update(chat_history_metadata_patch(chat_history))
     try:
-        await _get_shared_data_layer().patch_thread_metadata(thread_id, metadata_patch(memory))
+        await _get_shared_data_layer().patch_thread_metadata(thread_id, patch)
     except Exception as exc:
-        logger.warning("Thread memory metadata güncellenemedi: %s", exc)
+        logger.warning("Thread state metadata güncellenemedi: %s", exc)
+
+
+def _current_user_id() -> str:
+    """Chainlit oturumundan Qdrant tenant filtresi için kullanıcı kimliği."""
+    uid = str(cl.user_session.get("user_id") or "").strip()
+    if uid:
+        return uid
+    user = cl.user_session.get("user")
+    if user:
+        return str(getattr(user, "identifier", None) or getattr(user, "id", None) or "").strip()
+    return ""
+
+
+def _agent_identity_kwargs(thread_memory: ThreadMemory | None = None) -> dict:
+    """astream_agent / arun_agent için user, thread ve memory context."""
+    memory = thread_memory or _get_thread_memory()
+    return {
+        "user_id": _current_user_id(),
+        "thread_id": str(cl.user_session.get("id") or ""),
+        "memory_context": format_memory_preferences(memory),
+        "memory_hash": memory_hash(memory),
+    }
+
+
+def _should_summarize_history(chat_history: list[dict]) -> bool:
+    """Mesaj sayısı veya toplam token bütçesi özetlemeyi tetikler."""
+    n = len(chat_history or [])
+    if n >= settings.summary_trigger_messages:
+        return True
+    if n < 8:
+        return False
+    try:
+        blob = "\n".join(
+            f"{m.get('role', '')}: {m.get('content', '')}"
+            for m in chat_history
+            if isinstance(m, dict)
+        )
+        return count_tokens(blob) >= settings.summary_trigger_tokens
+    except Exception:
+        return n >= settings.summary_trigger_messages
 
 
 def _thread_upload_metadata() -> dict:
@@ -266,12 +303,14 @@ async def on_chat_resume(thread):
                     history.append({"role": "assistant", "content": content})
 
         meta = thread.get("metadata", {}) if isinstance(thread, dict) else {}
-        if not history and isinstance(meta, dict) and isinstance(meta.get("chat_history"), list):
-            history = [
+        meta_history = []
+        if isinstance(meta, dict) and isinstance(meta.get("chat_history"), list):
+            meta_history = [
                 {"role": str(item.get("role") or ""), "content": str(item.get("content") or "")}
                 for item in meta.get("chat_history", [])
                 if isinstance(item, dict) and str(item.get("content") or "").strip()
             ]
+        history = merge_resume_histories(history, meta_history)
 
         trimmed = _trim_chat_history(history)
         cl.user_session.set("chat_history", trimmed)
@@ -556,6 +595,11 @@ async def on_chat_start():
         settings.qdrant_url, settings.llm_context_size, settings.use_rerank,
     )
     cl.user_session.set("_session_id_short", session_id[:8])
+    user = cl.user_session.get("user")
+    if user:
+        uid = getattr(user, "id", None) or getattr(user, "identifier", None)
+        if uid:
+            cl.user_session.set("user_id", str(uid))
     session_upload_dir = settings.upload_dir / f"session_{session_id}"
     session_upload_dir.mkdir(parents=True, exist_ok=True)
     cl.user_session.set("session_upload_dir", str(session_upload_dir))
@@ -675,26 +719,12 @@ async def set_chat_profiles():
     return [
         cl.ChatProfile(
             name=f"Frappe  ·  {settings.llm_model_name}",
-            markdown_description=(
-                f"**{settings.llm_model_name}** — FRAPPE\n\n"
-                "Multimodal RAG Agent"
+            markdown_description=("FRAPPE\n\n"
             ),
-            icon="/public/logo.svg",
+            icon="/public/frappe_icon.png",
         ),
     ]
 
-
-@cl.set_starters
-async def set_starters():
-    """Kısa: `set_starters` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-    starters = [
-        cl.Starter(label="📎 Dosya yükle (PDF/DOCX/XLSX/ses/görsel...)", message="/upload"),
-        cl.Starter(label="🌐 URL'den belge ingest et", message="/url https://"),
-        cl.Starter(label="Aktif modelleri göster", message="/models"),
-    ]
-    if settings.tavily_api_key:
-        starters.append(cl.Starter(label="☀️ Hava durumu", message="Istanbul hava durumu bugun nasil?"))
-    return starters
 
 
 
@@ -757,7 +787,11 @@ async def on_audio_end():
         if _audio_pin:
             _audio_memory = _get_thread_memory().with_pin(_audio_pin)
             _set_thread_memory(_audio_memory)
-            await _persist_thread_memory(cl.user_session.get("id"), _audio_memory)
+            await _persist_thread_state(
+                cl.user_session.get("id"),
+                _audio_memory,
+                cl.user_session.get("chat_history"),
+            )
             msg.content = f"**Transcript:** {text}\n\nBu sohbet için not aldım."
             await msg.update()
             return
@@ -767,7 +801,7 @@ async def on_audio_end():
             return
 
         _audio_memory = _get_thread_memory()
-        _audio_memory_hash = memory_hash(_audio_memory)
+        _audio_identity = _agent_identity_kwargs(_audio_memory)
         lc_history = _build_lc_history(chat_history, memory=_audio_memory)
 
         # Pending görselleri kontrol et - sesli soruyla birlikte gönderilecek
@@ -817,7 +851,7 @@ async def on_audio_end():
                 use_rerank=_a_rerank,
                 force_web_search=_a_force_web,
                 trace_context=_a_trace,
-                memory_hash=_audio_memory_hash,
+                **_audio_identity,
             ):
                 if isinstance(ev, tuple) and len(ev) == 2 and ev[0] == "updates":
                     payload = ev[1]
@@ -854,7 +888,7 @@ async def on_audio_end():
                 use_rerank=_a_rerank,
                 force_web_search=_a_force_web,
                 trace_context={**_a_trace, "attempt": "fallback"},
-                memory_hash=_audio_memory_hash,
+                **_audio_identity,
             )
             answer_parts = [fallback]
 
@@ -870,8 +904,8 @@ async def on_audio_end():
 
         chat_history.append({"role": "user", "content": text})
         chat_history.append({"role": "assistant", "content": answer})
-        if len(chat_history) >= _SUMMARY_TRIGGER:
-            thread_id = cl.user_session.get("id")
+        thread_id = cl.user_session.get("id")
+        if _should_summarize_history(chat_history):
             chat_history, updated_memory = await _summarize_and_compress_history(
                 chat_history, thread_id, _get_thread_memory()
             )
@@ -879,6 +913,7 @@ async def on_audio_end():
         else:
             chat_history = _trim_chat_history(chat_history)
         cl.user_session.set("chat_history", chat_history)
+        await _persist_thread_state(thread_id, _get_thread_memory(), chat_history)
     except Exception as e:
         logger.error("STT error: %s", e, exc_info=True)
         msg.content = f"Audio processing error: {e}"
@@ -901,7 +936,6 @@ _MAX_STORED_MESSAGES = 100
 _MAX_HISTORY_CHARS = 6000
 
 
-_SUMMARY_TRIGGER = 32       # Mesaj sayısı eşiği (2 × tur sayısı)
 _SUMMARY_KEEP_RECENT = 12   # Özetlemeden sonra canlı tutulan son mesaj sayısı (6 tur)
 
 
@@ -1127,7 +1161,7 @@ async def _summarize_and_compress_history(
         return _trim_chat_history(chat_history), memory
 
     updated_memory = memory.with_summary(summary)
-    await _persist_thread_memory(thread_id, updated_memory)
+    await _persist_thread_state(thread_id, updated_memory, recent_msgs)
     return recent_msgs, updated_memory
 
 
@@ -1339,7 +1373,11 @@ async def on_message(message: cl.Message):
         if pin:
             thread_memory = _get_thread_memory().with_pin(pin)
             _set_thread_memory(thread_memory)
-            await _persist_thread_memory(cl.user_session.get("id"), thread_memory)
+            await _persist_thread_state(
+                cl.user_session.get("id"),
+                thread_memory,
+                cl.user_session.get("chat_history"),
+            )
             thinking_msg.content = "Bu sohbet için not aldım."
             await thinking_msg.update()
             return
@@ -1588,7 +1626,7 @@ async def on_message(message: cl.Message):
         # ── Agent streaming ──
 
         thread_memory = _get_thread_memory()
-        thread_memory_hash = memory_hash(thread_memory)
+        _identity = _agent_identity_kwargs(thread_memory)
         lc_history = _build_lc_history(chat_history, memory=thread_memory)
         source_filter = ingested_filenames[0] if len(ingested_filenames) == 1 else ""
         session_uploads: list[str] = list(cl.user_session.get("session_uploads") or [])
@@ -1684,7 +1722,7 @@ async def on_message(message: cl.Message):
                     use_rerank=_sess_rerank,
                     force_web_search=_sess_force_web,
                     trace_context=_text_trace,
-                    memory_hash=thread_memory_hash,
+                    **_identity,
                 ),
                 _STREAM_CHUNK_TIMEOUT,
             ):
@@ -1759,7 +1797,7 @@ async def on_message(message: cl.Message):
                 use_rerank=_sess_rerank,
                 force_web_search=_sess_force_web,
                 trace_context={**_text_trace, "attempt": "fallback_exception"},
-                memory_hash=thread_memory_hash,
+                **_identity,
             )
             final_parts = [answer]
             for i in range(0, len(answer), 24):
@@ -1787,7 +1825,7 @@ async def on_message(message: cl.Message):
                     use_rerank=_sess_rerank,
                     force_web_search=_sess_force_web,
                     trace_context={**_text_trace, "attempt": "fallback_empty_stream"},
-                    memory_hash=thread_memory_hash,
+                    **_identity,
                 )
             except Exception as exc:
                 logger.error("Fallback ainvoke de başarısız: %s", exc)
@@ -1809,7 +1847,7 @@ async def on_message(message: cl.Message):
                     use_rerank=_sess_rerank,
                     force_web_search=_sess_force_web,
                     trace_context={**_text_trace, "attempt": "fallback_truncated_stream"},
-                    memory_hash=thread_memory_hash,
+                    **_identity,
                 )
                 repaired = (repaired or "").strip()
                 if repaired and (len(repaired) > len(answer) or not _looks_truncated(repaired, _max_token_ceiling())):
@@ -1853,7 +1891,7 @@ async def on_message(message: cl.Message):
         thread_id = cl.user_session.get("id")
         topic_memory = _get_thread_memory().with_last_topic(question)
 
-        if len(chat_history) >= _SUMMARY_TRIGGER:
+        if _should_summarize_history(chat_history):
             chat_history, updated_memory = await _summarize_and_compress_history(
                 chat_history, thread_id, topic_memory
             )
@@ -1861,9 +1899,9 @@ async def on_message(message: cl.Message):
         else:
             chat_history = _trim_chat_history(chat_history)
             _set_thread_memory(topic_memory)
-            await _persist_thread_memory(thread_id, topic_memory)
 
         cl.user_session.set("chat_history", chat_history)
+        await _persist_thread_state(thread_id, _get_thread_memory(), chat_history)
 
     except Exception as e:
         logger.error(

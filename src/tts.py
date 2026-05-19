@@ -1,19 +1,3 @@
-"""
-TTS (Text-to-Speech) helper — edge-tts backend.
-
-edge-tts uses Microsoft Azure Neural TTS under the hood (free, no API key).
-Voices: tr-TR-AhmetNeural (TR male), tr-TR-EmelNeural (TR female),
-        en-US-AriaNeural (EN female), en-US-GuyNeural (EN male).
-
-Usage:
-    wav_bytes = await synthesize("Merhaba!")
-    # Returns None if TTS is disabled or edge-tts is not installed.
-
-Auto language detection:
-    synthesize() picks a Turkish or English voice based on a simple heuristic.
-    Pass voice= explicitly to override.
-"""
-
 from __future__ import annotations
 
 import io

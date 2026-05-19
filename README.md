@@ -190,6 +190,8 @@ Useful commands:
 ```bash
 make check
 make test
+make index          # bulk-index files from data/ into Qdrant
+make index DATA_DIR=data/corpus
 make stop
 make clean
 ```

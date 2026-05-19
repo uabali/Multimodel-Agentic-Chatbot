@@ -1,13 +1,3 @@
-"""
-Unified configuration — OpenAI-compatible LLM backends (llama.cpp / vLLM),
-HuggingFace for embeddings.
-
-The app talks to the LLM via an OpenAI-compatible REST API (Chat Completions).
-This allows swapping the backend without touching agent/RAG logic:
-  - llama.cpp: `llama-server --port 8080`  → http://localhost:8080/v1
-  - vLLM:     `vllm/vllm-openai`           → http://localhost:8000/v1
-"""
-
 from pathlib import Path
 from typing import Optional
 
@@ -118,7 +108,10 @@ class Settings(BaseSettings):
     # vLLM GPU'yu yönettiğinden default cpu
     reranker_device: str = "cpu"
     rerank_top_n: int = 12
-    rerank_fast_mode: bool = False
+    rerank_fast_mode: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("RERANK_FAST_MODE"),
+    )
 
     # ── Web Search ──
     tavily_api_key: str = ""
@@ -135,6 +128,27 @@ class Settings(BaseSettings):
     semantic_cache_enabled: bool = True
     semantic_cache_threshold: float = 0.92
     semantic_cache_ttl_hours: int = 24
+
+    # ── Thread memory / summarization ──
+    summary_trigger_messages: int = Field(
+        default=32,
+        validation_alias=AliasChoices("SUMMARY_TRIGGER_MESSAGES"),
+    )
+    summary_trigger_tokens: int = Field(
+        default=12000,
+        validation_alias=AliasChoices("SUMMARY_TRIGGER_TOKENS"),
+    )
+
+    # ── Qdrant tenant isolation (global retrieval without upload scope) ──
+    qdrant_tenant_filter_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("QDRANT_TENANT_FILTER_ENABLED"),
+    )
+    qdrant_include_shared_corpus: bool = Field(
+        default=True,
+        description="When true, chunks with empty metadata.user_id remain visible (bulk index).",
+        validation_alias=AliasChoices("QDRANT_INCLUDE_SHARED_CORPUS"),
+    )
 
     # ── Confidence ──
     local_search_conf_threshold: float = 0.35

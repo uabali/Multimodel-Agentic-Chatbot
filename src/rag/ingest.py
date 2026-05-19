@@ -437,3 +437,72 @@ def load_directory(data_dir: str = "data") -> list[Document]:
                 logger.warning("%s yüklenemedi: %s", f.name, exc)
 
     return all_docs
+
+
+def index_directory(
+    data_dir: str = "data",
+    *,
+    smart_reindex: bool = False,
+    extra_metadata: dict | None = None,
+) -> list[dict]:
+    """Dizindeki desteklenen dosyaları Qdrant'a indeksler.
+
+    Varsayılan: her dosya için `ingest_file` (idempotent, dosya bazlı sil-yenile).
+    smart_reindex=True: tüm dizini yükleyip `HybridVectorStore.smart_reindex` ile
+    koleksiyonu fingerprint'e göre yeniden oluşturur (offline corpus senkronu).
+    """
+    data_path = Path(data_dir)
+    if not data_path.exists():
+        logger.warning("Dizin bulunamadı: %s", data_dir)
+        return []
+
+    loader = DocumentLoader()
+    files = sorted(
+        f for f in data_path.iterdir()
+        if f.is_file() and f.suffix.lower() in loader.supported_extensions
+    )
+    if not files:
+        logger.warning("İndekslenecek dosya yok: %s", data_dir)
+        return []
+
+    if smart_reindex:
+        from src.rag.vectorstore import get_hybrid_store
+
+        splitter = DocumentSplitter.from_settings()
+        all_chunks: list[Document] = []
+        for f in files:
+            try:
+                docs = loader.load(f)
+            except Exception as exc:
+                logger.warning("%s yüklenemedi: %s", f.name, exc)
+                continue
+            for doc in docs:
+                doc.metadata.setdefault("source_file", f.name)
+                doc.metadata.setdefault("display_name", f.name)
+                doc.metadata.setdefault("file_type", f.suffix.lower().lstrip("."))
+                if extra_metadata:
+                    doc.metadata.update(extra_metadata)
+            all_chunks.extend(splitter.split(docs))
+            logger.info("Hazırlandı: %s", f.name)
+
+        if not all_chunks:
+            return []
+
+        store = get_hybrid_store()
+        reindexed = store.smart_reindex(all_chunks)
+        status = "reindexed" if reindexed else "skipped"
+        return [{
+            "file_name": data_path.name,
+            "chunk_count": len(all_chunks),
+            "status": status,
+            "mode": "smart_reindex",
+        }]
+
+    results: list[dict] = []
+    for f in files:
+        try:
+            results.append(ingest_file(f, extra_metadata=extra_metadata))
+        except Exception as exc:
+            logger.warning("%s indekslenemedi: %s", f.name, exc)
+            results.append({"file_name": f.name, "status": "error", "error": str(exc)})
+    return results

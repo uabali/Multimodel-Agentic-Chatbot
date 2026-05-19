@@ -20,6 +20,7 @@ MAX_PINNED_FACTS = 20
 MAX_PIN_CHARS = 400
 MAX_SUMMARY_TOKENS = 1000
 MAX_TOPIC_CHARS = 200
+MAX_PERSISTED_CHAT_MESSAGES = 100
 
 _PIN_PATTERNS = [
     re.compile(r"^\s*(?:bunu\s+hat[ıi]rla|not\s+al|remember\s+this)\s*[:：-]\s*(.+)\s*$", re.I | re.S),
@@ -199,3 +200,61 @@ def format_memory_context(memory: ThreadMemory | None) -> str:
     if memory.last_topic.strip():
         parts.append("Son konu:\n" + memory.last_topic.strip())
     return "\n\n".join(parts).strip()
+
+
+def format_memory_preferences(memory: ThreadMemory | None) -> str:
+    """RAG generator prompt'u için özet + pin bloğu (last_topic hariç)."""
+    if not memory:
+        return ""
+    parts: list[str] = []
+    if memory.rolling_summary.strip():
+        parts.append(f"Özet: {memory.rolling_summary.strip()}")
+    if memory.pinned_facts:
+        pins = "\n".join(f"- {fact}" for fact in memory.pinned_facts if fact.strip())
+        if pins:
+            parts.append("Kalıcı notlar:\n" + pins)
+    return "\n\n".join(parts).strip()
+
+
+def serialize_chat_history_for_metadata(chat_history: list[dict] | None) -> list[dict]:
+    """SQLite thread metadata için son N mesajı normalize eder."""
+    out: list[dict] = []
+    for item in chat_history or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        out.append({"role": role, "content": content[:4000]})
+    if len(out) > MAX_PERSISTED_CHAT_MESSAGES:
+        out = out[-MAX_PERSISTED_CHAT_MESSAGES:]
+    return out
+
+
+def chat_history_metadata_patch(chat_history: list[dict] | None) -> dict[str, Any]:
+    """Thread metadata'ya yazılacak chat_history slice."""
+    return {"chat_history": serialize_chat_history_for_metadata(chat_history)}
+
+
+def merge_resume_histories(
+    step_history: list[dict] | None,
+    meta_history: list[dict] | None,
+) -> list[dict]:
+    """Chainlit steps ile SQLite metadata chat_history'yi birleştirir."""
+    steps = serialize_chat_history_for_metadata(step_history)
+    meta = serialize_chat_history_for_metadata(meta_history)
+    if not meta:
+        return steps
+    if not steps:
+        return meta
+    if len(meta) >= len(steps):
+        return meta
+    # Steps daha uzun: eski kısım steps'ten, kuyruk metadata'dan (daha güncel persist).
+    tail_len = min(len(meta), len(steps))
+    if tail_len <= 0:
+        return steps
+    merged = steps[:-tail_len] + meta[-tail_len:]
+    if len(merged) > MAX_PERSISTED_CHAT_MESSAGES:
+        merged = merged[-MAX_PERSISTED_CHAT_MESSAGES:]
+    return merged

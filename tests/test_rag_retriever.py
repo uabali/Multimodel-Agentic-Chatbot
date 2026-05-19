@@ -116,6 +116,111 @@ def test_partial_context_with_source_filter_uses_web_search():
     assert decision == "insufficient"
 
 
+def test_weak_dense_gate_blocks_web_for_partial_global_query():
+    from src.agent.graph import _grader_decision
+
+    decision = _grader_decision({
+        "relevance": "no",
+        "grader_reason": "partial",
+        "retrieval_gate": "weak",
+        "source_filter": "",
+        "session_uploads": [],
+    })
+
+    assert decision == "refuse"
+
+
+def test_weak_dense_gate_allows_web_when_scoped_to_upload():
+    from src.agent.graph import _grader_decision
+
+    decision = _grader_decision({
+        "relevance": "no",
+        "grader_reason": "partial",
+        "retrieval_gate": "weak",
+        "source_filter": "uploaded.pdf",
+    })
+
+    assert decision == "insufficient"
+
+
+def test_tenant_filter_includes_user_and_shared_corpus():
+    from src.agent.nodes import _build_source_filter
+    from qdrant_client import models as qmodels
+
+    filt = _build_source_filter("", [], user_id="admin")
+
+    assert filt is not None
+    assert isinstance(filt, qmodels.Filter)
+    must = filt.must or []
+    assert len(must) == 1
+    inner = must[0]
+    assert isinstance(inner, qmodels.Filter)
+    assert inner.should is not None
+    assert len(inner.should) == 2
+
+
+def test_assemble_rag_context_appends_memory_preferences():
+    from src.agent.nodes import assemble_rag_context
+    from langchain_core.documents import Document
+
+    assembly = assemble_rag_context(
+        documents=[Document(page_content="Belge parçası", metadata={"source_file": "a.pdf"})],
+        vision_context="",
+        rag_history=[],
+        answer_question="Özetle",
+        retrieval_trace=[],
+        output_tokens=512,
+        memory_preferences="Cevaplar kısa olsun.",
+    )
+
+    assert "KULLANICI TERCİHLERİ" in assembly.system_content
+    assert "Cevaplar kısa olsun" in assembly.system_content
+
+
+def test_rerank_fast_mode_uses_mini_model(monkeypatch):
+    from src.agent import nodes
+
+    monkeypatch.setattr(nodes.settings, "use_rerank", True)
+    monkeypatch.setattr(nodes.settings, "rerank_fast_mode", True)
+    nodes._RerankerRegistry._instance = None
+
+    captured = {}
+
+    def fake_create_reranker(*, model_name, device):
+        captured["model_name"] = model_name
+        return object()
+
+    monkeypatch.setattr("src.rag.reranker.create_reranker", fake_create_reranker)
+    nodes._RerankerRegistry.get()
+
+    assert captured["model_name"] == "fast"
+
+
+@pytest.mark.anyio
+async def test_weak_dense_gate_grader_refuses_without_llm(monkeypatch):
+    from src.agent import nodes
+
+    monkeypatch.setattr(nodes, "_observe_node", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nodes.settings, "grader_conf_high", 0.75)
+
+    result = await nodes.grader_node({
+        "question": "Belgedeki önemli bulguları özetle",
+        "retrieval_gate": "weak",
+        "source_filter": "",
+        "session_uploads": [],
+        "documents": [
+            Document(
+                page_content="Bu parça alakasız kısa bir metindir.",
+                metadata={"source_file": "other.pdf", "chunk_index": 0, "rerank_score": 0.001},
+            )
+        ],
+    })
+
+    assert result["relevance"] == "no"
+    assert result["grader_reason"] == "insufficient_context"
+    assert result["refusal_mode"] is True
+
+
 def test_parse_grader_reason_supports_extended_enum():
     from src.agent.nodes import _parse_grader_payload, _parse_grader_reason
 
