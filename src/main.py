@@ -580,6 +580,17 @@ async def on_chat_start():
     cl.user_session.set("retrieval_strategy", settings.retrieval_strategy)
     cl.user_session.set("use_rerank", settings.use_rerank)
 
+    await cl.context.emitter.set_commands([
+        {
+            "id": "Web Search",
+            "description": "Yanıtı doğrudan güncel web aramasıyla üret.",
+            "icon": "globe",
+            "button": True,
+            "persistent": True,
+            "selected": False,
+        }
+    ])
+
     # Chat Settings widget'larini gonder
     await cl.ChatSettings(
         [
@@ -785,6 +796,7 @@ async def on_audio_end():
         )
         _a_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
         _a_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
+        _a_force_web = False
         _a_trace = _langsmith_trace_context(
             "chainlit_audio",
             audio_input_type,
@@ -801,6 +813,7 @@ async def on_audio_end():
                 max_tokens=_a_max_tok,
                 retrieval_strategy=_a_strategy,
                 use_rerank=_a_rerank,
+                force_web_search=_a_force_web,
                 trace_context=_a_trace,
                 memory_hash=_audio_memory_hash,
             ):
@@ -837,6 +850,7 @@ async def on_audio_end():
                 max_tokens=_a_max_tok,
                 retrieval_strategy=_a_strategy,
                 use_rerank=_a_rerank,
+                force_web_search=_a_force_web,
                 trace_context={**_a_trace, "attempt": "fallback"},
                 memory_hash=_audio_memory_hash,
             )
@@ -907,9 +921,10 @@ _SHORT_ANSWER_RE = re.compile(r"\b(k[ıi]sa|özet|ozet|tek\s+c[üu]mle|brief|sho
 _LONG_ANSWER_RE = re.compile(r"\b(detayl[ıi]|ayr[ıi]nt[ıi]l[ıi]|uzun|kapsaml[ıi]|devam\s+et|tamam[ıi]n[ıi]|t[üu]m[üu]n[üu]|detailed|continue)\b", re.IGNORECASE)
 _DOCUMENT_SUMMARY_RE = re.compile(
     r"\b(belge\w*|belgedeki|dok[üu]man\w*|dosya\w*|pdf|rapor\w*|document|file)\b.*"
-    r"\b(özet|ozet|summary|ana\s+konu|konusu|bulgu\w*|yöntem|yontem|sonuç|sonuc|method|findings|conclusion)\b|"
-    r"\b(özet|ozet|summary|ana\s+konu|konusu|bulgu\w*|yöntem|yontem|sonuç|sonuc|method|findings|conclusion)\b.*"
-    r"\b(belge\w*|belgedeki|dok[üu]man\w*|dosya\w*|pdf|rapor\w*|document|file)\b",
+    r"\b(özet\w*|ozet\w*|summary|ana\s+konu|konusu|bulgu\w*|yöntem|yontem|sonuç|sonuc|method|findings|conclusion)\b|"
+    r"\b(özet\w*|ozet\w*|summary|ana\s+konu|konusu|bulgu\w*|yöntem|yontem|sonuç|sonuc|method|findings|conclusion)\b.*"
+    r"\b(belge\w*|belgedeki|dok[üu]man\w*|dosya\w*|pdf|rapor\w*|document|file)\b|"
+    r"\b(bunu|şunu|sunu|yüklediğim|yukledigim|uploaded)\b.*\b(özet\w*|ozet\w*|summary|ana\s+konu|konusu|bulgu\w*|sonuç|sonuc)\b",
     re.IGNORECASE,
 )
 _SIMPLE_MATH_RE = re.compile(r"^[\d\s\+\-\*\/\(\)\^.,]+$|(\byar[ıi]s[ıi]\b|\bkat[ıi]\b|\bhesapla\b|\bcalculate\b)", re.IGNORECASE)
@@ -930,12 +945,16 @@ def _dynamic_answer_token_budget(question: str, *, cap: int | None = None, input
     else:
         desired = 1024
 
-    if _DOCUMENT_SUMMARY_RE.search(q):
-        desired = max(desired, 1024)
-    elif _SHORT_ANSWER_RE.search(q):
-        desired = min(desired, 512)
+    is_doc_summary = bool(_DOCUMENT_SUMMARY_RE.search(q))
+    if is_doc_summary:
+        desired = max(desired, 1408)
+    if _SHORT_ANSWER_RE.search(q):
+        if is_doc_summary:
+            desired = min(desired, 768)
+        else:
+            desired = min(desired, 512)
     if _LONG_ANSWER_RE.search(q):
-        desired = max(desired, 1280)
+        desired = max(desired, 1536)
     if len(q) > 300:
         desired = max(desired, 1152)
     return max(128, min(desired, hard_cap, _max_token_ceiling()))
@@ -949,6 +968,11 @@ def _looks_truncated(answer: str, budget: int) -> bool:
     if token_count < int(budget * 0.85):
         return False
     return not re.search(r"([.!?…]|```)\s*$", answer.strip())
+
+
+def _is_web_search_command(message: cl.Message) -> bool:
+    """Composer'daki Web Search command/button seçimini okur."""
+    return str(getattr(message, "command", "") or "").strip().lower() == "web search"
 
 
 async def _summarize_and_compress_history(
@@ -1518,6 +1542,7 @@ async def on_message(message: cl.Message):
         if _sess_strategy not in _allowed_strategies:
             _sess_strategy = settings.retrieval_strategy
         _sess_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
+        _sess_force_web = _is_web_search_command(message)
         _text_trace = _langsmith_trace_context(
             "chainlit_text",
             agent_input_type,
@@ -1537,6 +1562,7 @@ async def on_message(message: cl.Message):
                     max_tokens=_sess_max_tok,
                     retrieval_strategy=_sess_strategy,
                     use_rerank=_sess_rerank,
+                    force_web_search=_sess_force_web,
                     trace_context=_text_trace,
                     memory_hash=thread_memory_hash,
                 ),
@@ -1554,7 +1580,11 @@ async def on_message(message: cl.Message):
                                 gen = delta.get("generation")
                                 if isinstance(gen, str) and gen.strip():
                                     latest_full_generation = gen
-                                if _node_name == "grader" and delta.get("relevance") == "no":
+                                if (
+                                    _node_name == "grader"
+                                    and delta.get("relevance") == "no"
+                                    and delta.get("grader_reason") in {"partial", "needs_live_data"}
+                                ):
                                     async with cl.Step(name="Belgeler yetersiz — web araması devreye giriyor", type="tool") as _step:
                                         _step.output = "RAG sonuçları soruyu yanıtlamıyor, web araması başlatılıyor."
                     continue
@@ -1605,6 +1635,7 @@ async def on_message(message: cl.Message):
                 max_tokens=_sess_max_tok,
                 retrieval_strategy=_sess_strategy,
                 use_rerank=_sess_rerank,
+                force_web_search=_sess_force_web,
                 trace_context={**_text_trace, "attempt": "fallback_exception"},
                 memory_hash=thread_memory_hash,
             )
@@ -1632,12 +1663,38 @@ async def on_message(message: cl.Message):
                     max_tokens=_sess_max_tok,
                     retrieval_strategy=_sess_strategy,
                     use_rerank=_sess_rerank,
+                    force_web_search=_sess_force_web,
                     trace_context={**_text_trace, "attempt": "fallback_empty_stream"},
                     memory_hash=thread_memory_hash,
                 )
             except Exception as exc:
                 logger.error("Fallback ainvoke de başarısız: %s", exc)
             answer = (answer or "").strip() or "Bir hata oluştu, lütfen tekrar deneyin."
+
+        if _looks_truncated(answer, _sess_max_tok):
+            logger.warning("Yanıt kesilmiş görünüyor, geniş bütçeli fallback çalışıyor")
+            try:
+                repaired = await arun_agent(
+                    question=question,
+                    chat_history=lc_history,
+                    source_filter=source_filter,
+                    image_data=agent_image_data or None,
+                    input_type=agent_input_type,
+                    session_uploads=session_uploads,
+                    temperature=_sess_temp,
+                    max_tokens=_max_token_ceiling(),
+                    retrieval_strategy=_sess_strategy,
+                    use_rerank=_sess_rerank,
+                    force_web_search=_sess_force_web,
+                    trace_context={**_text_trace, "attempt": "fallback_truncated_stream"},
+                    memory_hash=thread_memory_hash,
+                )
+                repaired = (repaired or "").strip()
+                if repaired and (len(repaired) > len(answer) or not _looks_truncated(repaired, _max_token_ceiling())):
+                    answer = repaired
+                    final_parts = [answer]
+            except Exception as exc:
+                logger.error("Kesilmiş yanıt fallback başarısız: %s", exc)
 
         # RAG kaynakları — Chainlit Text elementleri olarak ekle (açılır/kapanır)
         source_elements: list[cl.Text] = []

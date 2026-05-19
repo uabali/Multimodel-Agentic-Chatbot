@@ -1,4 +1,5 @@
 from langchain_core.messages import AIMessage
+import pytest
 
 from src.agent.nodes import _build_contextual_web_query, _compact_web_query, _web_docs_from_result, _web_fallback_answer, append_used_sources
 from src.agent.routing import keyword_route, is_web_query
@@ -25,6 +26,48 @@ def test_answer_quality_followups_do_not_route_to_web():
 def test_core_live_queries_still_route_to_web():
     assert keyword_route("tamam bana güncel olarak euro fiyatını araştır") == "web"
     assert keyword_route("bugün dolar kuru ne kadar?") == "web"
+
+
+def test_init_state_carries_force_web_search():
+    from src.agent import graph
+
+    state = graph._init_state("selam", force_web_search=True)
+
+    assert state["force_web_search"] is True
+
+
+def test_web_search_command_detection():
+    from types import SimpleNamespace
+    import src.main as main
+
+    assert main._is_web_search_command(SimpleNamespace(command="Web Search")) is True
+    assert main._is_web_search_command(SimpleNamespace(command="")) is False
+
+
+@pytest.mark.anyio
+async def test_force_web_search_routes_normal_question_to_web(monkeypatch):
+    from src.agent import graph
+    from src.agent import nodes
+
+    monkeypatch.setattr(nodes, "_observe_node", lambda *args, **kwargs: None)
+    state = graph._init_state("selam nasılsın?", force_web_search=True)
+
+    routed = await nodes.router_node(state)
+
+    assert routed["route"] == "web"
+
+
+@pytest.mark.anyio
+async def test_force_web_search_disabled_keeps_existing_direct_route(monkeypatch):
+    from src.agent import graph
+    from src.agent import nodes
+
+    monkeypatch.setattr(nodes, "_observe_node", lambda *args, **kwargs: None)
+    state = graph._init_state("selam nasılsın?", force_web_search=False)
+
+    routed = await nodes.router_node(state)
+
+    assert routed["route"] == "direct"
 
 
 def test_contextual_web_query_uses_previous_product_for_price_followup():

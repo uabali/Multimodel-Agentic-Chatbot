@@ -65,7 +65,7 @@ def test_source_filter_irrelevant_does_not_trigger_web_search():
         "source_filter": "uploaded.pdf",
     })
 
-    assert decision == "sufficient"
+    assert decision == "refuse"
 
 
 def test_source_filter_live_data_still_triggers_web_search():
@@ -104,12 +104,27 @@ def test_partial_context_without_source_filter_uses_web_search():
     assert decision == "insufficient"
 
 
+def test_partial_context_with_source_filter_uses_web_search():
+    from src.agent.graph import _grader_decision
+
+    decision = _grader_decision({
+        "relevance": "no",
+        "grader_reason": "partial",
+        "source_filter": "uploaded.pdf",
+    })
+
+    assert decision == "insufficient"
+
+
 def test_parse_grader_reason_supports_extended_enum():
-    from src.agent.nodes import _parse_grader_reason
+    from src.agent.nodes import _parse_grader_payload, _parse_grader_reason
 
     assert _parse_grader_reason('{"relevant":"yes","reason":"sufficient"}') == "sufficient"
     assert _parse_grader_reason('{"relevant":"no","reason":"partial"}') == "partial"
     assert _parse_grader_reason('{"relevant":"no","reason":"insufficient_context"}') == "insufficient_context"
+    assert _parse_grader_reason('{"relevant":"no","reason":"unknown"}') == "insufficient_context"
+    assert _parse_grader_payload('{"relevant":"no","reason":"needs_live_data"}') == ("no", "needs_live_data")
+    assert _parse_grader_payload('relevant no because partial') == ("no", "partial")
 
 
 @pytest.mark.anyio

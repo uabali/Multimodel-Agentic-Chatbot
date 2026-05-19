@@ -53,9 +53,9 @@ class Settings(BaseSettings):
 
     # ── Dual LLM profile (Gemma 4 E4B — liberalleştirildi) ──
     chat_temperature: float = 0.7
-    chat_max_tokens: int = 512
+    chat_max_tokens: int = 768
     rag_temperature: float = 0.0
-    rag_max_tokens: int = 768
+    rag_max_tokens: int = 1536
     router_max_tokens: int = 64
     rag_prompt_version: str = "rag-v2"
     rag_context_safety_margin_tokens: int = 700
@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     # ── Agentic RAG profile (tool calls, multi-turn reasoning) ──
     # Gemma 4 E4B tool calling için yüksek token budget
     agent_temperature: float = 0.1
-    agent_max_tokens: int = 1024
+    agent_max_tokens: int = 1536
 
     # ── Embedding (HuggingFace) ──
     # vLLM GPU'yu yönettiğinden default cpu. docker-compose'da app'a GPU eklenirse cuda.
@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     # Küçük chunk → daha yüksek retrieval precision, daha az irrelevant context
     chunk_size: int = 500
     chunk_overlap: int = 80
-    top_k: int = 4
+    top_k: int = 6
 
     # PDF sayfalarını vision ile OCR/analiz etme limiti. Varsayılan 0'dır:
     # text PDF ingest hızlı kalır, pahalı sayfa başı vision çağrıları sadece
@@ -100,10 +100,10 @@ class Settings(BaseSettings):
 
     # ── Hybrid Retrieval ──
     retrieval_strategy: str = "hybrid"
-    base_k: int = 4
-    fetch_k: int = 30
+    base_k: int = 6
+    fetch_k: int = 40
     lambda_mult: float = 0.6
-    score_threshold: float = 0.70
+    score_threshold: float = 0.62
 
     # ── Dense Gate ──
     # bge-m3 cosine: ilgisiz belgeler ~0.3-0.45 aralığında; 0.45 makul minimum
@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-base"
     # vLLM GPU'yu yönettiğinden default cpu
     reranker_device: str = "cpu"
-    rerank_top_n: int = 8
+    rerank_top_n: int = 12
     rerank_fast_mode: bool = False
 
     # ── Web Search ──

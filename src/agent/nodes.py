@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import datetime
+import json
 import operator
 import logging
 import re
@@ -428,6 +429,26 @@ async def router_node(state: AgentState) -> AgentState:
             tags=["frappe", "router", "vision"],
         )
         return {**state, "route": "vision"}
+
+    if state.get("force_web_search"):
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+        logger.info(
+            "Router → web [reason=force_web_search, uploads=%d, q_len=%d, t=%.3fs]",
+            len(session_uploads), q_len, time.perf_counter() - t0,
+        )
+        _observe_node(
+            "frappe.router_decision",
+            state,
+            outputs={"route": "web", "route_reason": "force_web_search", "elapsed_ms": elapsed_ms},
+            metadata={
+                "route_reason": "force_web_search",
+                "query_chars": q_len,
+                "image_count": 0,
+                "upload_count": len(session_uploads),
+            },
+            tags=["frappe", "router", "web"],
+        )
+        return {**state, "route": "web"}
 
     # Dosya yüklendiyse: deterministik RAG — keyword/LLM routing atlanır.
     if state.get("source_filter"):
@@ -855,6 +876,9 @@ async def retriever_node(state: AgentState) -> AgentState:
             strategy=strategy,
             base_k=settings.base_k,
             max_k=settings.top_k,
+            fetch_k=settings.fetch_k,
+            lambda_mult=settings.lambda_mult,
+            score_threshold=settings.score_threshold,
             use_rerank=use_rerank_val,
             reranker=_RerankerRegistry.get(),
             rerank_top_n=settings.rerank_top_n,
@@ -1112,34 +1136,83 @@ def _grader_max_docs() -> int:
     return int(settings.grader_max_docs)
 
 
+_GRADER_REASONS = {"sufficient", "irrelevant", "partial", "insufficient_context", "needs_live_data"}
+
+
+def _parse_grader_payload(text: str) -> tuple[str, str]:
+    """Grader JSON'unu güvenli okur; bozuk çıktıda regex fallback kullanır."""
+    raw = (text or "").strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, dict):
+        relevant = str(payload.get("relevant", "")).lower().strip()
+        reason = str(payload.get("reason", "")).lower().strip()
+        if relevant not in {"yes", "no"}:
+            relevant = "no"
+        if relevant == "yes":
+            return "yes", "sufficient"
+        if reason not in _GRADER_REASONS:
+            reason = "insufficient_context"
+        return "no", reason
+
+    relevance = _parse_yes_no(raw)
+    reason = _parse_grader_reason(raw) if relevance == "no" else "sufficient"
+    return relevance, reason
+
+
 def _parse_yes_no(text: str, default: str = "no") -> str:
-    """LLM yanıtından 'yes' veya 'no' çıkarır (regex tabanlı, structured output'a bağımlı değil)."""
-    text_lower = text.lower().strip()
-    if re.search(r'\byes\b', text_lower):
-        return "yes"
-    if re.search(r'\bno\b', text_lower):
-        return "no"
+    """LLM yanıtından 'yes' veya 'no' çıkarır (JSON öncelikli, regex fallback)."""
+    raw = (text or "").strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        relevant = str(payload.get("relevant", "")).lower().strip()
+        if relevant in {"yes", "no"}:
+            return relevant
+
+    text_lower = raw.lower()
     if re.search(r'"relevant"\s*:\s*"yes"', text_lower):
         return "yes"
     if re.search(r'"relevant"\s*:\s*"no"', text_lower):
+        return "no"
+    if re.search(r'\byes\b', text_lower):
+        return "yes"
+    if re.search(r'\bno\b', text_lower):
         return "no"
     return default
 
 
 def _parse_grader_reason(text: str) -> str:
     """Grader yanıtından reason alanını çıkarır."""
-    text_lower = text.lower()
+    raw = (text or "").strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        relevant = str(payload.get("relevant", "")).lower().strip()
+        reason = str(payload.get("reason", "")).lower().strip()
+        if relevant == "yes":
+            return "sufficient"
+        return reason if reason in _GRADER_REASONS else "insufficient_context"
+
+    text_lower = raw.lower()
     if "insufficient_context" in text_lower:
         return "insufficient_context"
-    if "sufficient" in text_lower:
-        return "sufficient"
     if "partial" in text_lower:
         return "partial"
     if "needs_live_data" in text_lower:
         return "needs_live_data"
     if "irrelevant" in text_lower:
         return "irrelevant"
-    return ""
+    if "sufficient" in text_lower:
+        return "sufficient"
+    return "insufficient_context"
 
 
 async def grader_node(state: AgentState) -> AgentState:
@@ -1224,8 +1297,7 @@ async def grader_node(state: AgentState) -> AgentState:
                 HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
             ])
             response_text = _coerce_llm_text(response)
-            relevance = _parse_yes_no(response_text)
-            reason = _parse_grader_reason(response_text) if relevance == "no" else ""
+            relevance, reason = _parse_grader_payload(response_text)
             logger.info(
                 "Grader: relevance=%s reason=%s [mode=file_llm, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
                 relevance, reason or "-", len(top_docs), len(documents), doc_chars,
@@ -1323,8 +1395,7 @@ async def grader_node(state: AgentState) -> AgentState:
             HumanMessage(content=f"Question: {question}\n\nDocuments:\n{doc_texts}"),
         ])
         response_text = _coerce_llm_text(response)
-        relevance = _parse_yes_no(response_text)
-        reason = _parse_grader_reason(response_text) if relevance == "no" else ""
+        relevance, reason = _parse_grader_payload(response_text)
         logger.info(
             "Grader: relevance=%s reason=%s [mode=mid_conf, conf=%.3f, docs=%d/%d, doc_chars=%d, llm_t=%.3fs, t=%.3fs]",
             relevance, reason or "-", confidence, len(top_docs), len(documents), doc_chars,
@@ -1611,6 +1682,59 @@ def _source_header(index: int, doc: Document) -> str:
     return f"[Kaynak {index}: {src}" + (f", Sayfa {page}" if page and str(page) not in {"", "?"} else "") + "]"
 
 
+def _context_signature(text: str) -> str:
+    """Context dedupe için metni küçük ve kararlı bir imzaya indirger."""
+    normalized = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    return normalized[:700]
+
+
+def _context_overlap_score(question: str, content: str) -> float:
+    """Soru-terim örtüşmesiyle çok zayıf chunk'ları ayıklamak için hafif skor üretir."""
+    from src.rag.retriever import _tokenize_for_overlap
+
+    terms = _tokenize_for_overlap(question)
+    if not terms:
+        return 0.0
+    normalized_content = " ".join(_tokenize_for_overlap(content))
+    if not normalized_content:
+        return 0.0
+    hits = sum(1 for term in terms if term in normalized_content)
+    return hits / max(len(terms), 1)
+
+
+def _prepare_context_documents(documents: list[Document], question: str) -> list[Document]:
+    """Decompose/recompose öncesi kısa, tekrar veya belirgin zayıf chunk'ları temizler."""
+    if not documents:
+        return []
+
+    unique_docs: list[Document] = []
+    seen: set[str] = set()
+    for doc in documents:
+        content = (doc.page_content or "").strip()
+        if len(content) < 40:
+            continue
+        signature = _context_signature(content)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique_docs.append(doc)
+
+    if len(unique_docs) <= 2:
+        return unique_docs
+
+    scored = [(doc, _context_overlap_score(question, doc.page_content or "")) for doc in unique_docs]
+    has_grounded_matches = sum(1 for _, score in scored if score > 0.0) >= 2
+    if not has_grounded_matches:
+        return unique_docs
+
+    kept: list[Document] = []
+    for doc, score in scored:
+        meta = getattr(doc, "metadata", {}) or {}
+        if score > 0.0 or meta.get("type") == "web_search":
+            kept.append(doc)
+    return kept or unique_docs[:2]
+
+
 def assemble_rag_context(
     *,
     documents: list[Document],
@@ -1623,6 +1747,7 @@ def assemble_rag_context(
     """Build bounded RAG context and mark retrieval_trace entries used in prompt."""
     context_parts: list[str] = []
     used_chunk_ids: list[str] = []
+    documents = _prepare_context_documents(documents, answer_question)
 
     if vision_context:
         context_parts.append(f"[Görsel Analizi]\n{vision_context}")
@@ -1873,7 +1998,7 @@ async def generator_node(state: AgentState) -> AgentState:
         "retry_path": "primary",
     }
 
-    if state.get("refusal_mode") or state.get("grader_reason") == "insufficient_context":
+    if state.get("refusal_mode") or state.get("grader_reason") in {"insufficient_context", "irrelevant"}:
         generation = (
             "Bu soruyu yanıtlayabilecek yeterli bağlam yüklenen belgelerde bulunamadı. "
             "Bu yüzden bağlam dışı bir yanıt üretmiyorum."

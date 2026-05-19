@@ -142,15 +142,11 @@ def _grader_decision(state: AgentState) -> str:
     would_loop = reason in {"partial", "needs_live_data"}
     if int(state.get("retry_count") or 0) >= 1 and would_loop:
         return "sufficient"
-    if state.get("source_filter"):
-        if reason == "needs_live_data":
-            return "insufficient"
-        return "sufficient"
-    if reason == "insufficient_context":
+    if reason in {"irrelevant", "insufficient_context"}:
         return "refuse"
-    if reason == "partial":
+    if reason in {"partial", "needs_live_data"}:
         return "insufficient"
-    return "insufficient"
+    return "refuse"
 
 
 
@@ -279,6 +275,7 @@ def _init_state(
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
+    force_web_search: bool = False,
 ) -> AgentState:
     """Kısa: `_init_state` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     from src.config import settings as _s
@@ -300,6 +297,7 @@ def _init_state(
         "max_tokens": max_tokens if max_tokens is not None else _s.chat_max_tokens,
         "retrieval_strategy": retrieval_strategy or _s.retrieval_strategy,
         "use_rerank": use_rerank if use_rerank is not None else _s.use_rerank,
+        "force_web_search": bool(force_web_search),
         "retrieval_trace": [],
         "retrieval_gate": "",
         "refusal_mode": False,
@@ -399,6 +397,7 @@ def run_agent(
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
+    force_web_search: bool = False,
     trace_context: dict | None = None,
     memory_hash: str = "",
 ) -> str:
@@ -406,7 +405,7 @@ def run_agent(
     trace_context = _trace_with_history(trace_context, chat_history)
     state = _init_state(
         question, chat_history, source_filter, image_data, input_type,
-        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank,
+        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
     )
     config = _graph_config(
         run_name="frappe.sync_run",
@@ -436,6 +435,7 @@ async def arun_agent(
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
+    force_web_search: bool = False,
     trace_context: dict | None = None,
     memory_hash: str = "",
 ) -> str:
@@ -443,7 +443,7 @@ async def arun_agent(
     trace_context = _trace_with_history(trace_context, chat_history)
     state = _init_state(
         question, chat_history, source_filter, image_data, input_type,
-        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank,
+        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
     )
     config = _graph_config(
         run_name=_turn_run_name("frappe.chat_turn", trace_context),
@@ -474,6 +474,7 @@ async def astream_agent(
     max_tokens: int | None = None,
     retrieval_strategy: str | None = None,
     use_rerank: bool | None = None,
+    force_web_search: bool = False,
     trace_context: dict | None = None,
     memory_hash: str = "",
 ):
@@ -500,6 +501,8 @@ async def astream_agent(
     def _should_use_semantic_cache() -> bool:
         """Kısa: `_should_use_semantic_cache` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         if is_memory_command(question):
+            return False
+        if force_web_search:
             return False
         if not (_s.semantic_cache_enabled and not image_data and input_type == "text"):
             return False
@@ -546,7 +549,7 @@ async def astream_agent(
     collected_generation = ""
     state = _init_state(
         question, chat_history, source_filter, image_data, input_type,
-        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank,
+        session_uploads, temperature, max_tokens, retrieval_strategy, use_rerank, force_web_search,
     )
     config = _graph_config(
         run_name=_turn_run_name("frappe.chat_turn", trace_context),

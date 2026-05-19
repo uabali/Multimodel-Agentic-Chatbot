@@ -67,6 +67,7 @@ class AgentState(TypedDict):
     max_tokens: int
     retrieval_strategy: str
     use_rerank: bool
+    force_web_search: bool
 
     # Retrieval explainability — her chunk için per-stage skorlar.
     # Her eleman: {chunk_id, hybrid_score, rerank_score, used_in_context}
