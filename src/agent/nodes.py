@@ -61,12 +61,14 @@ from src.agent.prompts import (
     REWRITER_SYSTEM_PROMPT,
     GRADER_SYSTEM_PROMPT,
     RAG_WITH_CONTEXT_SYSTEM_PROMPT,
+    WEB_WITH_CONTEXT_SYSTEM_PROMPT,
     RAG_NO_CONTEXT_SYSTEM_PROMPT,
     build_generator_prompt,
     select_vision_prompt,
 )
 from src.config import settings
 from src.rag.llm import count_message_tokens, count_tokens
+from src.security.url_guard import URLFetchError, fetch_public_url_text
 
 logger = logging.getLogger(__name__)
 
@@ -1030,18 +1032,22 @@ def _score_lookup_with_filter(vectorstore, query: str, k: int, qdrant_filter):
 
 def _record_to_web_document(record, *, provider: str, query: str, retrieved_at: str) -> Document:
     """Convert a structured web result record into a RAG document."""
+    domain = _web_domain(record.url).replace("www.", "")
+    excerpt = re.sub(r"\s+", " ", (record.content or "").strip())[:900]
     return Document(
         page_content=(
             f"Title: {record.title}\n"
             f"Published: {record.published or 'unknown'}\n"
             f"URL: {record.url}\n"
-            f"Snippet: {record.content}"
+            f"Snippet: {excerpt}"
         )[:2500],
         metadata={
             "display_name": record.title,
             "source": record.url,
             "url": record.url,
             "title": record.title,
+            "domain": domain,
+            "excerpt": excerpt,
             "published": record.published,
             "provider": provider,
             "result_index": record.index,
@@ -1075,6 +1081,114 @@ def _web_domain(url: str) -> str:
         return ""
 
 
+def _web_source_quality_score(record) -> int:
+    """Prefer official/reference sources without dropping weaker results entirely."""
+    title = str(getattr(record, "title", "") or "")
+    url = str(getattr(record, "url", "") or "")
+    content = str(getattr(record, "content", "") or "")
+    haystack = f"{title} {url}".lower()
+    domain = _web_domain(url).replace("www.", "")
+    score = 0
+
+    government_suffixes = (".gov", ".gov.tr", ".gob", ".gov.uk", ".gc.ca", ".gouv.fr", ".go.jp")
+    if domain.endswith(government_suffixes) or ".gov." in domain:
+        score += 30
+    if domain.endswith((".edu", ".edu.tr", ".ac.uk")):
+        score += 16
+    if any(mark in haystack for mark in ("official", "agency", "ministry", "statistics office", "census bureau")):
+        score += 10
+    if any(mark in haystack for mark in ("release notes", "help center", "documentation", "docs.", "/docs/")):
+        score += 8
+    if any(mark in haystack for mark in ("wikipedia.org", "britannica.com", "encyclopedia.com")):
+        score += 12
+
+    if len(re.sub(r"\s+", " ", content).strip()) >= 120:
+        score += 4
+    if not title.strip() or title.strip().lower() in {"search results", "web results", "result", "untitled"}:
+        score -= 8
+    if len(content.strip()) < 40:
+        score -= 8
+    if any(mark in haystack for mark in ("instagram.com", "facebook.com", "x.com/", "twitter.com", "tiktok.com", "linkedin.com")):
+        score -= 25
+    if any(mark in haystack for mark in ("maps.", "/maps", "map listing", "directory listing", "business listing")):
+        score -= 15
+    if any(mark in haystack for mark in ("reddit.com", "quora.com", "forum", "blogspot.")):
+        score -= 8
+    return score
+
+
+_HTTP_URL_RE = re.compile(r"https?://[^\s<>)\"']+", re.IGNORECASE)
+
+
+def _extract_public_urls(text: str, *, limit: int = 2) -> list[str]:
+    urls: list[str] = []
+    for match in _HTTP_URL_RE.finditer(text or ""):
+        url = match.group(0).rstrip(".,;:!?]")
+        if url not in urls:
+            urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def _html_to_visible_text(raw: str) -> str:
+    """Extract readable text from fetched HTML without adding a hard dependency."""
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(raw, "html.parser")
+        for tag in soup(["script", "style", "noscript", "svg"]):
+            tag.decompose()
+        title = soup.title.get_text(" ", strip=True) if soup.title else ""
+        body = soup.get_text(" ", strip=True)
+        text = f"{title}\n{body}" if title and title not in body[:200] else body
+    except Exception:
+        text = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw or "")
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+async def _docs_from_explicit_urls(question: str) -> list[Document]:
+    docs: list[Document] = []
+    for idx, url in enumerate(_extract_public_urls(question), 1):
+        try:
+            final_url, raw_text = await fetch_public_url_text(url, timeout=8.0, max_bytes=1_500_000)
+        except (URLFetchError, Exception) as exc:
+            logger.warning("Explicit URL fetch failed [%s]: %s", url, exc)
+            continue
+        text = _html_to_visible_text(raw_text)
+        if not text:
+            continue
+        domain = _web_domain(final_url).replace("www.", "")
+        title = text[:90].strip() or final_url
+        excerpt = text[:900].strip()
+        docs.append(Document(
+            page_content=(
+                f"Title: {title}\n"
+                f"Published: unknown\n"
+                f"URL: {final_url}\n"
+                f"Snippet: {excerpt}"
+            )[:2500],
+            metadata={
+                "display_name": title,
+                "source": final_url,
+                "url": final_url,
+                "title": title,
+                "domain": domain,
+                "excerpt": excerpt,
+                "published": "",
+                "provider": "direct_url",
+                "result_index": idx,
+                "chunk_index": idx,
+                "retrieved_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                "query": question,
+                "type": "web_search",
+                "direct_url": True,
+            },
+        ))
+    return docs
+
+
 def _hash_text(text: str) -> str:
     """Kısa: `_hash_text` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     try:
@@ -1093,7 +1207,21 @@ def _web_docs_from_result(result, *, query: str, limit: int | None = None) -> li
             result.text,
             limit=limit or settings.web_search_max_results,
         )
-    records = sorted(records, key=lambda r: _published_sort_key(r.published), reverse=True)
+    deduped_records = []
+    seen_urls: set[str] = set()
+    for record in records:
+        url_key = (getattr(record, "url", "") or "").strip().lower()
+        if url_key and url_key in seen_urls:
+            continue
+        if url_key:
+            seen_urls.add(url_key)
+        deduped_records.append(record)
+    records = deduped_records
+    records = sorted(
+        records,
+        key=lambda r: (_web_source_quality_score(r), _published_sort_key(r.published), -int(getattr(r, "index", 999))),
+        reverse=True,
+    )
     if records:
         return [
             _record_to_web_document(
@@ -1791,7 +1919,12 @@ def assemble_rag_context(
 
     docs_included = len(context_parts) - (1 if vision_context else 0)
     context = "\n\n---\n\n".join(context_parts)
-    system_content = RAG_WITH_CONTEXT_SYSTEM_PROMPT.replace("{context}", context)
+    only_web_context = bool(documents) and not vision_context and all(
+        (getattr(doc, "metadata", {}) or {}).get("type") == "web_search"
+        for doc in documents
+    )
+    prompt_template = WEB_WITH_CONTEXT_SYSTEM_PROMPT if only_web_context else RAG_WITH_CONTEXT_SYSTEM_PROMPT
+    system_content = prompt_template.replace("{context}", context)
 
     prior_chars = sum(len(getattr(m, "content", "") or "") for m in rag_history)
     total_prompt_chars = len(system_content) + prior_chars + len(answer_question)
@@ -1800,7 +1933,7 @@ def assemble_rag_context(
     if total_prompt_chars > max_input_chars:
         safe_ctx_len = max(500, max_input_chars - prior_chars - len(answer_question) - 800)
         context = context[:safe_ctx_len]
-        system_content = RAG_WITH_CONTEXT_SYSTEM_PROMPT.replace("{context}", context)
+        system_content = prompt_template.replace("{context}", context)
         used_chars = min(used_chars, len(context))
         truncated = True
 
@@ -1933,10 +2066,20 @@ async def _retry_generator_with_compact_context(
         return ""
 
     compact_context = "\n\n---\n\n".join(compact_parts)
+    only_web_context = bool(documents) and all(
+        (getattr(doc, "metadata", {}) or {}).get("type") == "web_search"
+        for doc in documents
+    )
+    missing_answer = (
+        "Web araması bu soruyu yanıtlayacak güvenilir ve doğrudan eşleşen bilgi bulamadı."
+        if only_web_context
+        else "Bu bilgi yüklenen belgelerde yer almamaktadır."
+    )
+    source_label = "web kaynakları" if only_web_context else "bağlam"
     system_content = (
-        "Adın Frappe, bir RAG asistanısın. Sadece verilen bağlama dayanarak "
+        f"Adın Frappe, bir RAG asistanısın. Sadece verilen {source_label}na dayanarak "
         "kullanıcının sorusunu aynı dilde, kısa ve doğrudan yanıtla. "
-        "Bağlamda cevap yoksa sadece 'Bu bilgi yüklenen belgelerde yer almamaktadır.' yaz.\n\n"
+        f"Cevap yoksa sadece '{missing_answer}' yaz.\n\n"
         f"Bağlam:\n{compact_context}"
     )
     llm = _get_rag_llm(temperature=0.0, max_tokens=min(settings.rag_max_tokens, 512))
@@ -2241,6 +2384,7 @@ async def web_search_node(state: AgentState) -> AgentState:
     question = state.get("original_question") or state["question"]
     existing_docs = state.get("documents", [])
     search_query = _build_contextual_web_query(question, list(state.get("messages", [])))
+    explicit_url_docs = await _docs_from_explicit_urls(question)
 
     async with cl.Step(name="Web Search", type="tool") as step:
         step.input = search_query
@@ -2248,7 +2392,7 @@ async def web_search_node(state: AgentState) -> AgentState:
         service = _get_web_search_service()
         result = await service.search(search_query) if service else None
 
-        if result is None:
+        if result is None and not explicit_url_docs:
             logger.warning("Web search: Tavily kullanılamıyor veya sonuç yok")
             step.output = "Web search failed."
             _observe_node(
@@ -2276,33 +2420,41 @@ async def web_search_node(state: AgentState) -> AgentState:
             )
             return {**state, "documents": existing_docs, "web_search_error": err}
 
-        web_docs = _web_docs_from_result(result, query=search_query)
-        step.output = f"Found content via {result.provider} ({len(result.text)} chars)."
-        step.elements = [
-            cl.Text(
-                name=f"{result.provider.title()} Results",
-                content=result.text[:2000] + "...",
-                display="inline",
-            )
-        ]
+        web_docs = explicit_url_docs + (_web_docs_from_result(result, query=search_query) if result else [])
+        step.output = (
+            f"Fetched {len(explicit_url_docs)} explicit URL(s) and found content via {result.provider} ({len(result.text)} chars)."
+            if result and explicit_url_docs
+            else f"Found content via {result.provider} ({len(result.text)} chars)."
+            if result
+            else f"Fetched {len(explicit_url_docs)} explicit URL(s)."
+        )
+        if result:
+            step.elements = [
+                cl.Text(
+                    name=f"{result.provider.title()} Results",
+                    content=result.text[:2000] + "...",
+                    display="inline",
+                )
+            ]
 
     domains = sorted({_web_domain(str((d.metadata or {}).get("url") or (d.metadata or {}).get("source") or "")) for d in web_docs})
     domains = [d for d in domains if d]
     dated = [str((d.metadata or {}).get("published") or "") for d in web_docs if (d.metadata or {}).get("published")]
+    provider_name = result.provider if result else "direct_url"
     _observe_node(
         "frappe.web_search_result",
         state,
         inputs={"query_preview": search_query[:180]},
         outputs={
             "status": "success",
-            "provider": result.provider,
+            "provider": provider_name,
             "result_count": len(web_docs),
             "top_domains": " | ".join(domains[:8]),
             "freshest_published": max(dated) if dated else "",
             "latency_ms_by_stage": {"total": round((time.perf_counter() - t0) * 1000, 2)},
         },
         metadata={
-            "web_provider": result.provider,
+            "web_provider": provider_name,
             "web_query_preview": search_query[:180],
             "web_query_hash": _hash_text(search_query),
             "web_result_count": len(web_docs),

@@ -31,6 +31,7 @@ import io
 import wave
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import chainlit as cl
 from chainlit.input_widget import Select, Slider, Switch
@@ -789,14 +790,15 @@ async def on_audio_end():
         # Ses modunda TTS her zaman aktif — streamer oluştur
         audio_tts_streamer = _TtsStreamer.make(enabled=True)
         _a_temp = float(cl.user_session.get("temperature", settings.chat_temperature))
+        _a_force_web = False
         _a_max_tok = _dynamic_answer_token_budget(
             text,
             cap=cl.user_session.get("max_tokens", _max_token_ceiling()),
             input_type=audio_input_type,
+            force_web_search=_a_force_web,
         )
         _a_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
         _a_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
-        _a_force_web = False
         _a_trace = _langsmith_trace_context(
             "chainlit_audio",
             audio_input_type,
@@ -930,7 +932,13 @@ _DOCUMENT_SUMMARY_RE = re.compile(
 _SIMPLE_MATH_RE = re.compile(r"^[\d\s\+\-\*\/\(\)\^.,]+$|(\byar[ıi]s[ıi]\b|\bkat[ıi]\b|\bhesapla\b|\bcalculate\b)", re.IGNORECASE)
 
 
-def _dynamic_answer_token_budget(question: str, *, cap: int | None = None, input_type: str = "text") -> int:
+def _dynamic_answer_token_budget(
+    question: str,
+    *,
+    cap: int | None = None,
+    input_type: str = "text",
+    force_web_search: bool = False,
+) -> int:
     """Per-turn output budget. The settings slider is treated as a maximum cap."""
     q = (question or "").strip()
     hard_cap = _clamp_max_tokens(cap if cap is not None else _max_token_ceiling())
@@ -938,8 +946,8 @@ def _dynamic_answer_token_budget(question: str, *, cap: int | None = None, input
         desired = 1024
     elif _SIMPLE_MATH_RE.search(q):
         desired = 384
-    elif is_web_query(q):
-        desired = 1024
+    elif force_web_search or is_web_query(q):
+        desired = 1280
     elif is_direct_support_query(q):
         desired = 1280
     else:
@@ -960,19 +968,113 @@ def _dynamic_answer_token_budget(question: str, *, cap: int | None = None, input
     return max(128, min(desired, hard_cap, _max_token_ceiling()))
 
 
+def _finish_reason_is_length(obj: object) -> bool:
+    """Return True when LangChain/OpenAI-compatible metadata says output hit max tokens."""
+    if obj is None:
+        return False
+    if isinstance(obj, dict):
+        candidates = [obj.get("finish_reason"), obj.get("stop_reason"), obj.get("done_reason")]
+        choices = obj.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if isinstance(choice, dict):
+                    candidates.append(choice.get("finish_reason"))
+        return any(str(item or "").lower() in {"length", "max_tokens", "max_output_tokens"} for item in candidates)
+    for attr in ("response_metadata", "additional_kwargs", "generation_info"):
+        if _finish_reason_is_length(getattr(obj, attr, None)):
+            return True
+    return False
+
+
 def _looks_truncated(answer: str, budget: int) -> bool:
-    """Kısa: `_looks_truncated` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-    if not answer.strip() or budget <= 0:
+    """Best-effort guard for visibly incomplete model output."""
+    text = (answer or "").strip()
+    if not text or budget <= 0:
         return False
-    token_count = count_tokens(answer)
-    if token_count < int(budget * 0.85):
-        return False
-    return not re.search(r"([.!?…]|```)\s*$", answer.strip())
+    token_count = count_tokens(text)
+    if re.search(r"(?im)^\s*(kaynaklar|sources)\s*:\s*$", text):
+        return True
+    if re.search(r"(?m)(^|\n)\s*[-*•]\s*$", text):
+        return True
+    if text.endswith(("(", "[", "{", "```")):
+        return True
+    near_budget = token_count >= int(budget * 0.85)
+    mid_budget = token_count >= int(budget * 0.45)
+    if mid_budget and text.endswith((":", ",", ";", "-", "–", "—")):
+        return True
+    if re.search(r"\b(göre|olarak|yaklaşık|toplam|nüfusu|population|according to)\s+[\d.,]+$", text, re.IGNORECASE):
+        return True
+    if re.search(r"\b(ve|veya|ile|ama|fakat|çünkü|olarak|göre|and|or|but|because|with|according to)\s*$", text, re.IGNORECASE):
+        return True
+    if near_budget:
+        return not re.search(r"([.!?…\]]|```)\s*$", text)
+    return False
+
+
+def _clean_excerpt(text: str, *, limit: int = 700) -> str:
+    """Remove transport labels from source previews while keeping useful context."""
+    raw = re.sub(r"\s+", " ", (text or "").strip())
+    raw = re.sub(r"(?i)\bTitle:\s*[^:]+?\s+Published:\s*(?:unknown|[\w\-.]+)\s+URL:\s*\S+\s+Snippet:\s*", "", raw)
+    raw = re.sub(r"(?i)\b(?:Title|Published|URL|Snippet):\s*", "", raw)
+    return raw[:limit].rstrip()
+
+
+def _source_domain(url: str) -> str:
+    try:
+        return urlparse(url).netloc.replace("www.", "")
+    except Exception:
+        return ""
+
+
+def _format_web_source_panel(index: int, doc, meta: dict) -> tuple[str, str]:
+    url = meta.get("url") or meta.get("source_url") or meta.get("source") or ""
+    title = meta.get("title") or meta.get("display_name") or url or "Web kaynağı"
+    domain = meta.get("domain") or _source_domain(url)
+    published = meta.get("published") or ""
+    excerpt = meta.get("excerpt") or _clean_excerpt(getattr(doc, "page_content", "") or "")
+    label = " · ".join(part for part in [f"Kaynak {index}", title, domain] if part)
+    lines = [f"Kaynak {index}: {title}"]
+    if domain:
+        lines.append(f"Alan adı: {domain}")
+    if published:
+        lines.append(f"Tarih: {published}")
+    if url:
+        lines.append(f"URL: {url}")
+    if excerpt:
+        lines.extend(["", excerpt])
+    return label, "\n".join(lines).strip()
 
 
 def _is_web_search_command(message: cl.Message) -> bool:
     """Composer'daki Web Search command/button seçimini okur."""
     return str(getattr(message, "command", "") or "").strip().lower() == "web search"
+
+
+_LYRICS_TRANSLATION_RE = re.compile(
+    r"\b(lyrics?|şarkı\s*sözleri|sözleri)\b.*\b(türkçe|turkce|çevir|çeviri|translation|translate)\b|"
+    r"\b(türkçe|turkce|çevir|çeviri|translation|translate)\b.*\b(lyrics?|şarkı\s*sözleri|sözleri)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_disallowed_lyrics_translation_request(question: str) -> bool:
+    return bool(_LYRICS_TRANSLATION_RE.search(question or ""))
+
+
+def _lyrics_translation_refusal(question: str) -> str:
+    if re.search(r"[çğıöşüİı]|\btürkçe\b|\bturkce\b", question or "", re.IGNORECASE):
+        return (
+            "Telif nedeniyle bir şarkının tam sözlerini veya tam Türkçe çevirisini paylaşamam.\n\n"
+            "Ama şunları yapabilirim:\n"
+            "- şarkının kısa özetini çıkarabilirim,\n"
+            "- tema ve duygu analizini yapabilirim,\n"
+            "- belirli kısa bir satırın anlamını açıklayabilirim,\n"
+            "- kendi yazdığım telifsiz Türkçe bir uyarlama hazırlayabilirim."
+        )
+    return (
+        "I can’t provide full copyrighted song lyrics or a full translation.\n\n"
+        "I can summarize the song, explain themes, analyze a short excerpt, or write an original non-infringing adaptation."
+    )
 
 
 async def _summarize_and_compress_history(
@@ -1094,18 +1196,25 @@ def _build_source_elements(docs) -> list[cl.Text]:
 
     seen: set[str] = set()
     elements: list[cl.Text] = []
-    for idx, doc in enumerate(docs, 1):
+    for doc in docs:
         meta = getattr(doc, "metadata", None) or {}
+        idx = len(elements) + 1
         src = meta.get("display_name") or meta.get("source_file", meta.get("source", ""))
         page = meta.get("page", "")
         url = meta.get("url") or meta.get("source_url") or (meta.get("source") if meta.get("type") == "web_search" else "")
         chunk_index = meta.get("chunk_index", "")
 
         src_short = Path(src).name if src and ("/" in src or "\\" in src) else (src or "Bilinmeyen kaynak")
-        dedup_key = f"{src_short}:{page}:{chunk_index}:{url}"
+        is_web = meta.get("type") == "web_search"
+        dedup_key = f"{'web' if is_web else 'doc'}:{url or src_short}:{page}:{'' if is_web else chunk_index}"
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
+
+        if is_web:
+            label, content = _format_web_source_panel(idx, doc, meta)
+            elements.append(cl.Text(name=label, content=content, display="side"))
+            continue
 
         page_str = f" s.{page}" if page and str(page) not in {"", "?"} else ""
         score_parts = []
@@ -1117,7 +1226,7 @@ def _build_source_elements(docs) -> list[cl.Text]:
             except (TypeError, ValueError):
                 score_parts.append(f"{label}={meta[key]}")
         scores = f"\nSkorlar: {', '.join(score_parts)}" if score_parts else ""
-        excerpt = re.sub(r"\s+", " ", (getattr(doc, "page_content", "") or "").strip())[:900]
+        excerpt = _clean_excerpt(getattr(doc, "page_content", "") or "", limit=900)
         url_line = f"\nURL: {url}" if url else ""
         label = f"Kaynak {idx} · {src_short}{page_str}"
         content = (
@@ -1237,6 +1346,15 @@ async def on_message(message: cl.Message):
         if is_memory_command(cmd):
             thinking_msg.content = "Hatırlamamı istediğin notu anlayamadım. Örnek: `bunu hatırla: rapor dili akademik olsun`"
             await thinking_msg.update()
+            return
+
+        if _is_disallowed_lyrics_translation_request(cmd):
+            answer = _lyrics_translation_refusal(cmd)
+            thinking_msg.content = answer
+            await thinking_msg.update()
+            chat_history.append({"role": "user", "content": question})
+            chat_history.append({"role": "assistant", "content": answer})
+            cl.user_session.set("chat_history", _trim_chat_history(chat_history))
             return
 
         # ── File attachments ──
@@ -1529,20 +1647,22 @@ async def on_message(message: cl.Message):
         latest_full_generation = ""
         last_route: str | None = None
         last_documents: list = []
+        stream_hit_length_limit = False
         tts_streamer = _TtsStreamer.make(cl.user_session.get("tts_enabled", False))
 
         _sess_temp = float(cl.user_session.get("temperature", settings.chat_temperature))
+        _sess_force_web = _is_web_search_command(message)
         _sess_max_tok = _dynamic_answer_token_budget(
             question,
             cap=cl.user_session.get("max_tokens", _max_token_ceiling()),
             input_type=agent_input_type,
+            force_web_search=_sess_force_web,
         )
         _allowed_strategies = {"hybrid", "similarity", "mmr", "threshold"}
         _sess_strategy = cl.user_session.get("retrieval_strategy", settings.retrieval_strategy)
         if _sess_strategy not in _allowed_strategies:
             _sess_strategy = settings.retrieval_strategy
         _sess_rerank = bool(cl.user_session.get("use_rerank", settings.use_rerank))
-        _sess_force_web = _is_web_search_command(message)
         _text_trace = _langsmith_trace_context(
             "chainlit_text",
             agent_input_type,
@@ -1610,6 +1730,8 @@ async def on_message(message: cl.Message):
                     payload = ev[1]
                     chunk, meta = (payload if isinstance(payload, tuple) and len(payload) == 2
                                    else (payload, None))
+                    if _finish_reason_is_length(chunk) or _finish_reason_is_length(meta):
+                        stream_hit_length_limit = True
                     content = getattr(chunk, "content", None)
                     if isinstance(content, str) and _should_stream(chunk, meta, content):
                         await thinking_msg.stream_token(content)
@@ -1671,7 +1793,7 @@ async def on_message(message: cl.Message):
                 logger.error("Fallback ainvoke de başarısız: %s", exc)
             answer = (answer or "").strip() or "Bir hata oluştu, lütfen tekrar deneyin."
 
-        if _looks_truncated(answer, _sess_max_tok):
+        if stream_hit_length_limit or _looks_truncated(answer, _sess_max_tok):
             logger.warning("Yanıt kesilmiş görünüyor, geniş bütçeli fallback çalışıyor")
             try:
                 repaired = await arun_agent(
@@ -1693,6 +1815,7 @@ async def on_message(message: cl.Message):
                 if repaired and (len(repaired) > len(answer) or not _looks_truncated(repaired, _max_token_ceiling())):
                     answer = repaired
                     final_parts = [answer]
+                    stream_hit_length_limit = False
             except Exception as exc:
                 logger.error("Kesilmiş yanıt fallback başarısız: %s", exc)
 
@@ -1724,7 +1847,7 @@ async def on_message(message: cl.Message):
         answer_tokens = count_tokens(answer)
         cl.user_session.set("last_answer_token_count", answer_tokens)
         cl.user_session.set("last_answer_token_budget", _sess_max_tok)
-        cl.user_session.set("last_answer_was_truncated", _looks_truncated(answer, _sess_max_tok))
+        cl.user_session.set("last_answer_was_truncated", stream_hit_length_limit or _looks_truncated(answer, _sess_max_tok))
         chat_history.append({"role": "user", "content": question})
         chat_history.append({"role": "assistant", "content": answer})
         thread_id = cl.user_session.get("id")

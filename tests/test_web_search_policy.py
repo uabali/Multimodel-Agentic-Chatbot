@@ -1,7 +1,15 @@
 from langchain_core.messages import AIMessage
 import pytest
 
-from src.agent.nodes import _build_contextual_web_query, _compact_web_query, _web_docs_from_result, _web_fallback_answer, append_used_sources
+from src.agent.nodes import (
+    _build_contextual_web_query,
+    _compact_web_query,
+    _docs_from_explicit_urls,
+    _web_docs_from_result,
+    _web_fallback_answer,
+    append_used_sources,
+    assemble_rag_context,
+)
 from src.agent.routing import keyword_route, is_web_query
 from src.agent.web_search import WebResultFormatter, WebSearchResult
 from src.agent.web_search import WebSearchService
@@ -157,6 +165,164 @@ Source: https://fresh.example/tsla
     assert docs[0].metadata["retrieved_at"]
     assert docs[0].metadata["query"] == "TSLA price"
     assert docs[0].metadata["type"] == "web_search"
+
+
+def test_web_result_documents_prefer_authoritative_sources_over_low_signal_results():
+    result = WebSearchResult(
+        provider="tavily",
+        text="""Web search results for: city population
+
+[Result 1] City Population Map Listing
+Published: 2026-01-01
+Snippet: Map result.
+Source: https://maps.example.com/place/city-population-office
+
+[Result 2] Official Census Agency Population Table
+Published: unknown
+Snippet: The city population is reported as 123,456 in the latest official table with district-level methodology notes.
+Source: https://data.gov.example/census/city-population
+
+[Result 3] Social Post About Population
+Published: 2026-01-02
+Snippet: Somebody mentioned a number.
+Source: https://social.example.com/posts/123
+""",
+    )
+
+    docs = _web_docs_from_result(result, query="city population")
+
+    assert docs[0].metadata["domain"] == "data.gov.example"
+    assert "123,456" in docs[0].metadata["excerpt"]
+
+
+def test_web_result_documents_dedupe_duplicate_urls_before_numbering():
+    result = WebSearchResult(
+        provider="tavily",
+        text="""Web search results for: sample
+
+[Result 1] Same A
+Published: 2026-01-01
+Snippet: First.
+Source: https://same.example/page
+
+[Result 2] Same A Copy
+Published: 2026-01-02
+Snippet: Duplicate.
+Source: https://same.example/page
+
+[Result 3] Different
+Published: 2026-01-03
+Snippet: Other.
+Source: https://other.example/page
+""",
+    )
+
+    docs = _web_docs_from_result(result, query="sample")
+
+    assert [doc.metadata["url"] for doc in docs].count("https://same.example/page") == 1
+    assert len(docs) == 2
+
+
+@pytest.mark.anyio
+async def test_explicit_url_fetch_becomes_primary_web_document(monkeypatch):
+    import src.agent.nodes as nodes
+
+    async def fake_fetch(url, **_kwargs):
+        return url, "<html><title>Model Card</title><body>Gemma model details with context length and Turkish tuning notes.</body></html>"
+
+    monkeypatch.setattr(nodes, "fetch_public_url_text", fake_fetch)
+
+    docs = await _docs_from_explicit_urls("https://model.example/card bu sayfadaki modeli açıkla")
+
+    assert len(docs) == 1
+    assert docs[0].metadata["direct_url"] is True
+    assert docs[0].metadata["domain"] == "model.example"
+    assert "Gemma model details" in docs[0].metadata["excerpt"]
+
+
+def test_web_only_context_uses_web_prompt_not_uploaded_document_refusal():
+    from langchain_core.documents import Document
+
+    docs = [
+        Document(
+            page_content="Title: Release Notes\nPublished: 2026-05-01\nURL: https://help.example/release\nSnippet: Latest version is Example 5.2.",
+            metadata={"type": "web_search", "title": "Release Notes", "url": "https://help.example/release"},
+        )
+    ]
+
+    assembly = assemble_rag_context(
+        documents=docs,
+        vision_context="",
+        rag_history=[],
+        answer_question="en yeni sürüm nedir?",
+        retrieval_trace=[],
+        output_tokens=512,
+    )
+
+    assert "Güncel web arama sonuçlarından bağlam sağlandı" in assembly.system_content
+    assert "Bu bilgi yüklenen belgelerde yer almamaktadır" not in assembly.system_content
+
+
+def test_web_source_panel_hides_transport_labels_for_any_web_document():
+    from langchain_core.documents import Document
+    import src.main as main
+
+    docs = [
+        Document(
+            page_content=(
+                "Title: Official Census Agency Population Table\n"
+                "Published: unknown\n"
+                "URL: https://data.gov.example/census/city-population\n"
+                "Snippet: The city population is reported as 123,456 in the latest official table."
+            ),
+            metadata={
+                "type": "web_search",
+                "display_name": "Official Census Agency Population Table",
+                "title": "Official Census Agency Population Table",
+                "url": "https://data.gov.example/census/city-population",
+                "domain": "data.gov.example",
+                "excerpt": "The city population is reported as 123,456 in the latest official table.",
+            },
+        ),
+        Document(
+            page_content="duplicate",
+            metadata={
+                "type": "web_search",
+                "display_name": "Duplicate",
+                "url": "https://data.gov.example/census/city-population",
+            },
+        ),
+    ]
+
+    label, content = main._format_web_source_panel(1, docs[0], docs[0].metadata)
+
+    assert label.startswith("Kaynak 1")
+    assert "data.gov.example" in content
+    assert "123,456" in content
+    assert "Title:" not in content
+    assert "Snippet:" not in content
+
+
+def test_source_panel_dedupes_and_renumbers_web_results(monkeypatch):
+    from langchain_core.documents import Document
+    from types import SimpleNamespace
+    import src.main as main
+
+    monkeypatch.setattr(
+        main.cl,
+        "Text",
+        lambda name, content, display: SimpleNamespace(name=name, content=content, display=display),
+    )
+    docs = [
+        Document(page_content="A", metadata={"type": "web_search", "title": "A", "url": "https://a.example"}),
+        Document(page_content="A duplicate", metadata={"type": "web_search", "title": "A copy", "url": "https://a.example"}),
+        Document(page_content="B", metadata={"type": "web_search", "title": "B", "url": "https://b.example"}),
+    ]
+
+    elements = main._build_source_elements(docs)
+
+    assert [element.name.split(" · ")[0] for element in elements] == ["Kaynak 1", "Kaynak 2"]
+    assert "Kaynak 2: B" in elements[1].content
 
 
 def test_append_used_sources_only_lists_cited_documents():
