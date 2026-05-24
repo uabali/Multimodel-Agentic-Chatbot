@@ -1,31 +1,70 @@
+# Python
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
 build/
 dist/
 wheels/
-*.egg-info
 
-.venv
+# Virtual environments and local package tooling
+.venv/
+venv/
+env/
+.uv-cache/
+
+# Environment and secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
 
+# Runtime data and user uploads
 data/
 uploads/
 .rag_cache/
 .files/
 *.db
 *.sqlite
+*.sqlite3
 
+# Logs and test/build reports
+*.log
+logs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# OS, editor, and local assistant settings
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+.claude/
+
+# Node/npm artifacts used by MCP helpers
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # llama.cpp downloaded models
 *.gguf
 *.mmproj
+models/
 
-# Claude Code local settings
-.claude/
-
-# Chainlit auto-generated files (not user-customized)
+# Chainlit auto-generated files (keep config.toml tracked)
 .chainlit/translations/
 .chainlit/*.db
+.chainlit/*.sqlite
+.chainlit/*.sqlite3
