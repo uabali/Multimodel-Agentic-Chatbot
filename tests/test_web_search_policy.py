@@ -1,8 +1,11 @@
+import datetime
+
 from langchain_core.messages import AIMessage
 import pytest
 
 from src.agent.nodes import (
     _build_contextual_web_query,
+    _build_web_search_queries,
     _compact_web_query,
     _docs_from_explicit_urls,
     _web_docs_from_result,
@@ -10,7 +13,7 @@ from src.agent.nodes import (
     append_used_sources,
     assemble_rag_context,
 )
-from src.agent.routing import keyword_route, is_web_query
+from src.agent.routing import keyword_route, is_web_query, normalize_web_query
 from src.agent.web_search import WebResultFormatter, WebSearchResult
 from src.agent.web_search import WebSearchService
 
@@ -34,6 +37,30 @@ def test_answer_quality_followups_do_not_route_to_web():
 def test_core_live_queries_still_route_to_web():
     assert keyword_route("tamam bana güncel olarak euro fiyatını araştır") == "web"
     assert keyword_route("bugün dolar kuru ne kadar?") == "web"
+
+
+def test_relative_weather_query_includes_absolute_tomorrow_date():
+    query = normalize_web_query("yarın fethiye hava durumu")
+    tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+
+    assert tomorrow.isoformat() in query
+
+
+def test_prayer_time_query_routes_to_web():
+    assert is_web_query("yarın bayram namazı saat kaçta?")
+
+
+def test_compound_weather_and_prayer_query_splits_into_precise_searches():
+    queries = _build_web_search_queries(
+        "yarın kurban bayramı, yarın için fethiye havadurumu nasıl ve bayram namazı saat kaçta?",
+        [],
+    )
+
+    assert len(queries) == 2
+    assert any("Fethiye Muğla" in query and "hava durumu" in query for query in queries)
+    assert any("Fethiye Muğla" in query and "Kurban Bayramı namazı saati" in query for query in queries)
+    tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+    assert all(str(tomorrow.year) in query for query in queries)
 
 
 def test_init_state_carries_force_web_search():

@@ -14,6 +14,7 @@ SOLID uyumu:
 
 from __future__ import annotations
 
+import datetime
 import re
 
 
@@ -264,9 +265,8 @@ def normalize_web_query(question: str) -> str:
       Bu, Tavily'nin belirsiz snippet yerine gerçek tahmin verisi getirmesini sağlar.
     - Tekli sorgu: tarih ifadesi yoksa "bugün" eklenir.
     """
-    import datetime
-
     normalized = question.strip()
+    normalized = inject_temporal_context(normalized)
     if is_weather_query(normalized):
         normalized = re.sub(r"\bhavadurumu\b", "hava durumu", normalized, flags=re.IGNORECASE)
 
@@ -290,3 +290,46 @@ def normalize_web_query(question: str) -> str:
         ):
             normalized = f"{normalized} bugün"
     return normalized
+
+
+def _format_tr_date(value: datetime.date) -> str:
+    months_tr = {
+        1: "Ocak", 2: "Şubat", 3: "Mart", 4: "Nisan", 5: "Mayıs", 6: "Haziran",
+        7: "Temmuz", 8: "Ağustos", 9: "Eylül", 10: "Ekim", 11: "Kasım", 12: "Aralık",
+    }
+    return f"{value.day} {months_tr[value.month]} {value.year}"
+
+
+def current_date_context(today: datetime.date | None = None) -> str:
+    """Return the current date in a compact Turkish + ISO form for prompts/search."""
+    today = today or datetime.date.today()
+    days_tr = {
+        0: "Pazartesi", 1: "Salı", 2: "Çarşamba", 3: "Perşembe",
+        4: "Cuma", 5: "Cumartesi", 6: "Pazar",
+    }
+    return f"Bugünün tarihi: {_format_tr_date(today)}, {days_tr[today.weekday()]} ({today.isoformat()})."
+
+
+def inject_temporal_context(question: str, today: datetime.date | None = None) -> str:
+    """Add absolute dates for relative Turkish/English time expressions in web queries."""
+    q = re.sub(r"\s+", " ", (question or "").strip())
+    if not q:
+        return q
+    today = today or datetime.date.today()
+    additions: list[str] = []
+    checks = [
+        (r"\bbug[üu]n\b|\btoday\b|\b[şs]u\s*an\b|\bcurrently\b", today, "bugün"),
+        (r"\byar[ıi]n\b|\btomorrow\b", today + datetime.timedelta(days=1), "yarın"),
+        (r"\bd[üu]n\b|\byesterday\b", today - datetime.timedelta(days=1), "dün"),
+        (r"\bbu\s+ak[şs]am\b|\btonight\b", today, "bu akşam"),
+        (r"\bbayram[ıi]n?\s+(?:1\.|birinci)\s+g[üu]n[üu]?\b", today + datetime.timedelta(days=1), "bayramın 1. günü"),
+    ]
+    for pattern, value, label in checks:
+        if re.search(pattern, q, re.IGNORECASE | re.UNICODE):
+            additions.append(f"{label}: {_format_tr_date(value)} ({value.isoformat()})")
+    if not additions:
+        return q
+    suffix = " | tarih bağlamı: " + "; ".join(dict.fromkeys(additions))
+    if suffix.lower() in q.lower():
+        return q
+    return f"{q}{suffix}"

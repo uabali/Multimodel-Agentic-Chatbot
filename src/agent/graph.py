@@ -546,9 +546,13 @@ async def astream_agent(
 
     def _should_use_semantic_cache() -> bool:
         """Kısa: `_should_use_semantic_cache` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+        from src.agent.routing import is_web_query
+
         if is_memory_command(question):
             return False
         if force_web_search:
+            return False
+        if is_web_query(question):
             return False
         if not (_s.semantic_cache_enabled and not image_data and input_type == "text"):
             return False

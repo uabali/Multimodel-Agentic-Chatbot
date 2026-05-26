@@ -336,8 +336,10 @@ def _is_time_sensitive(query: str) -> bool:
     """Sorgunun gerçek zamanlı/tarih duyarlı olup olmadığını döner."""
     markers = (
         "bugün", "today", "şu an", "şuanki", "şimdiki", "right now", "son 24", "last 24",
+        "yarın", "tomorrow", "dün", "yesterday", "bu akşam", "tonight",
         "bu hafta", "this week", "güncel", "latest", "breaking", "son dakika",
         "haber", "fiyat", "price", "kur", "borsa", "hisse", "stock",
+        "bayram", "namaz", "ezan", "imsak", "iftar", "hava durumu", "weather", "tahmin",
     )
     q = query.lower()
     return any(m in q for m in markers)

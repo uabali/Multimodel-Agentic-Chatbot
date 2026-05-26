@@ -201,6 +201,37 @@ async def test_force_web_search_skips_semantic_cache(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_web_queries_skip_semantic_cache(monkeypatch):
+    from src.agent import graph
+    from src.rag.semantic_cache import SemanticCache
+
+    class FailingCache:
+        async def lookup(self, question, cache_ctx=""):
+            raise AssertionError("web queries must not hit semantic cache")
+
+    class FakeGraph:
+        async def astream(self, state, **kwargs):
+            yield ("updates", {"web_search": {"documents": []}})
+
+    async def fake_get_graph_async():
+        return FakeGraph()
+
+    monkeypatch.setattr(SemanticCache, "get", classmethod(lambda cls: FailingCache()))
+    monkeypatch.setattr(graph, "get_graph_async", fake_get_graph_async)
+    monkeypatch.setattr(graph, "_graph_config", lambda **kwargs: None)
+
+    events = [
+        event
+        async for event in graph.astream_agent(
+            "yarın bayram namazı saat kaçta?",
+            memory_hash="abc",
+        )
+    ]
+
+    assert events == [("updates", {"web_search": {"documents": []}})]
+
+
+@pytest.mark.anyio
 async def test_low_quality_semantic_cache_hit_is_ignored(monkeypatch):
     from src.agent import graph
     from src.rag.semantic_cache import SemanticCache

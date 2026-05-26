@@ -47,6 +47,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from src.agent.state import AgentState
 from src.agent.routing import (
+    current_date_context,
     keyword_route,
     is_direct_support_query,
     is_turkish_query,
@@ -55,7 +56,7 @@ from src.agent.routing import (
     is_weather_query,
     normalize_web_query,
 )
-from src.agent.web_search import WebSearchService, WebResultFormatter
+from src.agent.web_search import WebSearchResult, WebSearchService, WebSourceRecord, WebResultFormatter
 from src.agent.prompts import (
     ROUTER_SYSTEM_PROMPT,
     REWRITER_SYSTEM_PROMPT,
@@ -1212,6 +1213,12 @@ def _web_source_quality_score(record) -> int:
         score += 16
     if any(mark in haystack for mark in ("official", "agency", "ministry", "statistics office", "census bureau")):
         score += 10
+    if "diyanet.gov.tr" in domain or "diyanet" in haystack:
+        score += 50
+    if "mgm.gov.tr" in domain or "meteoroloji" in haystack or "meteoroloji genel müdürlüğü" in haystack:
+        score += 40
+    if any(mark in haystack for mark in ("weather.com", "accuweather.com", "ventusky.com", "meteoblue.com")):
+        score += 12
     if any(mark in haystack for mark in ("release notes", "help center", "documentation", "docs.", "/docs/")):
         score += 8
     if any(mark in haystack for mark in ("wikipedia.org", "britannica.com", "encyclopedia.com")):
@@ -2075,6 +2082,14 @@ def assemble_rag_context(
     )
     prompt_template = WEB_WITH_CONTEXT_SYSTEM_PROMPT if only_web_context else RAG_WITH_CONTEXT_SYSTEM_PROMPT
     system_content = prompt_template.replace("{context}", context)
+    if only_web_context:
+        system_content = system_content.replace(
+            "YANIT KURALLARI:",
+            f"{current_date_context()}\n"
+            "Göreli tarihleri bu tarihe göre çöz; kullanıcı 'yarın' derse mutlak tarihi cevapta belirt.\n"
+            "Namaz vakitlerinde Diyanet/resmi kaynakları öncele; resmi kaynak yoksa bunu açıkça belirt.\n\n"
+            "YANIT KURALLARI:",
+        )
     prefs = (memory_preferences or "").strip()
     if prefs and not only_web_context:
         system_content += RAG_MEMORY_PREFERENCES_BLOCK.replace("{memory_preferences}", prefs)
@@ -2087,6 +2102,14 @@ def assemble_rag_context(
         safe_ctx_len = max(500, max_input_chars - prior_chars - len(answer_question) - 800)
         context = context[:safe_ctx_len]
         system_content = prompt_template.replace("{context}", context)
+        if only_web_context:
+            system_content = system_content.replace(
+                "YANIT KURALLARI:",
+                f"{current_date_context()}\n"
+                "Göreli tarihleri bu tarihe göre çöz; kullanıcı 'yarın' derse mutlak tarihi cevapta belirt.\n"
+                "Namaz vakitlerinde Diyanet/resmi kaynakları öncele; resmi kaynak yoksa bunu açıkça belirt.\n\n"
+                "YANIT KURALLARI:",
+            )
         used_chars = min(used_chars, len(context))
         truncated = True
 
@@ -2537,14 +2560,15 @@ async def web_search_node(state: AgentState) -> AgentState:
     t0 = time.perf_counter()
     question = state.get("original_question") or state["question"]
     existing_docs = state.get("documents", [])
-    search_query = _build_contextual_web_query(question, list(state.get("messages", [])))
+    search_queries = _build_web_search_queries(question, list(state.get("messages", [])))
+    search_query = " | ".join(search_queries)
     explicit_url_docs = await _docs_from_explicit_urls(question)
 
     async with cl.Step(name="Web Search", type="tool") as step:
         step.input = search_query
 
         service = _get_web_search_service()
-        result = await service.search(search_query) if service else None
+        result = await _search_web_queries(service, search_queries)
 
         if result is None and not explicit_url_docs:
             logger.warning("Web search: Tavily kullanılamıyor veya sonuç yok")
@@ -2654,10 +2678,17 @@ _PRODUCT_SUBJECT_PATTERNS = [
     re.compile(r"\b(TESLA|TSLA|APPLE|AAPL|NVIDIA|NVDA|MICROSOFT|MSFT)\b", re.IGNORECASE),
 ]
 _WEB_QUERY_MAX_CHARS = 360
+_WEB_QUERY_MAX_SUBQUERIES = 3
 _CURRENCY_ENTITY_RE = re.compile(
     r"\b(euro|eur|dolar|dollar|usd|try|tl|sterlin|gbp|alt[ıi]n|gram|bitcoin|btc|ethereum|eth)\b",
     re.IGNORECASE | re.UNICODE,
 )
+_PRAYER_QUERY_RE = re.compile(
+    r"\b(bayram\s+namaz[ıi]|namaz|ezan|imsak|iftar|sahur|prayer\s*time)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_TOMORROW_RE = re.compile(r"\b(yar[ıi]n|tomorrow)\b", re.IGNORECASE | re.UNICODE)
+_YESTERDAY_RE = re.compile(r"\b(d[üu]n|yesterday)\b", re.IGNORECASE | re.UNICODE)
 
 
 def _message_text(message: object) -> str:
@@ -2719,6 +2750,105 @@ def _build_contextual_web_query(question: str, prior_messages: list) -> str:
     return _compact_web_query(f"{subject} {normalized} {today}")
 
 
+def _web_target_date(question: str) -> datetime.date:
+    today = datetime.date.today()
+    if _TOMORROW_RE.search(question or ""):
+        return today + datetime.timedelta(days=1)
+    if _YESTERDAY_RE.search(question or ""):
+        return today - datetime.timedelta(days=1)
+    return today
+
+
+def _format_web_query_date(value: datetime.date) -> str:
+    months_tr = {
+        1: "Ocak", 2: "Şubat", 3: "Mart", 4: "Nisan", 5: "Mayıs", 6: "Haziran",
+        7: "Temmuz", 8: "Ağustos", 9: "Eylül", 10: "Ekim", 11: "Kasım", 12: "Aralık",
+    }
+    return f"{value.day} {months_tr[value.month]} {value.year}"
+
+
+def _extract_location_for_web_query(question: str) -> str:
+    q = question or ""
+    if re.search(r"\bfethiye\b", q, re.IGNORECASE | re.UNICODE):
+        return "Fethiye Muğla"
+    city = WebResultFormatter._extract_city(q)
+    if city:
+        return city
+    m = re.search(
+        r"\b([A-ZÇĞİÖŞÜ][a-zçğıöşü]+(?:\s+[A-ZÇĞİÖŞÜ][a-zçğıöşü]+)?)\s+"
+        r"(?:hava\s*durumu|havadurumu|namaz|ezan|imsak|iftar)",
+        q,
+        re.UNICODE,
+    )
+    return m.group(1).strip() if m else ""
+
+
+def _build_web_search_queries(question: str, prior_messages: list) -> list[str]:
+    """Split compound live-data requests into a few precise Tavily queries."""
+    base_query = _build_contextual_web_query(question, prior_messages)
+    asks_weather = is_weather_query(question)
+    asks_prayer = bool(_PRAYER_QUERY_RE.search(question or ""))
+    if not (asks_weather and asks_prayer):
+        return [base_query]
+
+    target_date = _web_target_date(question)
+    date_tr = _format_web_query_date(target_date)
+    location = _extract_location_for_web_query(question) or ""
+    scoped_location = f"{location} " if location else ""
+    queries = [
+        f"{scoped_location}{date_tr} hava durumu tahmini Meteoroloji",
+        f"{scoped_location}{date_tr} Kurban Bayramı namazı saati Diyanet",
+    ]
+    deduped: list[str] = []
+    for query in queries:
+        compact = _compact_web_query(query)
+        if compact and compact not in deduped:
+            deduped.append(compact)
+    return deduped[:_WEB_QUERY_MAX_SUBQUERIES] or [base_query]
+
+
+async def _search_web_queries(service: WebSearchService | None, queries: list[str]) -> WebSearchResult | None:
+    if service is None or not queries:
+        return None
+    results = await asyncio.gather(*(service.search(query) for query in queries), return_exceptions=True)
+    valid: list[WebSearchResult] = []
+    for result in results:
+        if isinstance(result, WebSearchResult):
+            valid.append(result)
+        elif isinstance(result, Exception):
+            logger.warning("Parallel Tavily search failed: %s", result)
+    if not valid:
+        return None
+    if len(valid) == 1:
+        return valid[0]
+    return _merge_web_results(valid, queries)
+
+
+def _merge_web_results(results: list[WebSearchResult], queries: list[str]) -> WebSearchResult:
+    records: list[WebSourceRecord] = []
+    seen_urls: set[str] = set()
+    for result in results:
+        for record in result.records:
+            url_key = (record.url or "").strip().lower()
+            if url_key and url_key in seen_urls:
+                continue
+            if url_key:
+                seen_urls.add(url_key)
+            records.append(WebSourceRecord(
+                index=len(records) + 1,
+                title=record.title,
+                url=record.url,
+                content=record.content,
+                published=record.published,
+            ))
+    merged_query = " | ".join(queries)
+    if records:
+        text = WebSearchService._format_records(merged_query, records)
+    else:
+        text = "\n\n".join(result.text for result in results if result.text)
+    return WebSearchResult(text=text, provider="tavily", records=records)
+
+
 def _compact_web_query(query: str, *, max_chars: int = _WEB_QUERY_MAX_CHARS) -> str:
     """Keep Tavily queries below its hard limit and strip pasted conversation noise."""
     q = re.sub(r"\s+", " ", (query or "").strip())
@@ -2772,6 +2902,7 @@ async def _fast_web_summarize(
     """Web sonuçlarını LLM çağrısıyla özetler; entity isimleri ve rakamları çıkarır."""
     system = (
         "You answer ONLY from the provided web search results.\n"
+        f"{current_date_context()} Use this date to resolve relative words like bugün/today, yarın/tomorrow, and dün/yesterday.\n"
         "Rules:\n"
         "- Respond in the same language as the user's question.\n"
         "- Turkish question → fully Turkish answer.\n"
@@ -2781,6 +2912,8 @@ async def _fast_web_summarize(
         "- Extract SPECIFIC entities: names, prices, percentages, dates, company names.\n"
         "- PRICE/STOCK RULE: Give the latest single value when available, with currency, timestamp/date, market status if present, and one short caveat if sources differ.\n"
         "- RECENCY RULE: Prefer the source/result with the latest explicit date or market timestamp. Do NOT list stale historical values unless needed to explain conflict.\n"
+        "- DATE RULE: Prefer results matching the resolved target date in the Search query; ignore stale pages about other dates unless explaining that no matching result was found.\n"
+        "- OFFICIAL SOURCE RULE: For prayer times, prefer Diyanet or official sources. If no official matching source exists, say official verification was not found before using secondary sources.\n"
         "- If sources conflict, pick the one with the latest date and note it briefly.\n"
         "- Cite each important value/date with bracket citations like [1] or [2], using the result numbers in the provided web results.\n"
         "- Format: use bullet points for multiple facts; prose for single answers.\n"
@@ -2818,13 +2951,14 @@ async def direct_response_node(state: AgentState) -> AgentState:
     # Hızlı yol — gerçek zamanlı web sorguları
     if is_web_query(question):
         service = _get_web_search_service()
-        search_query = _build_contextual_web_query(question, prior_messages)
+        search_queries = _build_web_search_queries(question, prior_messages)
+        search_query = " | ".join(search_queries)
         logger.debug(
-            "Direct: web_fast [query_chars=%d, prior=%d]",
-            len(search_query), len(prior_messages),
+            "Direct: web_fast [queries=%d, query_chars=%d, prior=%d]",
+            len(search_queries), len(search_query), len(prior_messages),
         )
         t_search = time.perf_counter()
-        web_result = await service.search(search_query) if service else None
+        web_result = await _search_web_queries(service, search_queries)
         if web_result:
             logger.debug(
                 "Direct: web_result [provider=%s, chars=%d, search_t=%.3fs]",
