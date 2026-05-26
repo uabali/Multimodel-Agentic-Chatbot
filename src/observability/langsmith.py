@@ -66,12 +66,12 @@ def stable_hash(value: Any, length: int = 12) -> str:
 
 
 def is_langsmith_enabled() -> bool:
-    """Kısa: `is_langsmith_enabled` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-    return bool(settings.app_langsmith_enabled and settings.langsmith_api_key.strip())
+    """Always returns False to completely disable LangSmith tracing."""
+    return False
 
 
 def _redact_text(text: str) -> str:
-    """Kısa: `_redact_text` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    """Redact sensitive fields from logs."""
     if text.startswith("data:image/") or "base64," in text[:120]:
         return _redacted_summary(text, "binary")
     text = _EMAIL_RE.sub("[redacted-email]", text)
@@ -84,7 +84,7 @@ def _redact_text(text: str) -> str:
 
 
 def _redacted_summary(value: str, label: str) -> str:
-    """Kısa: `_redacted_summary` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    """Redacted short summary."""
     return f"[redacted-{label} chars={len(value)} sha256={stable_hash(value)}]"
 
 
@@ -107,13 +107,13 @@ def sanitize_payload(value: Any, key: str | None = None) -> Any:
 
 
 def anonymize_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Kısa: `anonymize_payload` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+    """Anonymize payload dictionary."""
     sanitized = sanitize_payload(payload)
     return sanitized if isinstance(sanitized, dict) else {"payload": sanitized}
 
 
 def safe_preview(text: Any, max_chars: int | None = None) -> str:
-    """Return a short, redacted, single-line preview for LangSmith inspection."""
+    """Return a short, redacted, single-line preview for inspection."""
     if not settings.app_langsmith_preview_enabled:
         return ""
     limit = max(0, int(max_chars or settings.app_langsmith_preview_chars))
@@ -128,12 +128,10 @@ def safe_preview(text: Any, max_chars: int | None = None) -> str:
 
 
 def _doc_source(meta: dict[str, Any]) -> str:
-    """Kısa: `_doc_source` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return str(meta.get("display_name") or meta.get("source_file") or meta.get("source") or "")
 
 
 def _doc_chunk_id(doc: Any, meta: dict[str, Any]) -> str:
-    """Kısa: `_doc_chunk_id` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     source = _doc_source(meta)
     chunk_index = meta.get("chunk_index")
     if source and chunk_index is not None:
@@ -180,29 +178,28 @@ def summarize_retrieval_trace(
     *,
     max_items: int | None = None,
 ) -> dict[str, Any]:
-    """Flatten retrieval explainability into CSV-friendly LangSmith fields."""
+    """Flatten retrieval explainability trace lists."""
     entries = [e for e in list(trace or []) if isinstance(e, dict)]
     limit = max(0, int(max_items or settings.app_langsmith_max_doc_previews))
     top = entries[:limit] if limit else []
 
     def _score(value: Any) -> float | None:
-        """Kısa: `_score` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         return round(float(value), 6) if isinstance(value, (int, float)) else None
 
     top_chunks: list[str] = []
     used_chunks: list[str] = []
     item_summaries: list[dict[str, Any]] = []
     for entry in top:
-        chunk_id = str(entry.get("chunk_id") or "")
+        chunk_id_val = str(entry.get("chunk_id") or "")
         hybrid = _score(entry.get("hybrid_score"))
         rerank = _score(entry.get("rerank_score"))
         used = bool(entry.get("used_in_context"))
-        if chunk_id:
-            top_chunks.append(chunk_id)
+        if chunk_id_val:
+            top_chunks.append(chunk_id_val)
             if used:
-                used_chunks.append(chunk_id)
+                used_chunks.append(chunk_id_val)
         item_summaries.append({
-            "chunk_id": chunk_id,
+            "chunk_id": chunk_id_val,
             "hybrid_score": hybrid,
             "rerank_score": rerank,
             "used_in_context": used,
@@ -217,7 +214,6 @@ def summarize_retrieval_trace(
 
 
 def summarize_source_distribution(docs: list[Any] | tuple[Any, ...] | None) -> str:
-    """Kısa: `summarize_source_distribution` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     counts: Counter[str] = Counter()
     for doc in docs or []:
         meta = getattr(doc, "metadata", {}) or {}
@@ -257,7 +253,6 @@ def get_langsmith_tracer() -> LangChainTracer | None:
 
 
 def _trace_context_value(trace_context: dict[str, Any] | None, key: str, default: Any = None) -> Any:
-    """Kısa: `_trace_context_value` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     if not trace_context:
         return default
     value = trace_context.get(key, default)
@@ -277,7 +272,7 @@ def build_common_metadata(
     max_tokens: int | None = None,
     trace_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build safe metadata for LangSmith runs; never include raw prompt/files."""
+    """Build safe metadata for runs."""
     uploads = [u for u in (session_uploads or []) if u]
     session_id = _trace_context_value(trace_context, "session_id", "")
     user_id = _trace_context_value(trace_context, "user_id", "")
@@ -371,94 +366,19 @@ def build_graph_config(
     }
 
 
-def record_observation(
-    name: str,
-    *,
-    inputs: dict[str, Any] | None = None,
-    outputs: dict[str, Any] | None = None,
-    metadata: dict[str, Any] | None = None,
-    tags: list[str] | None = None,
-    run_type: str = "chain",
-    error: str | None = None,
-) -> str | None:
-    """Create a small manual LangSmith run; never raise into app flow."""
-    client = get_langsmith_client()
-    if client is None:
-        return None
-    run_id = uuid.uuid4()
-    safe_metadata = sanitize_payload(metadata or {})
-    try:
-        client.create_run(
-            name=name,
-            run_type=run_type,
-            id=run_id,
-            inputs=sanitize_payload(inputs or {}),
-            project_name=settings.langsmith_project,
-            start_time=datetime.now(timezone.utc),
-            extra={"metadata": safe_metadata},
-            tags=tags or ["frappe"],
-        )
-        client.update_run(
-            run_id=run_id,
-            outputs=sanitize_payload(outputs or {}),
-            error=error,
-            end_time=datetime.now(timezone.utc),
-            extra={"metadata": safe_metadata},
-            tags=tags or ["frappe"],
-        )
-        return str(run_id)
-    except Exception as exc:
-        logger.warning("LangSmith observation skipped for %s: %s", name, exc)
-        return None
+def record_observation(*args, **kwargs) -> str | None:
+    """Stub no-op to completely disable manual LangSmith runs."""
+    return None
 
 
-def record_semantic_cache_hit(
-    *,
-    question: str,
-    cached_answer: str,
-    cache_ctx: str,
-    trace_context: dict[str, Any] | None = None,
-) -> str | None:
-    """Kısa: `record_semantic_cache_hit` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-    metadata = build_common_metadata(
-        question=question,
-        trace_context={**(trace_context or {}), "cache": "hit"},
-    )
-    return record_observation(
-        "frappe.semantic_cache_hit",
-        inputs={
-            "question_hash": stable_hash(question),
-            "question_chars": len((question or "").strip()),
-            "cache_ctx_hash": stable_hash(cache_ctx),
-        },
-        outputs={"cached_answer_chars": len(cached_answer or "")},
-        metadata=metadata,
-        tags=["frappe", "semantic-cache", "cache-hit"],
-    )
+def record_semantic_cache_hit(*args, **kwargs) -> str | None:
+    """Stub no-op to completely disable semantic cache hit tracking."""
+    return None
 
 
-def record_semantic_cache_miss(
-    *,
-    question: str,
-    cache_ctx: str,
-    trace_context: dict[str, Any] | None = None,
-) -> str | None:
-    """Kısa: `record_semantic_cache_miss` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-    metadata = build_common_metadata(
-        question=question,
-        trace_context={**(trace_context or {}), "cache": "miss"},
-    )
-    return record_observation(
-        "frappe.semantic_cache_miss",
-        inputs={
-            "question_hash": stable_hash(question),
-            "question_chars": len((question or "").strip()),
-            "cache_ctx_hash": stable_hash(cache_ctx),
-        },
-        outputs={"cache_hit": False},
-        metadata=metadata,
-        tags=["frappe", "semantic-cache", "cache-miss"],
-    )
+def record_semantic_cache_miss(*args, **kwargs) -> str | None:
+    """Stub no-op to completely disable semantic cache miss tracking."""
+    return None
 
 
 def record_ingest_observation(

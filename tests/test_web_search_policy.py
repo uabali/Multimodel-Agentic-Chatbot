@@ -348,7 +348,7 @@ def test_source_panel_dedupes_and_renumbers_web_results(monkeypatch):
 
     elements = main._build_source_elements(docs)
 
-    assert [element.name.split(" · ")[0] for element in elements] == ["Kaynak 1", "Kaynak 2"]
+    assert [element.name for element in elements] == ["[Kaynak 1]", "[Kaynak 2]"]
     assert "Kaynak 2: B" in elements[1].content
 
 

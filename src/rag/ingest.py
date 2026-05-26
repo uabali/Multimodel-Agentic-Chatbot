@@ -94,8 +94,120 @@ class DocumentLoader:
 
 
 
+class SemanticParagraphSplitter:
+    """Anlamsal Paragraf ve Başlık Bölücü (Semantic Paragraph Chunker).
+    
+    Metinleri paragraflara (çift satır atlama) ve başlık satırlarına göre ayırır. Paragrafların
+    anlamsal bütünlüğünü bozmadan, ardışık paragrafları chunk_size limitine
+    ulaşana kadar birleştirir. Eğer bir paragraf tek başına chunk_size limitini
+    aşıyorsa, o paragrafı kendi içinde cümle sınırlarına göre böler.
+    """
+    
+    def __init__(self, chunk_size: int = 1200, chunk_overlap: int = 200) -> None:
+        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
+        import re
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        # Cümle bölücü regex: Nokta, soru işareti, ünlem sonrası boşlukları yakalar
+        self.sentence_endings = re.compile(r"(?<=[.!?])\s+")
+
+    def split_text(self, text: str) -> list[str]:
+        """Tek bir metni paragrafları koruyarak böler."""
+        import re
+        if not text.strip():
+            return []
+            
+        # Paragrafları böl. \n\n ve \r\n\r\n durumlarını kapsar.
+        raw_paragraphs = re.split(r"\n\n+", text)
+        paragraphs = [p.strip() for p in raw_paragraphs if p.strip()]
+        
+        chunks: list[str] = []
+        current_chunk_parts: list[str] = []
+        current_length = 0
+        
+        for para in paragraphs:
+            para_len = len(para)
+            
+            # Eğer tek bir paragraf chunk_size'tan büyükse, onu cümle cümle bölmeliyiz
+            if para_len > self.chunk_size:
+                # Önce birikmiş chunk'ı kaydet
+                if current_chunk_parts:
+                    chunks.append("\n\n".join(current_chunk_parts))
+                    current_chunk_parts = []
+                    current_length = 0
+                
+                # Paragrafı cümlelerine ayır
+                sentences = [s.strip() for s in self.sentence_endings.split(para) if s.strip()]
+                current_sub_parts: list[str] = []
+                sub_length = 0
+                
+                for sentence in sentences:
+                    sent_len = len(sentence)
+                    if sub_length + sent_len + 1 > self.chunk_size:
+                        if current_sub_parts:
+                            chunks.append(" ".join(current_sub_parts))
+                        # Overlap (çakışma) ekle
+                        overlap_parts = []
+                        overlap_len = 0
+                        for s in reversed(current_sub_parts):
+                            if overlap_len + len(s) + 1 <= self.chunk_overlap:
+                                overlap_parts.insert(0, s)
+                                overlap_len += len(s) + 1
+                            else:
+                                break
+                        current_sub_parts = overlap_parts
+                        sub_length = overlap_len
+                        
+                    current_sub_parts.append(sentence)
+                    sub_length += sent_len + 1
+                
+                if current_sub_parts:
+                    chunks.append(" ".join(current_sub_parts))
+                continue
+                
+            # Normal paragraf birleştirme mantığı
+            if current_length + para_len + 2 > self.chunk_size:
+                # Yeni paragraf sığmıyor, mevcut chunk'ı ekle
+                chunks.append("\n\n".join(current_chunk_parts))
+                
+                # Overlap (çakışma) için son paragrafları al
+                overlap_parts = []
+                overlap_len = 0
+                for p in reversed(current_chunk_parts):
+                    if overlap_len + len(p) + 2 <= self.chunk_overlap:
+                        overlap_parts.insert(0, p)
+                        overlap_len += len(p) + 2
+                    else:
+                        break
+                current_chunk_parts = overlap_parts
+                current_length = overlap_len
+                
+            current_chunk_parts.append(para)
+            current_length += para_len + 2
+            
+        if current_chunk_parts:
+            chunks.append("\n\n".join(current_chunk_parts))
+            
+        return chunks
+
+    def split_documents(self, documents: list[Document]) -> list[Document]:
+        """Belge listesini döküman seviyesinde böler ve metadataları korur."""
+        split_docs: list[Document] = []
+        for doc in documents:
+            text = doc.page_content
+            chunks = self.split_text(text)
+            for i, chunk in enumerate(chunks):
+                meta = {**doc.metadata}
+                # Başlangıç indeksini (start_index) yaklaşık hesapla
+                start_idx = text.find(chunk[:100]) if len(chunk) > 100 else text.find(chunk)
+                if start_idx != -1:
+                    meta["start_index"] = start_idx
+                split_docs.append(Document(page_content=chunk, metadata=meta))
+        return split_docs
+
+
 class DocumentSplitter:
-    """Langchain RecursiveCharacterTextSplitter wrapper — yapılandırılabilir."""
+    """Anlamsal Paragraf ve Başlık Bölücü (Semantic Paragraph Chunker) wrapper."""
 
     def __init__(
         self,
@@ -104,16 +216,14 @@ class DocumentSplitter:
         separators: list[str] | None = None,
     ) -> None:
         """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-        self._splitter = RecursiveCharacterTextSplitter(
+        # separators parametresi geriye dönük uyumluluk için tutuldu.
+        self._splitter = SemanticParagraphSplitter(
             chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=separators or _PDF_SEPARATORS,
-            strip_whitespace=True,
-            add_start_index=True,
+            chunk_overlap=chunk_overlap
         )
 
     def split(self, documents: list[Document]) -> list[Document]:
-        """Belge listesini chunk'lara böler."""
+        """Belge listesini paragrafların anlamsal bütünlüğünü koruyarak böler."""
         return self._splitter.split_documents(documents)
 
     @classmethod
@@ -315,45 +425,35 @@ class VisualPageIngester:
             result.append((i, buf.getvalue()))
         return result, total_pages
 
-    def _analyse_page(self, page_num: int, image_bytes: bytes) -> str:
-        """Tek sayfayı Gemma 4 vision ile analiz eder; ham metin döner."""
+    async def _analyse_page_async(self, page_num: int, image_bytes: bytes, semaphore: "asyncio.Semaphore") -> str:
+        """Tek sayfayı Gemma vision ile asenkron olarak analiz eder; ham metin döner."""
         from langchain_core.messages import HumanMessage, SystemMessage
         from src.rag.llm import get_rag_llm
 
-        b64 = base64.b64encode(image_bytes).decode()
-        llm = get_rag_llm()
-        try:
-            response = llm.invoke([
-                SystemMessage(content=self._SYSTEM_PROMPT),
-                HumanMessage(content=[
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                    {"type": "text", "text": self._USER_PROMPT},
-                ]),
-            ])
-            return (response.content or "").strip()
-        except Exception as exc:
-            logger.warning("Sayfa %d görsel analizi başarısız: %s", page_num, exc)
-            return ""
+        async with semaphore:
+            b64 = base64.b64encode(image_bytes).decode()
+            llm = get_rag_llm()
+            try:
+                response = await llm.ainvoke([
+                    SystemMessage(content=self._SYSTEM_PROMPT),
+                    HumanMessage(content=[
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        {"type": "text", "text": self._USER_PROMPT},
+                    ]),
+                ])
+                return (response.content or "").strip()
+            except Exception as exc:
+                logger.warning("Sayfa %d görsel analizi başarısız: %s", page_num, exc)
+                return ""
 
-    def ingest_pdf_visuals(
+    async def _ingest_pdf_visuals_async(
         self,
         pdf_path: Path,
         file_id: str,
         display_name: str | None = None,
     ) -> list[Document]:
-        """PDF'in her sayfasını görsel analiz eder; chunk Document listesi döner.
-
-        Sayfalar sıralı olarak işlenir — LLM çağrıları IO-bound ve zaten LLM
-        sunucusunda serileştiği için ThreadPoolExecutor yerine sequential loop
-        hem daha güvenli (asyncio event loop çakışması yok) hem de eşdeğer hızda.
-        """
-        if not self.available():
-            logger.warning(
-                "pdf2image bulunamadı — görsel ingestion atlandı. "
-                "(pip install pdf2image && apt-get install poppler-utils)"
-            )
-            return []
-
+        """PDF'in her sayfasını asenkron ve paralel olarak görsel analiz eder."""
+        import asyncio
         max_pages = settings.pdf_visual_ingest_max_pages
         if max_pages <= 0:
             logger.info("PDF görsel ingestion kapalı: %s", pdf_path.name)
@@ -371,13 +471,19 @@ class VisualPageIngester:
                 len(pages), total_pages, pdf_path.name,
             )
 
+        # 3 concurrent requests to protect embedding/LLM server rate limits
+        semaphore = asyncio.Semaphore(3)
+        tasks = []
+        
+        # Sıralı okumak ve düzgün zip'lemek için sayfaları sıralayarak task'leri oluşturuyoruz
+        sorted_pages = sorted(pages, key=lambda x: x[0])
+        for page_num, image_bytes in sorted_pages:
+            tasks.append(self._analyse_page_async(page_num, image_bytes, semaphore))
+
+        results = await asyncio.gather(*tasks)
+
         docs: list[Document] = []
-        for page_num, image_bytes in sorted(pages, key=lambda x: x[0]):
-            try:
-                text = self._analyse_page(page_num, image_bytes)
-            except Exception as exc:
-                logger.warning("Sayfa %d işlenemedi: %s", page_num, exc)
-                text = ""
+        for (page_num, _), text in zip(sorted_pages, results):
             if not text:
                 continue
             docs.append(Document(
@@ -393,11 +499,32 @@ class VisualPageIngester:
                 },
             ))
             logger.info(
-                "Sayfa %d/%d görsel analizi tamamlandı (%d karakter)",
+                "Sayfa %d/%d görsel analizi asenkron olarak tamamlandı (%d karakter)",
                 page_num, len(pages), len(text),
             )
 
         return docs
+
+    def ingest_pdf_visuals(
+        self,
+        pdf_path: Path,
+        file_id: str,
+        display_name: str | None = None,
+    ) -> list[Document]:
+        """PDF'in her sayfasını paralel/asenkron görsel analiz eder (asyncio.run wrapper)."""
+        import asyncio
+        if not self.available():
+            logger.warning(
+                "pdf2image bulunamadı — görsel ingestion atlandı. "
+                "(pip install pdf2image && apt-get install poppler-utils)"
+            )
+            return []
+
+        try:
+            return asyncio.run(self._ingest_pdf_visuals_async(pdf_path, file_id, display_name))
+        except Exception as exc:
+            logger.warning("PDF görsel paralel ingestion sırasında beklenmedik hata: %s", exc)
+            return []
 
 
 

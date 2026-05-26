@@ -120,7 +120,7 @@ class SemanticCache:
             embedding = await asyncio.to_thread(_cached_embed_query, normalized)
 
             cutoff = time.time() - settings.semantic_cache_ttl_hours * 3600
-            client = get_qdrant_client()
+            client = await asyncio.to_thread(get_qdrant_client)
             query_response = await asyncio.to_thread(
                 client.query_points,
                 collection_name=_COLLECTION,
@@ -169,7 +169,7 @@ class SemanticCache:
 
             normalized = _normalize(question)
             embedding = await asyncio.to_thread(_cached_embed_query, normalized)
-            client = get_qdrant_client()
+            client = await asyncio.to_thread(get_qdrant_client)
             await asyncio.to_thread(
                 client.upsert,
                 collection_name=_COLLECTION,

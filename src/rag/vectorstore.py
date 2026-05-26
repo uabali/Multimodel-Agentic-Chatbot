@@ -48,7 +48,7 @@ def _fingerprint_docs(docs: list[Document]) -> str:
         meta = getattr(doc, "metadata", {}) or {}
         source = str(meta.get("source", ""))
         page = str(meta.get("page", ""))
-        content = (getattr(doc, "page_content", "") or "")[:300]
+        content = getattr(doc, "page_content", "") or ""
         h.update(source.encode("utf-8", errors="ignore"))
         h.update(page.encode("utf-8", errors="ignore"))
         h.update(content.encode("utf-8", errors="ignore"))

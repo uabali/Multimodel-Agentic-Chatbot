@@ -6,12 +6,8 @@ import re
 import uuid
 import os
 import secrets
-import hashlib
-import hmac
 import json
 import io
-import wave
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -101,33 +97,12 @@ def _ensure_auth_secret():
     logger.warning("CHAINLIT_AUTH_SECRET not set; generated a random one for this session.")
 
 
-def _hash_password(password: str, salt: str) -> str:
-    """Kısa: `_hash_password` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 210_000)
-    return dk.hex()
-
-
-def _constant_time_eq(a: str, b: str) -> bool:
-    """Kısa: `_constant_time_eq` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
-
-
-def _chat_history_turns_for_log(chat_history: list | None) -> int:
-    count = 0
-    for item in chat_history or []:
-        role = item.get("role") if isinstance(item, dict) else getattr(item, "role", "")
-        if str(role).lower() in {"user", "human"}:
-            count += 1
-    return count
-
-
-def _message_attachment_count(message: cl.Message) -> int:
-    count = 0
-    for attr in ("elements", "files", "attachments"):
-        items = getattr(message, attr, None) or []
-        if isinstance(items, list):
-            count += len(items)
-    return count
+from src.utils.helpers import (
+    hash_password as _hash_password,
+    constant_time_eq as _constant_time_eq,
+    chat_history_turns_for_log as _chat_history_turns_for_log,
+    message_attachment_count as _message_attachment_count,
+)
 
 
 _ensure_auth_secret()
@@ -364,35 +339,10 @@ async def on_chat_resume(thread):
 
 
 
-_whisper_model = None
-_whisper_loading = False
-
-
-def _get_whisper_model():
-    """Kısa: `_get_whisper_model` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-    global _whisper_model
-    if _whisper_model is not None:
-        return _whisper_model
-    from faster_whisper import WhisperModel
-    logger.info("Loading Whisper model '%s' (device=cpu, compute_type=int8)...", settings.stt_model)
-    _whisper_model = WhisperModel(settings.stt_model, device="cpu", compute_type="int8")
-    logger.info("Whisper model '%s' loaded.", settings.stt_model)
-    return _whisper_model
-
-
-async def _preload_whisper() -> None:
-    """Whisper modelini background thread'de yukle — startup bloklama olmaz."""
-    global _whisper_loading
-    if _whisper_model is not None or _whisper_loading or not settings.stt_model:
-        return
-    _whisper_loading = True
-    try:
-        import asyncio
-        await asyncio.to_thread(_get_whisper_model)
-    except Exception as exc:
-        logger.warning("Whisper preload failed (will retry on first use): %s", exc)
-    finally:
-        _whisper_loading = False
+from src.utils.audio import (
+    get_whisper_model as _get_whisper_model,
+    preload_whisper as _preload_whisper,
+)
 
 
 async def _preload_reranker() -> None:
@@ -418,39 +368,10 @@ async def _preload_embeddings() -> None:
         logger.warning("Embedding preload failed (will load on first use): %s", exc)
 
 
-def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sample_width: int = 2) -> bytes:
-    """Convert raw PCM bytes to WAV format for faster_whisper compatibility."""
-    wav_buffer = io.BytesIO()
-    with wave.open(wav_buffer, 'wb') as wav_file:
-        wav_file.setnchannels(channels)
-        wav_file.setsampwidth(sample_width)
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(pcm_data)
-    return wav_buffer.getvalue()
-
-
-
-
-async def _write_audio_tmp(audio_bytes: bytes) -> str:
-    """Ses baytlarını session dizinine (varsa) geçici MP3 olarak yazar.
-
-    Session dizinine yazılırsa on_chat_end'deki shutil.rmtree otomatik temizler.
-    Session yoksa system /tmp kullanılır.
-    """
-    try:
-        session_dir = cl.user_session.get("session_upload_dir")
-    except Exception:
-        session_dir = None
-
-    def _write():
-        """Kısa: `_write` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False, dir=session_dir or None)
-        tmp.write(audio_bytes)
-        tmp.flush()
-        path = tmp.name
-        tmp.close()
-        return path
-    return await asyncio.to_thread(_write)
+from src.utils.audio import (
+    pcm_to_wav as _pcm_to_wav,
+    write_audio_tmp as _write_audio_tmp,
+)
 
 
 async def _send_tts(text: str, parent_msg: cl.Message | None = None) -> None:
@@ -471,69 +392,7 @@ async def _send_tts(text: str, parent_msg: cl.Message | None = None) -> None:
 
 
 
-class _TtsStreamer:
-    """LLM streaming sırasında TTS sentezini paralel başlatır.
-
-    LLM hâlâ üretirken ilk cümle grubunu arka planda sentezler;
-    streaming bitince kalan kısımla birleştirir → tek MP3 → single audio element.
-
-    Kullanım:
-        streamer = _TtsStreamer.make(tts_enabled)
-        # streaming loop içinde:
-        if streamer: streamer.feed(content)
-        # streaming bittikten sonra:
-        if streamer: await streamer.send_to(msg)
-    """
-
-    _SENTENCE_END = re.compile(r"(?<=[.!?\n])\s")
-    _MIN_FIRST_CHARS = 150  # Bu kadar karakter birikince ilk chunk'ı arka planda başlat
-
-    def __init__(self, voice: str | None) -> None:
-        """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
-        self._voice = voice
-        self._buf = ""
-        self._first_task: asyncio.Task | None = None
-        self._split_pos = 0  # _buf'ta kaçıncı char'a kadar first_task kapsamında
-
-    def feed(self, chunk: str) -> None:
-        """Her streaming chunk'ını besle; eşik aşılınca arka planda TTS başlat."""
-        self._buf += chunk
-        if self._first_task is None and len(self._buf) >= self._MIN_FIRST_CHARS:
-            m = self._SENTENCE_END.search(self._buf, self._MIN_FIRST_CHARS)
-            if m:
-                self._split_pos = m.start() + 1
-                first_text = self._buf[: self._split_pos].strip()
-                self._first_task = asyncio.create_task(
-                    tts_synthesize(first_text, voice=self._voice)
-                )
-
-    async def send_to(self, parent_msg: cl.Message) -> None:
-        """Tüm sentezi tamamla, MP3'leri birleştir ve mesaja ekle."""
-        remaining = self._buf[self._split_pos :].strip()
-
-        first_audio = await self._first_task if self._first_task else None
-        second_audio = (
-            await tts_synthesize(remaining, voice=self._voice) if remaining else None
-        )
-
-        # MP3 byte'larını birleştir → tek audio element (seamless playback)
-        combined = (first_audio or b"") + (second_audio or b"")
-        if not combined:
-            return
-
-        tmp_path = await _write_audio_tmp(combined)
-        audio_el = cl.Audio(path=tmp_path, name="response.mp3", display="inline")
-        parent_msg.elements = list(getattr(parent_msg, "elements", None) or []) + [audio_el]
-        await parent_msg.update()
-
-    @classmethod
-    def make(cls, enabled: bool) -> "_TtsStreamer | None":
-        """TTS aktifse streamer oluştur, değilse None."""
-        if not enabled:
-            return None
-        voice_pref = cl.user_session.get("tts_voice", "auto")
-        voice = None if voice_pref == "auto" else voice_pref
-        return cls(voice=voice)
+from src.utils.audio import TtsStreamer as _TtsStreamer
 
 
 
@@ -585,12 +444,11 @@ async def _ingest_url(url: str, sess_dir: Path) -> dict | None:
 
         final_url, combined = await fetch_public_url_text(url)
         safe_name = safe_filename_from_url(final_url)
-        dest = sess_dir / safe_name
-        sess_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(sess_dir.mkdir, parents=True, exist_ok=True)
         combined = combined.strip()
         if not combined:
             return None
-        dest.write_text(combined, encoding="utf-8")
+        await asyncio.to_thread(dest.write_text, combined, encoding="utf-8")
         return await cl.make_async(ingest_file)(
             dest,
             extra_metadata=_ingest_metadata(safe_name),
@@ -782,10 +640,10 @@ async def on_audio_end():
 
     session_dir = Path(cl.user_session.get("session_upload_dir") or settings.upload_dir)
     audio_dir = session_dir / "audio"
-    audio_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(audio_dir.mkdir, parents=True, exist_ok=True)
     audio_path = audio_dir / f"recording-{uuid.uuid4().hex}.wav"
     wav_data = _pcm_to_wav(bytes(buf), sample_rate=24000, channels=1, sample_width=2)
-    audio_path.write_bytes(wav_data)
+    await asyncio.to_thread(audio_path.write_bytes, wav_data)
     cl.user_session.set("audio_buffer", bytearray())
 
     text = ""
@@ -1277,9 +1135,11 @@ def _build_source_elements(docs) -> list[cl.Text]:
             continue
         seen.add(dedup_key)
 
+        citation_name = f"[Kaynak {idx}]"
+
         if is_web:
             label, content = _format_web_source_panel(idx, doc, meta)
-            elements.append(cl.Text(name=label, content=content, display="side"))
+            elements.append(cl.Text(name=citation_name, content=content, display="side"))
             continue
 
         page_str = f" s.{page}" if page and str(page) not in {"", "?"} else ""
@@ -1294,14 +1154,13 @@ def _build_source_elements(docs) -> list[cl.Text]:
         scores = f"\nSkorlar: {', '.join(score_parts)}" if score_parts else ""
         excerpt = _clean_excerpt(getattr(doc, "page_content", "") or "", limit=900)
         url_line = f"\nURL: {url}" if url else ""
-        label = f"Kaynak {idx} · {src_short}{page_str}"
         content = (
             f"Kaynak {idx}: {src_short}{page_str}"
             f"{url_line}"
             f"{scores}\n\n"
             f"{excerpt}"
         ).strip()
-        elements.append(cl.Text(name=label, content=content, display="side"))
+        elements.append(cl.Text(name=citation_name, content=content, display="side"))
 
     return elements
 
@@ -1510,8 +1369,8 @@ async def on_message(message: cl.Message):
                     else _session_scoped_filename(original_name)
                 )
                 dest = sess_dir / dest_name
-                sess_dir.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(dest.write_bytes, src.read_bytes())
+                await asyncio.to_thread(sess_dir.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(lambda: dest.write_bytes(src.read_bytes()))
 
                 suffix_lower = dest.suffix.lower()
 
@@ -1528,7 +1387,7 @@ async def on_message(message: cl.Message):
                         transcript = " ".join(s.text.strip() for s in segments).strip()
                         if transcript:
                             txt_path = dest.with_suffix(".txt")
-                            txt_path.write_text(transcript, encoding="utf-8")
+                            await asyncio.to_thread(txt_path.write_text, transcript, encoding="utf-8")
                             result = await cl.make_async(ingest_file)(
                                 txt_path,
                                 display_name=f"{original_name}.txt",
@@ -1639,8 +1498,8 @@ async def on_message(message: cl.Message):
                 src = Path(getattr(f, "path"))
                 original_name = Path(getattr(f, "name", src.name) or src.name).name
                 dest = sess_dir / _session_scoped_filename(original_name)
-                sess_dir.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(src.read_bytes())
+                await asyncio.to_thread(sess_dir.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(lambda: dest.write_bytes(src.read_bytes()))
                 suffix = dest.suffix.lower()
                 # Ses dosyasi → Whisper STT → TXT olarak ingest
                 if suffix in {".mp3", ".wav", ".ogg", ".m4a", ".flac"}:
@@ -1650,7 +1509,7 @@ async def on_message(message: cl.Message):
                         transcript = " ".join(s.text.strip() for s in segments).strip()
                         if transcript:
                             txt_path = dest.with_suffix(".txt")
-                            txt_path.write_text(transcript, encoding="utf-8")
+                            await asyncio.to_thread(txt_path.write_text, transcript, encoding="utf-8")
                             result = await cl.make_async(ingest_file)(
                                 txt_path,
                                 display_name=f"{original_name}.txt",

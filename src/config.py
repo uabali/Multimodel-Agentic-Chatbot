@@ -144,6 +144,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("SUMMARY_TRIGGER_TOKENS"),
     )
 
+    history_max_messages_rag: int = Field(
+        default=6,
+        validation_alias=AliasChoices("HISTORY_MAX_MESSAGES_RAG"),
+    )
+    history_token_budget_rag: int = Field(
+        default=900,
+        validation_alias=AliasChoices("HISTORY_TOKEN_BUDGET_RAG"),
+    )
+    history_max_messages_chat: int = Field(
+        default=8,
+        validation_alias=AliasChoices("HISTORY_MAX_MESSAGES_CHAT"),
+    )
+    history_token_budget_chat: int = Field(
+        default=1300,
+        validation_alias=AliasChoices("HISTORY_TOKEN_BUDGET_CHAT"),
+    )
+    answer_hallucination_markers: list[str] = Field(
+        default=[
+            "ihtiyacım", "yapabilmem için", "kritik bilgi", "hesaplayabilmem",
+            "belirtmek isterim", "lütfen", "sunabilmem", "verebilmem"
+        ],
+        validation_alias=AliasChoices("ANSWER_HALLUCINATION_MARKERS"),
+    )
+
     # ── Qdrant tenant isolation (global retrieval without upload scope) ──
     qdrant_tenant_filter_enabled: bool = Field(
         default=True,
