@@ -315,13 +315,20 @@ KURALLAR:
 """
 
 
-def select_vision_prompt(question: str, image_names: list[str] | None = None) -> str:
+def select_vision_prompt(question: str, image_names: list[str] | list[dict] | None = None) -> str:
     """Soru içeriğine ve görsel dosya adına göre en uygun vision prompt'u seçer.
 
     Keyword eşleşmesi yapılır — LLM çağrısı gerekmez (sıfır gecikme).
     Eşleşme yoksa genel VISION_SYSTEM_PROMPT döner.
     """
-    combined = ((question or "") + " " + " ".join(image_names or [])).lower()
+    names = []
+    if image_names:
+        for item in image_names:
+            if isinstance(item, dict):
+                names.append(item.get("name", ""))
+            elif isinstance(item, str):
+                names.append(item)
+    combined = ((question or "") + " " + " ".join(names)).lower()
 
     if any(kw in combined for kw in (
         "fatura", "invoice", "makbuz", "receipt", "ödeme", "payment", "vergi", "tax",

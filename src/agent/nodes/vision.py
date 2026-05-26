@@ -47,9 +47,8 @@ async def vision_node(state: AgentState) -> AgentState:
         logger.warning("Vision: image_data is empty")
         return {**state, "generation": "Görsel verisi bulunamadı."}
 
-    logger.debug("Vision: processing images [count=%d, q_len=%d]", len(image_data), len(question))
-    
-    prompt = select_vision_prompt(question, image_data)
+    image_names = [img.get("name", "") for img in image_data if isinstance(img, dict)]
+    prompt = select_vision_prompt(question, image_names)
     parts = _build_vision_content_parts(image_data, question)
 
     llm = get_rag_llm(temperature=0.4, max_tokens=settings.rag_max_tokens)
