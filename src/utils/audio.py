@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import re
 import tempfile
 import wave
@@ -82,7 +83,26 @@ async def write_audio_tmp(audio_bytes: bytes) -> str:
         tmp.close()
         return path
 
-    return await asyncio.to_thread(_write)
+    path = await asyncio.to_thread(_write)
+    schedule_audio_tmp_cleanup(path)
+    return path
+
+
+def schedule_audio_tmp_cleanup(path: str, delay_seconds: float = 3600.0) -> None:
+    """Best-effort cleanup for temporary audio files after the UI has served them."""
+    async def _cleanup() -> None:
+        await asyncio.sleep(delay_seconds)
+        try:
+            await asyncio.to_thread(os.unlink, path)
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            logger.debug("Temporary audio cleanup failed for %s: %s", path, exc)
+
+    try:
+        asyncio.create_task(_cleanup())
+    except RuntimeError:
+        logger.debug("No running event loop; skipping temp audio cleanup for %s", path)
 
 
 class TtsStreamer:
@@ -122,7 +142,10 @@ class TtsStreamer:
             await tts_synthesize(remaining, voice=self._voice) if remaining else None
         )
 
-        combined = (first_audio or b"") + (second_audio or b"")
+        if first_audio and second_audio:
+            combined = await tts_synthesize(self._buf.strip(), voice=self._voice)
+        else:
+            combined = first_audio or second_audio or b""
         if not combined:
             return
 

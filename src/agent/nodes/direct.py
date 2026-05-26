@@ -18,7 +18,8 @@ from typing import Any
 import chainlit as cl
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from src.agent.routing import is_direct_support_query, is_web_query
+from src.agent.routing import is_direct_support_query, is_weather_query, is_web_query
+from src.agent.web_search import WebResultFormatter
 from src.agent.prompts import build_generator_prompt
 from src.agent.state import AgentState
 from src.config import settings
@@ -26,6 +27,9 @@ from src.agent.nodes.base import get_chat_llm, get_agent_llm, select_recent_hist
 from src.agent.nodes.generator import _final_answer_fields
 
 logger = logging.getLogger(__name__)
+
+_MAX_ABS_VALUE = 10**12
+_MAX_POWER_EXPONENT = 10_000
 
 _PLAIN_DIRECT_TOOL_RE = re.compile(
     r"("
@@ -85,7 +89,17 @@ def _safe_eval_math_expr(expression: str) -> str:
             op = type(node.op)
             if op not in _SAFE_MATH_OPS:
                 raise ValueError(f"Unsupported operator: {op.__name__}")
-            return _SAFE_MATH_OPS[op](_eval(node.left), _eval(node.right))
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if op is ast.Pow:
+                if abs(right) > _MAX_POWER_EXPONENT:
+                    raise ValueError(f"Exponent too large (max {_MAX_POWER_EXPONENT}).")
+                if abs(left) > _MAX_ABS_VALUE:
+                    raise ValueError(f"Base too large (max {_MAX_ABS_VALUE}).")
+            result = _SAFE_MATH_OPS[op](left, right)
+            if isinstance(result, (int, float)) and abs(result) > _MAX_ABS_VALUE:
+                raise ValueError(f"Result too large (max {_MAX_ABS_VALUE}).")
+            return result
         if isinstance(node, ast.UnaryOp):
             op = type(node.op)
             if op not in _SAFE_MATH_OPS:

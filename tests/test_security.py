@@ -96,6 +96,33 @@ def test_rate_limiter_separate_keys():
     assert allowed_b
 
 
+def test_rate_limiter_evicts_expired_keys(monkeypatch):
+    from src.middleware import rate_limiter
+    from src.middleware.rate_limiter import SlidingWindowLimiter
+
+    now = 1000.0
+    monkeypatch.setattr(rate_limiter.time, "monotonic", lambda: now)
+    lim = SlidingWindowLimiter(max_requests=1, window_seconds=10)
+    lim.check("old-ip")
+
+    now = 1011.0
+    lim.check("new-ip")
+
+    assert "old-ip" not in lim._buckets
+    assert "new-ip" in lim._buckets
+
+
+def test_rate_limiter_caps_key_count():
+    from src.middleware.rate_limiter import SlidingWindowLimiter
+
+    lim = SlidingWindowLimiter(max_requests=2, window_seconds=60, max_keys=2)
+    lim.check("ip-a")
+    lim.check("ip-b")
+    lim.check("ip-c")
+
+    assert len(lim._buckets) <= 2
+
+
 
 
 def test_xff_ignored_from_untrusted_client():
@@ -231,6 +258,21 @@ def test_config_endpoint_accepts_admin():
     assert resp.status_code == 200
 
 
+def test_config_vllm_alias_uses_config_rate_limit():
+    from fastapi.routing import APIRoute
+    from src.api.router import router
+    from src.middleware.rate_limiter import rate_limit_config
+
+    route = next(
+        route
+        for route in router.routes
+        if isinstance(route, APIRoute) and route.path == "/api/config/vllm"
+    )
+
+    dependencies = [dep.call for dep in route.dependant.dependencies]
+    assert rate_limit_config in dependencies
+
+
 def test_health_endpoint_public():
     """Health check must remain publicly accessible (no auth)."""
     from unittest.mock import AsyncMock
@@ -249,6 +291,14 @@ def test_health_endpoint_public():
                 resp = client.get("/api/health")
     assert resp.status_code == 200
 
+
+
+def test_calculator_rejects_huge_exponent():
+    from src.tools.calculator import calculator
+
+    result = calculator.invoke({"expression": "2**10000000000"})
+
+    assert "Exponent too large" in result
 
 
 
@@ -289,6 +339,51 @@ def test_url_guard_accepts_public_hostname(monkeypatch):
     monkeypatch.setattr(url_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
 
     assert url_guard.validate_public_http_url("https://example.com/page") == "https://example.com/page"
+
+
+@pytest.mark.anyio
+async def test_url_fetch_connects_to_validated_ip(monkeypatch):
+    from src.security import url_guard
+
+    captured = {}
+
+    class FakeWriter:
+        def write(self, data):
+            captured["request"] = data.decode("ascii")
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    async def fake_open_connection(*, host, port, ssl=None, server_hostname=None):
+        captured["host"] = host
+        captured["port"] = port
+        captured["server_hostname"] = server_hostname
+        return url_guard.asyncio.StreamReader(limit=2**16), FakeWriter()
+
+    async def fake_read_headers(reader, *, timeout, max_bytes):
+        return b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n", b""
+
+    async def fake_read_body(reader, *, initial, content_length, chunked, timeout, max_bytes):
+        return b"ok"
+
+    monkeypatch.setattr(url_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
+    monkeypatch.setattr(url_guard.asyncio, "open_connection", fake_open_connection)
+    monkeypatch.setattr(url_guard, "_read_headers", fake_read_headers)
+    monkeypatch.setattr(url_guard, "_read_body", fake_read_body)
+
+    final_url, text = await url_guard.fetch_public_url_text("https://example.com/page")
+
+    assert final_url == "https://example.com/page"
+    assert text == "ok"
+    assert captured["host"] == "93.184.216.34"
+    assert captured["port"] == 443
+    assert captured["server_hostname"] == "example.com"
 
 
 @pytest.mark.anyio

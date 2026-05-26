@@ -448,6 +448,7 @@ async def _ingest_url(url: str, sess_dir: Path) -> dict | None:
         combined = combined.strip()
         if not combined:
             return None
+        dest = sess_dir / _session_scoped_filename(safe_name)
         await asyncio.to_thread(dest.write_text, combined, encoding="utf-8")
         return await cl.make_async(ingest_file)(
             dest,

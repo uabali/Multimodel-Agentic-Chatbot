@@ -281,7 +281,12 @@ async def update_llm_config(
     )
 
 
-@router.put("/config/vllm", response_model=LLMConfigResponse, include_in_schema=False, dependencies=[Depends(require_admin)])
+@router.put(
+    "/config/vllm",
+    response_model=LLMConfigResponse,
+    include_in_schema=False,
+    dependencies=[Depends(require_admin), Depends(rate_limit_config)],
+)
 async def update_vllm_config(payload: Annotated[LLMUrlUpdate, Body(embed=False)]) -> LLMConfigResponse:
     """Kısa: `update_vllm_config` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
     return await update_llm_config(payload)

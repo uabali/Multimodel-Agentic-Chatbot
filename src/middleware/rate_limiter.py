@@ -43,11 +43,32 @@ _lock = asyncio.Lock()
 class SlidingWindowLimiter:
     """Per-key sliding window rate limiter backed by a deque of timestamps."""
 
-    def __init__(self, max_requests: int, window_seconds: float) -> None:
+    def __init__(self, max_requests: int, window_seconds: float, max_keys: int = 10_000) -> None:
         """Kısa: `__init__` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
         self.max_requests = max_requests
         self.window_seconds = window_seconds
+        self.max_keys = max_keys
         self._buckets: dict[str, Deque[float]] = {}
+
+    def _prune_expired_buckets(self, window_start: float) -> None:
+        empty_or_expired = [
+            key
+            for key, bucket in self._buckets.items()
+            if not bucket or bucket[-1] < window_start
+        ]
+        for key in empty_or_expired:
+            self._buckets.pop(key, None)
+
+    def _evict_oldest_keys(self) -> None:
+        overflow = len(self._buckets) - self.max_keys
+        if overflow <= 0:
+            return
+        oldest_keys = sorted(
+            self._buckets,
+            key=lambda key: self._buckets[key][-1] if self._buckets[key] else 0.0,
+        )[:overflow]
+        for key in oldest_keys:
+            self._buckets.pop(key, None)
 
     def check(self, key: str) -> tuple[bool, float]:
         """Return (allowed, retry_after_seconds).
@@ -57,6 +78,7 @@ class SlidingWindowLimiter:
         """
         now = time.monotonic()
         window_start = now - self.window_seconds
+        self._prune_expired_buckets(window_start)
 
         bucket = self._buckets.setdefault(key, deque())
 
@@ -70,6 +92,7 @@ class SlidingWindowLimiter:
             return False, max(0.0, retry_after)
 
         bucket.append(now)
+        self._evict_oldest_keys()
         return True, 0.0
 
 

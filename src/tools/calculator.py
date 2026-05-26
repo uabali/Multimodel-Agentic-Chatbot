@@ -19,6 +19,9 @@ _SAFE_OPS = {
     ast.UAdd: operator.pos,
 }
 
+_MAX_ABS_VALUE = 10**12
+_MAX_POWER_EXPONENT = 10_000
+
 
 def _safe_eval(node):
     """Kısa: `_safe_eval` işlevini yürütür. Bağlantı: modül akışıyla entegredir."""
@@ -32,7 +35,17 @@ def _safe_eval(node):
         op = type(node.op)
         if op not in _SAFE_OPS:
             raise ValueError(f"Unsupported operator: {op.__name__}")
-        return _SAFE_OPS[op](_safe_eval(node.left), _safe_eval(node.right))
+        left = _safe_eval(node.left)
+        right = _safe_eval(node.right)
+        if op is ast.Pow:
+            if abs(right) > _MAX_POWER_EXPONENT:
+                raise ValueError(f"Exponent too large (max {_MAX_POWER_EXPONENT}).")
+            if abs(left) > _MAX_ABS_VALUE:
+                raise ValueError(f"Base too large (max {_MAX_ABS_VALUE}).")
+        result = _SAFE_OPS[op](left, right)
+        if isinstance(result, (int, float)) and abs(result) > _MAX_ABS_VALUE:
+            raise ValueError(f"Result too large (max {_MAX_ABS_VALUE}).")
+        return result
     if isinstance(node, ast.UnaryOp):
         op = type(node.op)
         if op not in _SAFE_OPS:
