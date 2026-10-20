@@ -1,14 +1,41 @@
-# FRAPPE — Multimodal Agentic RAG Chatbot
+# Multimodal Agentic Chatbot (FRAPPE)
 
-FRAPPE is a local-first multimodal RAG chatbot built with Chainlit, LangGraph,
-Qdrant, BGE-M3 embeddings, a BGE reranker, llama.cpp, SQLite persistence, and
-Tavily web search.
+A local-first chatbot for grounded Turkish document Q&A with citations. It accepts image, PDF and voice input (faster-whisper STT, edge-tts TTS), falls back to web search when documents are not enough, and is traced with LangSmith.
 
-The project was developed as a graduation thesis prototype. Its main goal is to
-answer Turkish-heavy document questions with grounded citations, while still
-supporting direct chat, image input, voice input, web search, and session resume.
+## Overview
+
+- **Routed LangGraph pipeline.** Six routes: `rag`, `web`, `direct`, `vision`, `vision_rag`, `vision_search`.
+- **Grounding first.** A three-zone dense gate (`pass` / `soft` / `weak`) plus an LLM grader decide whether the retrieved context is enough. If it is not, the bot refuses gracefully instead of guessing.
+- **Citations.** Inline `[Kaynak N]` markers with source previews in the Chainlit side panel.
+- **Runs locally.** llama.cpp (Gemma-4-E4B GGUF), Qdrant hybrid retrieval with `BAAI/bge-m3`, `BAAI/bge-reranker-base` reranking, SQLite persistence and checkpoints.
+- **Context safety.** Token-aware context budgeting, and the runtime `n_ctx` is read from llama.cpp `/props`.
 
 ## Architecture
+
+```mermaid
+flowchart TB
+    UI["Chainlit UI<br/>text / image / PDF / voice"] --> STT["faster-whisper STT"]
+    UI --> R{"Router"}
+    STT --> R
+    R -- rag --> RW["Rewriter"] --> RT["Retriever<br/>Qdrant dense + BM25"] --> RR["bge-reranker"] --> GR{"Grader"}
+    GR -- sufficient --> GEN["Generator<br/>citations"]
+    GR -- needs live data --> WS["Web search (Tavily)"] --> GEN
+    GR -- insufficient --> REF["Graceful refusal"]
+    R -- web --> WS
+    R -- direct --> D["Direct response"]
+    R -- vision routes --> VI["Vision node"] --> RW
+    GEN --> TTS["edge-tts"]
+    GEN --> LLM["llama.cpp<br/>Gemma-4-E4B"]
+    GEN -. traces .-> LS["LangSmith (sanitized)"]
+```
+
+## Results
+
+Benchmark coming soon: answer faithfulness / citation accuracy on a Turkish document set, refusal precision, and time-to-first-token on llama.cpp. Manual test scenarios live in `tests/manual/`.
+
+---
+
+## Architecture (text view)
 
 ```text
 Chainlit UI
